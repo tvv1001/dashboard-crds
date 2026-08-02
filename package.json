@@ -22,17 +22,17 @@
 		"normalize-raw-iacontent": "tsx scripts/normalize-raw-iacontent.ts",
 		"migrate-raw-keys": "tsx scripts/migrate-raw-keys.ts",
 		"update-crd-log": "tsx scripts/update-crd-log.ts",
-		"query-target-crds-supervisor": "tsx scripts/query-target-crds-supervisor.ts",
-		"query-socrata-deeds": "tsx scripts/query-socrata-deeds.ts",
-		"download-pdfs": "tsx scripts/download-all-pdfs.ts",
-		"analyze-sec-resources": "tsx scripts/analyze-sec-resources.ts",
-		"okcountyrecords-crawler": "tsx scripts/okcountyrecords-crawler.ts",
-		"okcountyrecords-match-crds": "tsx scripts/okcountyrecords-match-crds.ts",
-		"okcountyrecords-county-crawl": "tsx scripts/okcountyrecords-county-crawl.ts",
-		"ingest-texas-bulk": "tsx scripts/ingest-texas-bulk.ts"
+		"query-target-crds-supervisor": "tsx scripts/query-target-crds-supervisor.ts"
 	},
 	"dependencies": {
 		"@upstash/redis": "^1.38.0",
+		"@vercel/analytics": "^2.0.1",
+		"@vercel/speed-insights": "^2.0.0",
+		"bottleneck": "^2.19.5",
+		"chokidar": "^5.0.0",
+		"d3": "^7.9.0",
+		"d3-force": "^3.0.0",
+		"minimist": "^1.2.8",
 		"axios": "^1.17.0",
 		"cheerio": "^1.2.0",
 		"dotenv": "^17.4.2",
@@ -45,14 +45,21 @@
 		"puppeteer-extra-plugin-stealth": "^2.11.2",
 		"react": "^19.2.6",
 		"react-dom": "^19.2.6",
-		"redis": "^5.12.1"
+		"redis": "^5.12.1",
+		"winston": "^3.13.0"
 	},
 	"devDependencies": {
 		"@types/node": "^25.9.1",
 		"@types/react": "^19.2.15",
 		"@types/react-dom": "^19.2.3",
+		"@types/d3": "^7.4.3",
+		"@types/d3-force": "^3.0.10",
 		"concurrently": "^9.2.1",
 		"puppeteer-core": "^25.4.0",
+		"jsdom": "^22.1.0",
+		"playwright": "^1.60.0",
+		"playwright-extra": "^4.3.6",
+		"sharp": "^0.34.5",
 		"tsx": "^4.22.3",
 		"typescript": "^6.0.3"
 	}

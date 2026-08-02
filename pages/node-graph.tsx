@@ -1,10 +1,28 @@
 import Head from 'next/head';
-import { useMemo, useState } from 'react';
+import Link from 'next/link';
+import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
+import * as d3 from 'd3';
 import { useSharedGraphState } from '../src/hooks/useSharedGraphState';
+import { parseCrdKey } from '../src/lib/parseKey';
+import { extractNamesFromPayload, getContentBlock } from '../src/lib/extractNames';
+import { toProperCaseName } from '../src/lib/format';
+import { PanelHeader } from '../src/components/panel/PanelHeader';
+import { StatusBox } from '../src/components/panel/StatusBox';
 
 function stringValue(value: unknown): string | undefined {
 	if (typeof value === 'string' && value.trim()) return value.trim();
 	return undefined;
+}
+
+// Like stringValue but also accepts numeric IDs (firmId/crdNumber are often
+// stored as numbers in FINRA/SEC payloads).
+function idValue(value: unknown): string | undefined {
+	if (typeof value === 'number' && Number.isFinite(value)) return String(value);
+	return stringValue(value);
+}
+
+function toArray(value: unknown): any[] {
+	return Array.isArray(value) ? value : [];
 }
 
 function readSnapshotPayload(detailJson: string | null) {
@@ -28,6 +46,8 @@ type GraphNode = {
 	id: string;
 	label: string;
 	kind: 'primary' | 'relation';
+	subLabel?: string;
+	loadKey?: string;
 };
 
 type GraphLink = {
@@ -48,6 +68,7 @@ function normalizeName(value: unknown): string | undefined {
 function getNameFromItem(item: Record<string, unknown>): string | undefined {
 	return (
 		normalizeName(item.firmName) ||
+		normalizeName(item.legalName) ||
 		normalizeName(item.organizationName) ||
 		normalizeName(item.orgName) ||
 		normalizeName(item.name) ||
@@ -59,40 +80,47 @@ function getNameFromItem(item: Record<string, unknown>): string | undefined {
 	);
 }
 
-function buildGraphData(payload: unknown, fallbackTitle: string) {
+// Builds the relationship graph directly from the resolved FINRA/SEC content
+// blocks (not the raw /api/key bundle) — employments become firm nodes,
+// direct/indirect owners become individual (or firm) nodes. Each relation
+// node carries a `loadKey` (source:type:crd) when the underlying record has
+// a resolvable CRD, so clicking it can drill into that entity's own record.
+function buildGraphData(contents: Array<Record<string, any> | null | undefined>, fallbackTitle: string) {
 	const nodes: GraphNode[] = [{ id: 'primary', label: fallbackTitle, kind: 'primary' }];
 	const links: GraphLink[] = [];
 	const seenNodeIds = new Set<string>(['primary']);
 
-	const addNode = (id: string, label: string, kind: 'primary' | 'relation') => {
+	const addNode = (id: string, label: string, kind: 'primary' | 'relation', subLabel?: string, loadKey?: string) => {
 		if (seenNodeIds.has(id)) return;
 		seenNodeIds.add(id);
-		nodes.push({ id, label, kind });
+		nodes.push({ id, label, kind, subLabel, loadKey });
 	};
 
-	const record = getRecordValue(payload);
-	if (!record) return { nodes, links };
-
-	const sourcePayload = getRecordValue(record.payload) ?? record;
-	const content = getRecordValue(sourcePayload.basicInformation) ? sourcePayload : record;
-
 	const relationArrays = [
-		['currentEmployments', 'Employment'],
-		['currentIAEmployments', 'Adviser'],
-		['directOwners', 'Direct owner'],
-		['indirectOwners', 'Indirect owner'],
-		['employments', 'Employment'],
+		['currentEmployments', 'Employment', 'firm'],
+		['currentIAEmployments', 'Adviser', 'firm'],
+		['directOwners', 'Direct owner', 'individual'],
+		['indirectOwners', 'Indirect owner', 'individual'],
 	] as const;
 
-	for (const [key, fallbackLabel] of relationArrays) {
-		const items = Array.isArray(content[key]) ? content[key] : [];
-		for (const [index, item] of items.entries()) {
-			const itemRecord = getRecordValue(item);
-			if (!itemRecord) continue;
-			const nodeLabel = getNameFromItem(itemRecord) || `${fallbackLabel} ${index + 1}`;
-			const nodeId = `relation-${key}-${index}`;
-			addNode(nodeId, nodeLabel, 'relation');
-			links.push({ source: 'primary', target: nodeId, label: fallbackLabel });
+	for (const content of contents) {
+		if (!content) continue;
+		for (const [key, fallbackLabel, relatedType] of relationArrays) {
+			const items = toArray(content[key]);
+			for (const [index, item] of items.entries()) {
+				const itemRecord = getRecordValue(item);
+				if (!itemRecord) continue;
+				const nodeLabel = getNameFromItem(itemRecord) || `${fallbackLabel} ${index + 1}`;
+				const crd = idValue(itemRecord.firmId) || idValue(itemRecord.crdNumber);
+				// Dedupe firms/owners that show up on both the FINRA and SEC
+				// content blocks for the same relationship.
+				const nodeId = crd ? `relation-${relatedType}-${crd}` : `relation-${key}-${index}`;
+				const loadKey = crd ? `finra:${relatedType}:${crd}` : undefined;
+				addNode(nodeId, nodeLabel, 'relation', stringValue(itemRecord.position) || fallbackLabel, loadKey);
+				if (!links.some((l) => l.source === 'primary' && l.target === nodeId)) {
+					links.push({ source: 'primary', target: nodeId, label: fallbackLabel });
+				}
+			}
 		}
 	}
 
@@ -100,7 +128,26 @@ function buildGraphData(payload: unknown, fallbackTitle: string) {
 }
 
 export default function NodeGraphPage() {
-	const { cache } = useSharedGraphState();
+	const { cache, setSnapshot, clear } = useSharedGraphState();
+
+	const [searchInput, setSearchInput] = useState('');
+	const [searchLoading, setSearchLoading] = useState(false);
+	const [searchError, setSearchError] = useState('');
+	const [detailTab, setDetailTab] = useState<'info' | 'log'>('info');
+	const [traceMode, setTraceMode] = useState(false);
+	const [clearNonConnected, setClearNonConnected] = useState(false);
+	const [theme, setTheme] = useState<'dark' | 'light'>('dark');
+	// Detail panel (PanelHeader/StatusBox) lives in a hamburger-triggered
+	// drawer — closed by default, opened either via the hamburger button or
+	// automatically whenever a node in the graph is selected/clicked.
+	const [drawerOpen, setDrawerOpen] = useState(false);
+	// Lightweight nodes added directly from a name/text search's full match
+	// list (no per-match detail fetch — same as the reference site's
+	// "build nodes from search hits" behavior). They render alongside
+	// whatever hub entity is currently loaded, and only get fully hydrated
+	// (via loadKey) when the user clicks one.
+	const [searchResultNodes, setSearchResultNodes] = useState<GraphNode[]>([]);
+	const [searchBanner, setSearchBanner] = useState<{ query: string; count: number } | null>(null);
 
 	const activeSnapshot = useMemo(() => {
 		return Object.values(cache).sort((a, b) => b.fetchedAt - a.fetchedAt)[0] ?? null;
@@ -108,539 +155,1006 @@ export default function NodeGraphPage() {
 
 	const parsedPayload = useMemo(() => readSnapshotPayload(activeSnapshot?.detailJson ?? null), [activeSnapshot]);
 
-	const primaryPayload = useMemo(() => {
-		const bundle = (parsedPayload as Record<string, unknown> | null)?.bundle || parsedPayload;
-		if (!bundle || typeof bundle !== 'object') return null;
-		const record = bundle as Record<string, unknown>;
-		return (
-			record.sources && typeof record.sources === 'object' ?
-				(record.sources as Record<string, unknown>).finra || (record.sources as Record<string, unknown>).sec
-			:	null) as Record<string, unknown> | null;
-	}, [parsedPayload]);
+	const parsedKeyInfo = useMemo(() => parseCrdKey(activeSnapshot?.resolvedKey || activeSnapshot?.key || ''), [activeSnapshot]);
+	const entityType: 'individual' | 'firm' = (parsedKeyInfo?.type as 'individual' | 'firm') || 'individual';
 
-	const basicInfo = useMemo(() => {
-		const source = primaryPayload?.payload || primaryPayload;
-		if (!source || typeof source !== 'object') return {} as Record<string, unknown>;
-		const record = source as Record<string, unknown>;
-		return (record.basicInformation as Record<string, unknown> | undefined) || (record.info as Record<string, unknown> | undefined) || {};
-	}, [primaryPayload]);
+	const finraContent = useMemo(() => getContentBlock(parsedPayload, 'finra', entityType), [parsedPayload, entityType]);
+	const secContent = useMemo(() => getContentBlock(parsedPayload, 'sec', entityType), [parsedPayload, entityType]);
+	const primaryContent = (finraContent?.basicInformation ? finraContent : secContent) as Record<string, any> | null;
+
+	const nameInfo = useMemo(() => extractNamesFromPayload(primaryContent, entityType), [primaryContent, entityType]);
 
 	const entityTitle = useMemo(() => {
-		return (
-			stringValue(basicInfo.firmName) ||
-			stringValue(basicInfo.orgName) ||
-			stringValue(basicInfo.organizationName) ||
-			stringValue(basicInfo.displayName) ||
-			stringValue(basicInfo.individualName) ||
-			stringValue(basicInfo.firstName) ||
-			stringValue(basicInfo.lastName) ||
-			stringValue(basicInfo.name) ||
-			activeSnapshot?.resolvedKey ||
-			activeSnapshot?.key ||
-			'Shared record'
-		);
-	}, [activeSnapshot, basicInfo]);
+		if (entityType === 'individual' && nameInfo.primary) return toProperCaseName(nameInfo.primary);
+		return nameInfo.primary || activeSnapshot?.resolvedKey || activeSnapshot?.key || 'Shared record';
+	}, [nameInfo, entityType, activeSnapshot]);
 
-	const entitySubtitle = useMemo(() => {
-		const city = stringValue(basicInfo.city);
-		const state = stringValue(basicInfo.state);
-		const location = city && state ? `${city}, ${state}` : city || state;
-		const status = stringValue(basicInfo.status) || stringValue(basicInfo.firmStatus) || stringValue(basicInfo.bcScope);
-		const source = activeSnapshot?.resolvedKey || activeSnapshot?.key || 'shared-cache';
-		return [location, status].filter(Boolean).join(' • ') || `Loaded from ${source}`;
-	}, [activeSnapshot, basicInfo]);
+	// Only used for the small "Investment Adviser" badge drawn on the primary
+	// graph node — the rest of the record detail (stats, badges, employment,
+	// disclosures, etc.) is now rendered by the shared PanelHeader/StatusBox
+	// components, identical to the main dashboard.
+	const roleRows = useMemo(() => {
+		const rows: string[] = [];
+		if (toArray(finraContent?.currentEmployments).length > 0) rows.push('Broker Regulated by FINRA');
+		if (toArray(finraContent?.currentIAEmployments).length > 0 || toArray(secContent?.currentIAEmployments).length > 0) rows.push('Investment Adviser');
+		return rows;
+	}, [finraContent, secContent]);
 
-	const cacheCount = Object.keys(cache).length;
-	const sharedLabel = activeSnapshot?.source === 'dashboard' ? 'Dashboard shared' : 'Shared cache';
+	// ── Search / load ─────────────────────────────────────────────────────────
+	// Fetches a single explicit key (e.g. "finra:firm:10409") from /api/key and,
+	// if found, stores it in the shared graph cache. Returns whether the
+	// backend actually found FINRA or SEC data for that key (as opposed to an
+	// empty/orphan placeholder), so callers can decide whether to try an
+	// alternate guess (e.g. individual vs firm) before giving up.
+	const fetchAndApplyKey = useCallback(
+		(key: string, requestKey: string, options?: { force?: boolean }) => {
+			return fetch(`/api/key?name=${encodeURIComponent(key)}${options?.force ? `&t=${Date.now()}` : ''}`)
+				.then(async (r) => {
+					const data = await r.json();
+					if (!r.ok) throw new Error(String(data?.error || `HTTP ${r.status}`));
+					return data;
+				})
+				.then((data) => {
+					const found = Boolean(data?.bundle?.sources?.finra?.found || data?.bundle?.sources?.sec?.found);
+					if (!found) return { found: false as const, data };
+					const resolvedKey = typeof data?.resolvedKey === 'string' ? data.resolvedKey : key;
+					const detailValue = typeof data?.rawPayload === 'string' ? data.rawPayload : JSON.stringify(data?.payload ?? data ?? null, null, 2);
+					const snapshot = { key: requestKey, resolvedKey, detailJson: detailValue, fetchedAt: Date.now(), source: 'shared' as const };
+					setSnapshot(requestKey, snapshot);
+					if (resolvedKey !== requestKey) setSnapshot(resolvedKey, snapshot);
+					return { found: true as const, data };
+				});
+		},
+		[setSnapshot],
+	);
+
+	// Loads an explicit, unambiguous key (source:type:crd, or type:crd) — used
+	// for Refresh and for clicking a relation node whose type is already known.
+	const loadKey = useCallback(
+		(key: string, options?: { force?: boolean }) => {
+			if (!key) return;
+			setSearchLoading(true);
+			setSearchError('');
+			fetchAndApplyKey(key, key, options)
+				.then((result) => {
+					if (!result.found) setSearchError(`No FINRA/SEC record found for ${key}`);
+				})
+				.catch((err: unknown) => {
+					setSearchError(err instanceof Error ? err.message : `Could not load data for ${key}`);
+				})
+				.finally(() => setSearchLoading(false));
+		},
+		[fetchAndApplyKey],
+	);
+
+	// A bare CRD number typed into the top search box is ambiguous (could be
+	// an individual or a firm) — the backend's plain-number lookup assumes
+	// "individual", so retry as "firm" when that comes back empty.
+	const loadCrdGuessingType = useCallback(
+		(digits: string) => {
+			setSearchLoading(true);
+			setSearchError('');
+			fetchAndApplyKey(digits, digits)
+				.then((result) => {
+					if (result.found) return result;
+					return fetchAndApplyKey(`firm:${digits}`, digits);
+				})
+				.then((result) => {
+					if (!result.found) setSearchError(`No FINRA/SEC record found for CRD ${digits}`);
+				})
+				.catch((err: unknown) => {
+					setSearchError(err instanceof Error ? err.message : `Could not load data for ${digits}`);
+				})
+				.finally(() => setSearchLoading(false));
+		},
+		[fetchAndApplyKey],
+	);
+
+	const runSearch = useCallback(() => {
+		const query = searchInput.trim();
+		if (!query) return;
+		if (/^\d+$/.test(query)) {
+			loadCrdGuessingType(query);
+			return;
+		}
+		setSearchLoading(true);
+		setSearchError('');
+		setSearchBanner(null);
+		fetch(`/api/redis-search?q=${encodeURIComponent(query)}`)
+			.then((r) => r.json())
+			.then((json) => {
+				const matches = Array.isArray(json?.matches) ? json.matches : Array.isArray(json?.results) ? json.results : [];
+				if (!matches.length) {
+					setSearchError(`No matches found for "${query}"`);
+					setSearchLoading(false);
+					return;
+				}
+				// A single unambiguous match — load it directly as the hub
+				// entity, same as before.
+				if (matches.length === 1) {
+					const only = matches[0];
+					const type = only.type === 'firm' ? 'firm' : only.type === 'individual' ? 'individual' : '';
+					const key = only.key || (type && only.crd ? `${type}:${only.crd}` : String(only.crd));
+					loadKey(key);
+					return;
+				}
+				// Multiple matches — build a lightweight node for every hit
+				// directly from the search-index metadata (no per-match detail
+				// fetch), so the graph shows ALL matches at once. Each node
+				// only gets fully hydrated when clicked (via its `loadKey`).
+				const capped = matches.slice(0, 100);
+				const newNodes: GraphNode[] = capped
+					.map((match: any): GraphNode | null => {
+						const type = match.type === 'firm' ? 'firm' : match.type === 'individual' ? 'individual' : '';
+						const crd = idValue(match.crd);
+						if (!type || !crd) return null;
+						const id = `search-${type}-${crd}`;
+						const label = stringValue(match.name) || `${type === 'firm' ? 'Firm' : 'Individual'} ${crd}`;
+						return { id, label, kind: 'relation', subLabel: 'Search match', loadKey: match.key || `${type}:${crd}` };
+					})
+					.filter((n: GraphNode | null): n is GraphNode => Boolean(n));
+				setSearchResultNodes((prev) => {
+					const seen = new Set(prev.map((n) => n.id));
+					const merged = prev.slice();
+					for (const node of newNodes) {
+						if (seen.has(node.id)) continue;
+						seen.add(node.id);
+						merged.push(node);
+					}
+					return merged;
+				});
+				setSearchBanner({ query, count: newNodes.length });
+				setSearchLoading(false);
+			})
+			.catch((err: unknown) => {
+				setSearchError(err instanceof Error ? err.message : 'Search failed');
+				setSearchLoading(false);
+			});
+	}, [searchInput, loadKey, loadCrdGuessingType]);
+
+	const handleSearch = useCallback(
+		(event: React.FormEvent) => {
+			event.preventDefault();
+			runSearch();
+		},
+		[runSearch],
+	);
+
+	const handleRefresh = useCallback(() => {
+		const key = activeSnapshot?.resolvedKey || activeSnapshot?.key;
+		if (key) loadKey(key, { force: true });
+	}, [activeSnapshot, loadKey]);
+
+	const handleResetSession = useCallback(() => {
+		clear();
+		setSearchInput('');
+		setSearchError('');
+		setTraceMode(false);
+		setClearNonConnected(false);
+		setDetailTab('info');
+		setFocusedNodeId('primary');
+		setDrawerOpen(false);
+		setSearchResultNodes([]);
+		setSearchBanner(null);
+	}, [clear]);
+
 	const [focusedNodeId, setFocusedNodeId] = useState('primary');
-	const graphData = useMemo(() => buildGraphData(parsedPayload, entityTitle), [parsedPayload, entityTitle]);
-	const graphWidth = 720;
-	const graphHeight = 480;
-	const graphRadius = Math.min(graphWidth, graphHeight) / 2 - 80;
-	const focusedNode = useMemo(() => graphData.nodes.find((node) => node.id === focusedNodeId) ?? graphData.nodes[0], [graphData.nodes, focusedNodeId]);
-	const graphPositions = useMemo(() => {
-		const positions: Record<string, { x: number; y: number }> = {};
-		const total = Math.max(graphData.nodes.length, 1);
-		graphData.nodes.forEach((node, index) => {
-			if (node.id === focusedNode.id) {
-				positions[node.id] = { x: graphWidth / 2, y: graphHeight / 2 };
-				return;
-			}
-			const angle = ((index + 1) / Math.max(total, 1)) * Math.PI * 2 - Math.PI / 2;
-			const radius = index === 0 ? 0 : graphRadius * 0.92;
-			positions[node.id] = {
-				x: graphWidth / 2 + Math.cos(angle) * radius,
-				y: graphHeight / 2 + Math.sin(angle) * radius,
-			};
-		});
-		return positions;
-	}, [focusedNode.id, graphData.nodes, graphHeight, graphRadius, graphWidth]);
-	const focusedSubtitle = useMemo(() => {
-		if (!focusedNode) return entitySubtitle;
-		return focusedNode.id === 'primary' ? entitySubtitle : `${focusedNode.label} • connected relationship`;
-	}, [entitySubtitle, focusedNode]);
+	// Reset the focused/highlighted node whenever a new entity is loaded so
+	// stale node ids from the previous graph don't linger.
+	useEffect(() => {
+		setFocusedNodeId('primary');
+	}, [activeSnapshot?.resolvedKey]);
 
-	const selectNode = (nodeId: string) => {
-		setFocusedNodeId(nodeId);
-	};
+	const graphData = useMemo(() => {
+		const hub = activeSnapshot ? buildGraphData([finraContent, secContent], entityTitle) : { nodes: [] as GraphNode[], links: [] as GraphLink[] };
+		if (searchResultNodes.length === 0) return hub;
+		const hubIds = new Set(hub.nodes.map((n) => n.id));
+		const extraNodes = searchResultNodes.filter((n) => !hubIds.has(n.id));
+		return { nodes: [...hub.nodes, ...extraNodes], links: hub.links };
+	}, [activeSnapshot, finraContent, secContent, entityTitle, searchResultNodes]);
+	const focusedNode = useMemo(() => graphData.nodes.find((node) => node.id === focusedNodeId) ?? graphData.nodes[0], [graphData.nodes, focusedNodeId]);
+
+	// Nodes/links kept visible when "Clear non-connected" is active: the
+	// focused node plus anything directly linked to it.
+	const connectedNodeIds = useMemo(() => {
+		if (!clearNonConnected) return null;
+		const ids = new Set<string>([focusedNodeId]);
+		for (const link of graphData.links) {
+			if (link.source === focusedNodeId) ids.add(link.target);
+			if (link.target === focusedNodeId) ids.add(link.source);
+		}
+		return ids;
+	}, [clearNonConnected, focusedNodeId, graphData.links]);
+
+	const visibleNodes = useMemo(() => (connectedNodeIds ? graphData.nodes.filter((n) => connectedNodeIds.has(n.id)) : graphData.nodes), [connectedNodeIds, graphData.nodes]);
+	const visibleLinks = useMemo(
+		() => (connectedNodeIds ? graphData.links.filter((l) => connectedNodeIds.has(l.source) && connectedNodeIds.has(l.target)) : graphData.links),
+		[connectedNodeIds, graphData.links],
+	);
+
+	// When Trace Mode is on, dim everything except the focused node and its
+	// direct neighbors so the highlighted path stands out.
+	const traceConnectedIds = useMemo(() => {
+		if (!traceMode) return null;
+		const ids = new Set<string>([focusedNodeId]);
+		for (const link of graphData.links) {
+			if (link.source === focusedNodeId) ids.add(link.target);
+			if (link.target === focusedNodeId) ids.add(link.source);
+		}
+		return ids;
+	}, [traceMode, focusedNodeId, graphData.links]);
+
+	const svgRef = useRef<SVGSVGElement>(null);
+	const zoomBehaviorRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
+	const [transform, setTransform] = useState<d3.ZoomTransform>(d3.zoomIdentity);
+	const [graphPositions, setGraphPositions] = useState<Record<string, { x: number; y: number }>>({});
+
+	// Graph dimensions
+	const width = 1200;
+	const height = 800;
+
+	// D3 Zoom Setup
+	useEffect(() => {
+		if (svgRef.current) {
+			const zoom = d3
+				.zoom<SVGSVGElement, unknown>()
+				.scaleExtent([0.1, 4])
+				.on('zoom', (event) => {
+					setTransform(event.transform);
+				});
+			zoomBehaviorRef.current = zoom;
+			d3.select(svgRef.current).call(zoom);
+		}
+	}, []);
+
+	const handleCenter = useCallback(() => {
+		if (svgRef.current && zoomBehaviorRef.current) {
+			d3.select(svgRef.current).transition().duration(300).call(zoomBehaviorRef.current.transform, d3.zoomIdentity);
+		} else {
+			setTransform(d3.zoomIdentity);
+		}
+	}, []);
+
+	// D3 Force Simulation
+	useEffect(() => {
+		if (graphData.nodes.length === 0) return;
+
+		const d3Nodes = graphData.nodes.map((n) => ({
+			...n,
+			x: width / 2 + (Math.random() - 0.5) * 40,
+			y: height / 2 + (Math.random() - 0.5) * 40,
+		}));
+		const d3Links = graphData.links.map((l) => ({ ...l }));
+
+		// Charge repulsion needs to scale down as node count grows, otherwise
+		// large unlinked clusters (e.g. 100 search-result nodes with no links
+		// between them) fly apart far outside the canvas — there's nothing
+		// pulling them back together besides forceCenter, which only
+		// re-centers the layout's centroid rather than acting as a spring.
+		const chargeStrength = -Math.min(800, 2200 / Math.sqrt(d3Nodes.length));
+
+		const simulation = d3
+			.forceSimulation(d3Nodes as d3.SimulationNodeDatum[])
+			.force(
+				'link',
+				d3
+					.forceLink(d3Links)
+					.id((d: any) => d.id)
+					.distance(140),
+			)
+			.force('charge', d3.forceManyBody().strength(chargeStrength))
+			.force('center', d3.forceCenter(width / 2, height / 2))
+			// Gentle spring back toward the canvas center — keeps unlinked
+			// nodes (which forceCenter alone can't restrain) within bounds.
+			.force('x', d3.forceX(width / 2).strength(0.05))
+			.force('y', d3.forceY(height / 2).strength(0.05))
+			.force('collide', d3.forceCollide(40));
+
+		simulation.on('tick', () => {
+			const pos: Record<string, { x: number; y: number }> = {};
+			d3Nodes.forEach((n) => {
+				if (n.id) {
+					pos[n.id] = { x: n.x ?? 0, y: n.y ?? 0 };
+				}
+			});
+			setGraphPositions(pos);
+		});
+
+		return () => {
+			simulation.stop();
+		};
+	}, [graphData]);
+
+	const selectNode = useCallback(
+		(nodeId: string) => {
+			setFocusedNodeId(nodeId);
+			// Selecting any node (including the primary/hub node) reveals the
+			// detail drawer, matching the reference site's "closed until a
+			// node is picked" behavior.
+			setDrawerOpen(true);
+			if (nodeId === 'primary') return;
+			const node = graphData.nodes.find((n) => n.id === nodeId);
+			// Drill into the connected entity's own record (firm/individual)
+			// when it has a resolvable CRD, so clicking a relation node
+			// actually reveals that entity's data instead of just a label.
+			if (node?.loadKey) {
+				loadKey(node.loadKey);
+				// A clicked search-result node becomes the new hub entity (with
+				// its own "primary" node id in the rebuilt hub graph) — drop it
+				// from the lightweight search layer so it isn't shown twice.
+				if (nodeId.startsWith('search-')) {
+					setSearchResultNodes((prev) => prev.filter((n) => n.id !== nodeId));
+				}
+			}
+		},
+		[graphData.nodes, loadKey],
+	);
 
 	return (
 		<>
 			<Head>
-				<title>Node Graph • FINRA / SEC</title>
+				<title>{entityTitle ? `${entityTitle} • Node Graph` : 'Node Graph'} • FINRA / SEC</title>
 			</Head>
 
-			<div className='node-graph-page'>
-				<header className='node-graph-hero'>
-					<div className='node-graph-hero-copy'>
-						<p className='node-graph-eyebrow'>Relationship explorer</p>
-						<h1>Network graph</h1>
-						<p className='node-graph-subtitle'>Trace the firms, individuals, and ownership links behind the selected record without losing context.</p>
+			<div
+				className={`node-graph-page fullscreen-mode theme-${theme}`}
+				data-theme={theme}>
+				<header className='fg-header'>
+					<div className='fg-header-bar'>
+						<div className='fg-header-brand'>
+							<span className='fg-logo'>FINRA</span>
+						</div>
+						<form
+							className='fg-search-form'
+							onSubmit={handleSearch}>
+							<input
+								className='fg-search-input'
+								type='text'
+								placeholder='firm, person, CRD/SEC#'
+								value={searchInput}
+								onChange={(e) => setSearchInput(e.target.value)}
+							/>
+							<button
+								type='submit'
+								className='fg-search-btn'
+								disabled={searchLoading}>
+								Search
+							</button>
+						</form>
+						<div className='fg-header-actions'>
+							<Link
+								href='/'
+								className='fg-btn'>
+								Dashboard
+							</Link>
+							<button
+								type='button'
+								onClick={runSearch}
+								className='fg-send-btn'
+								aria-label='Search'
+								disabled={searchLoading}>
+								➤
+							</button>
+							{activeSnapshot && (
+								<button
+									type='button'
+									onClick={() => setDrawerOpen((open) => !open)}
+									className={`fg-hamburger-btn${drawerOpen ? ' active' : ''}`}
+									aria-label='Toggle details panel'
+									aria-expanded={drawerOpen}>
+									☰
+								</button>
+							)}
+						</div>
 					</div>
-					<div className='node-graph-actions'>
-						<button
-							type='button'
-							onClick={() => selectNode('primary')}>
-							Focus selection
-						</button>
-						<button
-							type='button'
-							className='secondary'
-							onClick={() => selectNode('primary')}>
-							Reset view
-						</button>
-					</div>
+					{searchError && <div className='fg-search-error'>{searchError}</div>}
+					{searchBanner && (
+						<div className='fg-search-banner'>
+							<span>
+								Added {searchBanner.count} node{searchBanner.count === 1 ? '' : 's'} for &quot;{searchBanner.query}&quot;
+							</span>
+							<button
+								type='button'
+								className='fg-search-banner-close'
+								onClick={() => setSearchBanner(null)}
+								aria-label='Dismiss'>
+								✕
+							</button>
+						</div>
+					)}
 				</header>
 
-				<section className='node-graph-workspace'>
-					<aside className='node-graph-card node-graph-sidebar'>
-						<div className='card-heading'>
-							<p className='card-label'>Selection stack</p>
-							<h2>Active path</h2>
+				<main className='graph-main-canvas'>
+					{searchLoading && (
+						<div className='fg-loading-overlay'>
+							<span>Loading…</span>
 						</div>
-						<div className='entity-pill'>{entityTitle}</div>
-						<ul>
-							<li>
-								<span className='dot teal' />
-								Selected node
-							</li>
-							<li>
-								<span className='dot blue' />
-								Connected firm
-							</li>
-							<li>
-								<span className='dot purple' />
-								Owner / employee link
-							</li>
-						</ul>
-						<div className='mini-metrics'>
-							<div>
-								<span>Cached records</span>
-								<strong>{cacheCount}</strong>
-							</div>
-							<div>
-								<span>Shared state</span>
-								<strong>{sharedLabel}</strong>
-							</div>
+					)}
+					{!activeSnapshot && graphData.nodes.length === 0 && !searchLoading && (
+						<div className='fg-empty-card'>
+							<p className='fg-empty-eyebrow'>Search for a firm, person, or CRD/SEC# to begin.</p>
 						</div>
-					</aside>
-
-					<main className='node-graph-card node-graph-canvas'>
-						<div className='canvas-toolbar'>
-							<div className='canvas-toolbar-title'>Interactive graph</div>
-							<div className='canvas-toolbar-meta'>
-								<span className='status-pill'>Live</span>
-								<span className='status-pill muted'>Synced</span>
-							</div>
-						</div>
-						<div className='canvas-surface'>
-							<svg
-								className='graph-svg'
-								viewBox={`0 0 ${graphWidth} ${graphHeight}`}
-								role='img'
-								aria-label='Relationship graph'>
-								{graphData.links.map((link) => {
-									const sourcePos = graphPositions[link.source];
-									const targetPos = graphPositions[link.target];
-									if (!sourcePos || !targetPos) return null;
-									return (
-										<line
-											key={`${link.source}-${link.target}`}
-											className='graph-link'
-											x1={sourcePos.x}
-											y1={sourcePos.y}
-											x2={targetPos.x}
-											y2={targetPos.y}
+					)}
+					<svg
+						ref={svgRef}
+						className='graph-svg'
+						viewBox={`0 0 ${width} ${height}`}
+						preserveAspectRatio='xMidYMid meet'
+						role='img'
+						aria-label='Relationship graph'>
+						<g transform={transform.toString()}>
+							{visibleLinks.map((link) => {
+								const sourcePos = graphPositions[link.source];
+								const targetPos = graphPositions[link.target];
+								if (!sourcePos || !targetPos) return null;
+								const dimmed = traceConnectedIds ? !(traceConnectedIds.has(link.source) && traceConnectedIds.has(link.target)) : false;
+								return (
+									<line
+										key={`${link.source}-${link.target}`}
+										className={`graph-link-glow${dimmed ? ' dimmed' : ''}`}
+										x1={sourcePos.x}
+										y1={sourcePos.y}
+										x2={targetPos.x}
+										y2={targetPos.y}
+									/>
+								);
+							})}
+							{visibleNodes.map((node) => {
+								const position = graphPositions[node.id];
+								if (!position) return null;
+								const isPrimary = node.kind === 'primary';
+								const isActive = focusedNodeId === node.id;
+								const dimmed = traceConnectedIds ? !traceConnectedIds.has(node.id) : false;
+								return (
+									<g
+										key={node.id}
+										className={`graph-node-group${dimmed ? ' dimmed' : ''}`}
+										onClick={() => selectNode(node.id)}>
+										<circle
+											className={`graph-node ${node.kind}${isActive ? ' active' : ''}`}
+											cx={position.x}
+											cy={position.y}
+											r={isPrimary ? 12 : 8}
 										/>
-									);
-								})}
-								{graphData.nodes.map((node) => {
-									const position = graphPositions[node.id];
-									if (!position) return null;
-									return (
-										<g key={node.id}>
-											<rect
-												className={`graph-node ${node.kind}${focusedNodeId === node.id ? ' active' : ''}`}
-												x={position.x - (node.kind === 'primary' ? 68 : 53)}
-												y={position.y - (node.kind === 'primary' ? 22 : 18)}
-												width={node.kind === 'primary' ? 136 : 106}
-												height={node.kind === 'primary' ? 44 : 36}
-												rx={12}
-												ry={12}
-												onClick={() => selectNode(node.id)}
-												onKeyDown={(event) => {
-													if (event.key === 'Enter' || event.key === ' ') {
-														event.preventDefault();
-														selectNode(node.id);
-													}
-												}}
-												role='button'
-												tabIndex={0}
+										{isPrimary && roleRows.includes('Investment Adviser') && (
+											<circle
+												className='graph-node-adviser-badge'
+												cx={position.x + 14}
+												cy={position.y - 8}
+												r={5}
 											/>
-											<text
-												x={position.x}
-												y={position.y + 1}
-												className={`graph-label${focusedNodeId === node.id ? ' active' : ''}`}
-												onClick={() => selectNode(node.id)}>
-												{node.label}
-											</text>
-										</g>
-									);
-								})}
-							</svg>
-							<div className='canvas-overlay'>
-								<p>{focusedNode.label}</p>
-								<span>{focusedSubtitle}</span>
-							</div>
-						</div>
-					</main>
+										)}
+										<text
+											x={position.x}
+											y={position.y - (isPrimary ? 20 : 16)}
+											className={`graph-label${isActive ? ' active' : ''}`}>
+											{node.label}
+										</text>
+									</g>
+								);
+							})}
+						</g>
+					</svg>
+				</main>
 
-					<aside className='node-graph-card node-graph-details'>
-						<div className='card-heading'>
-							<p className='card-label'>Selected record</p>
-							<h2>Relationship profile</h2>
+				{(activeSnapshot || graphData.nodes.length > 0) && (
+					<div className='fg-toolbar-dock'>
+						<div className='fg-toolbar'>
+							<button
+								className='fg-toolbar-btn'
+								onClick={handleRefresh}>
+								Refresh ⟳
+							</button>
+							<button
+								className={`fg-toolbar-btn${traceMode ? ' active' : ''}`}
+								onClick={() => setTraceMode((v) => !v)}>
+								Trace Mode
+							</button>
+							<button
+								className='fg-toolbar-btn danger'
+								onClick={handleResetSession}>
+								Reset Session
+							</button>
 						</div>
-						<div className='detail-card'>
-							<div className='detail-pill'>{activeSnapshot?.resolvedKey || 'shared-cache'}</div>
-							<h3>{focusedNode.label}</h3>
-							<p>{focusedSubtitle}</p>
+						<div className='fg-toolbar'>
+							<button
+								className={`fg-toolbar-btn${clearNonConnected ? ' active' : ''}`}
+								onClick={() => setClearNonConnected((v) => !v)}>
+								Clear non-connected
+							</button>
+							<button
+								className='fg-toolbar-btn'
+								onClick={() => {
+									setClearNonConnected(false);
+									setFocusedNodeId('primary');
+								}}>
+								Clear Highlight
+							</button>
 						</div>
-						<div className='detail-list'>
-							<div>
-								<span>Cache source</span>
-								<strong>{sharedLabel}</strong>
-							</div>
-							<div>
-								<span>Cached entries</span>
-								<strong>{cacheCount}</strong>
-							</div>
+						<div className='fg-toolbar fg-toolbar-center-row'>
+							<button
+								className='fg-toolbar-btn fg-center-btn'
+								onClick={handleCenter}>
+								Center ✦
+							</button>
+							<button
+								className='fg-theme-toggle'
+								onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+								aria-label='Toggle theme'>
+								{theme === 'dark' ? '☀️' : '🌙'}
+							</button>
+						</div>
+					</div>
+				)}
+
+				{activeSnapshot && (
+					<aside className={`node-detail-drawer${drawerOpen ? ' open' : ''}`}>
+						<div className='sidebar-header'>
+							<button
+								type='button'
+								className='drawer-close-btn'
+								onClick={() => setDrawerOpen(false)}
+								aria-label='Close details panel'>
+								✕
+							</button>
+							<h1>{entityTitle}</h1>
+							{roleRows.length > 0 && (
+								<div className='role-rows'>
+									{roleRows.map((row) => (
+										<div
+											key={row}
+											className='role-row'>
+											<span className='role-dot' />
+											{row}
+										</div>
+									))}
+								</div>
+							)}
+						</div>
+
+						<div className='sidebar-content'>
+							{/* Reuse the exact same header + detail components as the main
+							    dashboard so this panel shows identical content (name/status
+							    badges, profile links, general info, registration,
+							    disclosures, employment, exams, owners, etc.). */}
+							<PanelHeader
+								activeKey={activeSnapshot.resolvedKey || activeSnapshot.key}
+								payloads={[]}
+								detailJson={activeSnapshot.detailJson}
+								onSelectKey={loadKey}
+							/>
+							<StatusBox
+								statusMsg=''
+								statusHtml=''
+								detailJson={activeSnapshot.detailJson}
+								panelLoading={searchLoading}
+								activeKey={activeSnapshot.resolvedKey || activeSnapshot.key}
+								fetchLog={[]}
+								onClearLog={() => {}}
+								onSelectKey={loadKey}
+							/>
 						</div>
 					</aside>
-				</section>
+				)}
 			</div>
 
 			<style
 				jsx
 				global>{`
-				.node-graph-page {
-					min-height: 100%;
-					padding: 24px 24px 32px;
-					background: radial-gradient(circle at top left, rgba(79, 209, 197, 0.16), transparent 30%), linear-gradient(135deg, rgba(10, 16, 28, 0.96), rgba(4, 8, 16, 0.98));
-					color: var(--text-primary);
-					font-family: var(--font-sans);
-				}
-				.node-graph-hero {
-					display: flex;
-					align-items: flex-start;
-					justify-content: space-between;
-					gap: 16px;
-					margin-bottom: 18px;
-				}
-				.node-graph-eyebrow {
-					margin: 0 0 6px;
-					font-size: 0.76rem;
-					font-weight: 800;
-					letter-spacing: 0.16em;
-					text-transform: uppercase;
-					color: var(--cyan-bright);
-				}
-				.node-graph-hero h1 {
-					margin: 0 0 8px;
-					font-size: 1.8rem;
-					font-weight: 800;
-					letter-spacing: -0.02em;
-				}
-				.node-graph-subtitle {
+				html, body, #__next, .app-shell, .app-page {
+					height: 100%;
 					margin: 0;
-					max-width: 700px;
-					color: var(--text-secondary);
-					line-height: 1.58;
+					padding: 0;
+					overflow: hidden;
 				}
-				.node-graph-actions {
+				.node-graph-page.fullscreen-mode {
 					display: flex;
-					gap: 10px;
+					flex-direction: column;
+					width: 100vw;
+					height: 100vh;
+					background: #040810;
+					color: #ffffff;
+					font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
+					position: absolute;
+					top: 0;
+					left: 0;
+					z-index: 9999;
 				}
-				.node-graph-actions button {
-					border: 0;
-					border-radius: 999px;
-					padding: 10px 14px;
-					background: linear-gradient(135deg, var(--cyan), var(--violet));
-					color: #07111f;
-					font-weight: 700;
+				.node-graph-page.theme-light {
+					background: #f3f4f6;
+					color: #111827;
+				}
+
+				/* Top header bar */
+				.fg-header {
+					flex-shrink: 0;
+					background: #000000;
+					border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+				}
+				.theme-light .fg-header {
+					background: #ffffff;
+					border-bottom-color: rgba(0, 0, 0, 0.08);
+				}
+				.fg-header-bar {
+					display: flex;
+					align-items: center;
+					gap: 16px;
+					padding: 10px 16px;
+				}
+				.fg-header-brand {
+					flex-shrink: 0;
+				}
+				.fg-logo {
+					font-weight: 800;
+					letter-spacing: 0.05em;
+					font-size: 1rem;
+					color: #f97316;
+				}
+				.fg-search-form {
+					flex: 1;
+					display: flex;
+					gap: 8px;
+					max-width: 480px;
+				}
+				.fg-search-input {
+					flex: 1;
+					padding: 8px 12px;
+					border-radius: 6px;
+					border: 1px solid rgba(255, 255, 255, 0.15);
+					background: rgba(255, 255, 255, 0.05);
+					color: inherit;
+					font-size: 0.85rem;
+				}
+				.theme-light .fg-search-input {
+					background: #f3f4f6;
+					border-color: rgba(0, 0, 0, 0.15);
+				}
+				.fg-search-btn {
+					padding: 8px 14px;
+					border-radius: 6px;
+					border: 1px solid rgba(255, 255, 255, 0.2);
+					background: transparent;
+					color: inherit;
+					font-weight: 600;
+					font-size: 0.8rem;
 					cursor: pointer;
 				}
-				.node-graph-actions button.secondary {
-					background: rgba(255, 255, 255, 0.08);
-					color: var(--text-primary);
+				.fg-header-actions {
+					display: flex;
+					align-items: center;
+					gap: 8px;
+					flex-shrink: 0;
 				}
-				.node-graph-workspace {
-					display: grid;
-					grid-template-columns: 240px minmax(0, 1fr) 280px;
-					gap: 16px;
-					align-items: start;
+				.fg-btn {
+					padding: 8px 14px;
+					border-radius: 6px;
+					border: 1px solid rgba(255, 255, 255, 0.2);
+					background: transparent;
+					color: inherit;
+					font-weight: 600;
+					font-size: 0.8rem;
+					text-decoration: none;
+					cursor: pointer;
 				}
-				.node-graph-card {
-					background: rgba(7, 13, 24, 0.88);
-					border: 1px solid rgba(255, 255, 255, 0.08);
-					border-radius: 20px;
-					box-shadow: 0 16px 40px rgba(0, 0, 0, 0.24);
-					backdrop-filter: blur(12px);
+				.fg-send-btn {
+					width: 34px;
+					height: 34px;
+					border-radius: 6px;
+					border: none;
+					background: #2563eb;
+					color: white;
+					cursor: pointer;
 				}
-				.node-graph-sidebar,
-				.node-graph-details {
-					padding: 16px;
-				}
-				.card-heading {
-					margin-bottom: 12px;
-				}
-				.card-label {
-					margin: 0 0 4px;
-					font-size: 0.72rem;
-					font-weight: 800;
-					letter-spacing: 0.14em;
-					text-transform: uppercase;
-					color: var(--text-muted);
-				}
-				.card-heading h2 {
-					margin: 0;
+				.fg-hamburger-btn {
+					width: 34px;
+					height: 34px;
+					border-radius: 6px;
+					border: 1px solid rgba(255, 255, 255, 0.2);
+					background: transparent;
+					color: inherit;
 					font-size: 1rem;
+					cursor: pointer;
 				}
-				.entity-pill {
-					display: inline-flex;
+				.fg-hamburger-btn.active {
+					background: #2563eb;
+					border-color: #2563eb;
+					color: #ffffff;
+				}
+				.theme-light .fg-hamburger-btn {
+					border-color: rgba(0, 0, 0, 0.2);
+				}
+				.fg-search-error {
+					padding: 4px 16px 8px;
+					color: #f87171;
+					font-size: 0.8rem;
+				}
+				.fg-search-banner {
+					position: absolute;
+					top: 66px;
+					left: 16px;
+					z-index: 11;
+					display: flex;
 					align-items: center;
-					padding: 7px 10px;
-					border-radius: 999px;
-					background: rgba(79, 209, 197, 0.14);
-					color: var(--cyan-bright);
-					font-size: 0.82rem;
-					font-weight: 700;
-					margin-bottom: 12px;
-				}
-				.node-graph-sidebar ul {
-					list-style: none;
-					padding: 0;
-					margin: 0 0 14px;
-					display: grid;
-					gap: 8px;
-					color: var(--text-secondary);
-				}
-				.dot {
-					display: inline-block;
-					width: 10px;
-					height: 10px;
-					border-radius: 999px;
-					margin-right: 8px;
-					vertical-align: middle;
-				}
-				.dot.teal {
-					background: var(--cyan-bright);
-				}
-				.dot.blue {
-					background: #58a6ff;
-				}
-				.dot.purple {
-					background: var(--violet-bright);
-				}
-				.mini-metrics {
-					display: grid;
 					gap: 10px;
+					padding: 8px 12px;
+					border-radius: 6px;
+					border: 1px solid rgba(96, 165, 250, 0.4);
+					background: rgba(30, 58, 138, 0.35);
+					color: #bfdbfe;
+					font-size: 0.8rem;
 				}
-				.mini-metrics > div {
-					background: rgba(255, 255, 255, 0.04);
-					padding: 10px 12px;
-					border-radius: 14px;
-					display: flex;
-					justify-content: space-between;
-					align-items: center;
-					font-size: 0.82rem;
-					color: var(--text-secondary);
+				.theme-light .fg-search-banner {
+					border-color: rgba(37, 99, 235, 0.3);
+					background: rgba(219, 234, 254, 0.9);
+					color: #1e3a8a;
 				}
-				.mini-metrics strong {
-					color: var(--text-primary);
-					font-size: 0.95rem;
+				.fg-search-banner-close {
+					border: none;
+					background: transparent;
+					color: inherit;
+					cursor: pointer;
+					font-size: 0.75rem;
+					line-height: 1;
 				}
-				.node-graph-canvas {
-					padding: 14px;
-					min-height: 560px;
-				}
-				.canvas-toolbar {
-					display: flex;
-					justify-content: space-between;
-					align-items: center;
-					margin-bottom: 12px;
-				}
-				.canvas-toolbar-title {
-					font-size: 0.95rem;
-					font-weight: 700;
-				}
-				.canvas-toolbar-meta {
-					display: flex;
-					gap: 8px;
-				}
-				.status-pill {
-					display: inline-flex;
-					align-items: center;
-					padding: 6px 10px;
-					border-radius: 999px;
-					font-size: 0.74rem;
-					font-weight: 700;
-					background: rgba(79, 209, 197, 0.16);
-					color: var(--cyan-bright);
-				}
-				.status-pill.muted {
-					background: rgba(255, 255, 255, 0.06);
-					color: var(--text-secondary);
-				}
-				.canvas-surface {
+
+				.graph-main-canvas {
+					display: block;
+					flex: 1;
 					position: relative;
-					background: linear-gradient(135deg, rgba(8, 20, 35, 0.95), rgba(13, 28, 45, 0.95));
-					border: 1px solid rgba(255, 255, 255, 0.08);
-					border-radius: 18px;
-					padding: 10px;
-					min-height: 500px;
-					display: flex;
-					align-items: center;
-					justify-content: center;
+					overflow: hidden;
+					background: radial-gradient(circle at center, #0a1122 0%, #020408 100%);
+				}
+				.theme-light .graph-main-canvas {
+					background: radial-gradient(circle at center, #ffffff 0%, #e5e7eb 100%);
+				}
+				.fg-loading-overlay,
+				.fg-empty-card {
+					position: absolute;
+					top: 50%;
+					left: 50%;
+					transform: translate(-50%, -50%);
+					color: #9ca3af;
+					font-size: 0.9rem;
+					text-align: center;
+					z-index: 5;
+				}
+				.fg-empty-eyebrow {
+					margin: 0;
 				}
 				.graph-svg {
 					width: 100%;
 					height: 100%;
-					min-height: 460px;
-					border-radius: 14px;
+					cursor: grab;
 				}
-				.graph-link {
-					stroke: rgba(6, 182, 212, 0.82);
-					stroke-width: 2.25;
+				.graph-svg:active {
+					cursor: grabbing;
+				}
+				.graph-link-glow {
+					stroke: rgba(6, 182, 212, 0.4);
+					stroke-width: 1.5;
 					stroke-linecap: round;
-					stroke-dasharray: 8 6;
+					filter: drop-shadow(0 0 4px rgba(6, 182, 212, 0.6));
+					transition: opacity 150ms ease;
+				}
+				.graph-link-glow.dimmed {
+					opacity: 0.12;
+				}
+				.graph-node-group {
+					cursor: pointer;
+					transition: opacity 150ms ease;
+				}
+				.graph-node-group.dimmed {
+					opacity: 0.25;
 				}
 				.graph-node {
-					stroke: rgba(255, 255, 255, 0.16);
+					stroke: #ffffff;
 					stroke-width: 1.5;
-					cursor: pointer;
-					transition:
-						transform 180ms ease,
-						fill 180ms ease,
-						stroke 180ms ease;
-					transform-origin: center;
-					filter: drop-shadow(0 8px 18px rgba(7, 13, 24, 0.28));
-				}
-				.graph-node:hover,
-				.graph-node:focus {
-					transform: translateY(-1px) scale(1.02);
+					transition: all 200ms ease;
 				}
 				.graph-node.primary {
-					fill: rgba(6, 182, 212, 0.16);
-					stroke: rgba(6, 182, 212, 0.6);
+					fill: #06b6d4;
+					filter: drop-shadow(0 0 10px rgba(6, 182, 212, 0.8));
 				}
 				.graph-node.relation {
-					fill: rgba(124, 58, 237, 0.16);
-					stroke: rgba(139, 92, 246, 0.58);
+					fill: #f97316;
+					stroke: #fdba74;
+					filter: drop-shadow(0 0 6px rgba(249, 115, 22, 0.6));
+				}
+				.graph-node-adviser-badge {
+					fill: #22d3ee;
+					stroke: #ffffff;
+					stroke-width: 1;
+				}
+				.graph-node:hover {
+					stroke-width: 3;
 				}
 				.graph-node.active {
-					fill: rgba(124, 58, 237, 0.28);
-					stroke: rgba(255, 255, 255, 0.8);
+					fill: #a855f7;
+					stroke: #ffffff;
+					filter: drop-shadow(0 0 12px rgba(168, 85, 247, 0.9));
 				}
 				.graph-label {
-					fill: var(--text-primary);
+					fill: #d1d5db;
 					font-size: 11px;
 					text-anchor: middle;
-					dominant-baseline: middle;
-					font-weight: 600;
+					font-weight: 500;
 					paint-order: stroke;
-					stroke: rgba(4, 8, 16, 0.9);
-					stroke-width: 4px;
-					cursor: pointer;
+					stroke: #020408;
+					stroke-width: 3px;
+					pointer-events: none;
+				}
+				.theme-light .graph-label {
+					fill: #111827;
+					stroke: #ffffff;
 				}
 				.graph-label.active {
 					fill: #ffffff;
+					font-weight: 700;
 				}
-				.canvas-overlay {
-					position: absolute;
-					left: 20px;
-					bottom: 20px;
-					padding: 12px 14px;
-					border-radius: 14px;
-					background: rgba(2, 7, 17, 0.85);
+				.theme-light .graph-label.active {
+					fill: #111827;
+				}
+
+				/* Persistent floating toolbar dock — always visible (independent of
+				   the detail drawer's open/closed state) so graph controls stay
+				   reachable regardless of whether a node is selected. */
+				.fg-toolbar-dock {
+					width: 340px;
+					background: #0d131f;
 					border: 1px solid rgba(255, 255, 255, 0.08);
-					max-width: 240px;
+					border-radius: 10px;
+					box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+					z-index: 12;
+					position: absolute;
+					right: 16px;
+					top: 16px;
+					padding-bottom: 10px;
 				}
-				.canvas-overlay p {
-					margin: 0 0 4px;
+				.theme-light .fg-toolbar-dock {
+					background: #ffffff;
+					border-color: rgba(0, 0, 0, 0.08);
+					box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+				}
+
+				/* Detail panel drawer — hidden off-screen by default, slides in from
+				   the right when opened via the hamburger button or by selecting a
+				   node in the graph. */
+				.node-detail-drawer {
+					width: 340px;
+					background: #0d131f;
+					border-left: 1px solid rgba(255, 255, 255, 0.08);
+					display: flex;
+					flex-direction: column;
+					box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
+					z-index: 10;
+					position: absolute;
+					right: 0;
+					top: 0;
+					bottom: 0;
+					overflow-y: auto;
+					transform: translateX(100%);
+					transition: transform 220ms ease;
+					visibility: hidden;
+				}
+				.node-detail-drawer.open {
+					transform: translateX(0);
+					visibility: visible;
+				}
+				.theme-light .node-detail-drawer {
+					background: #ffffff;
+					border-left-color: rgba(0, 0, 0, 0.08);
+					box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+				}
+
+				.fg-toolbar {
+					display: flex;
+					gap: 8px;
+					padding: 10px 16px 0;
+				}
+				.fg-toolbar-center-row {
+					padding-bottom: 10px;
+				}
+				.fg-toolbar-btn {
+					flex: 1;
+					padding: 8px 6px;
+					border-radius: 6px;
+					border: 1px solid rgba(255, 255, 255, 0.15);
+					background: rgba(255, 255, 255, 0.04);
+					color: inherit;
+					font-size: 0.75rem;
+					font-weight: 600;
+					cursor: pointer;
+				}
+				.fg-toolbar-btn.active {
+					background: #2563eb;
+					border-color: #2563eb;
+					color: #ffffff;
+				}
+				.fg-toolbar-btn.danger {
+					color: #f87171;
+					border-color: rgba(248, 113, 113, 0.4);
+				}
+				.fg-center-btn {
+					flex: 1;
+				}
+				.fg-theme-toggle {
+					width: 34px;
+					height: 34px;
+					border-radius: 50%;
+					border: 1px solid rgba(255, 255, 255, 0.15);
+					background: rgba(255, 255, 255, 0.04);
+					cursor: pointer;
+					font-size: 0.9rem;
+				}
+
+				.sidebar-header {
+					position: relative;
+					padding: 16px;
+					border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+				}
+				.drawer-close-btn {
+					position: absolute;
+					top: 12px;
+					right: 12px;
+					width: 28px;
+					height: 28px;
+					border-radius: 6px;
+					border: 1px solid rgba(255, 255, 255, 0.15);
+					background: rgba(255, 255, 255, 0.04);
+					color: inherit;
+					cursor: pointer;
+					font-size: 0.85rem;
+				}
+				.theme-light .drawer-close-btn {
+					border-color: rgba(0, 0, 0, 0.15);
+				}
+				.sidebar-header h1 {
+					margin: 0 24px 4px 0;
+					font-size: 1.2rem;
 					font-weight: 700;
+					color: #f3f4f6;
 				}
-				.canvas-overlay span {
-					font-size: 0.8rem;
-					color: var(--text-secondary);
-					line-height: 1.45;
+				.theme-light .sidebar-header h1 {
+					color: #111827;
 				}
-				.detail-card {
-					background: linear-gradient(135deg, rgba(79, 209, 197, 0.15), rgba(88, 166, 255, 0.14));
-					border: 1px solid rgba(255, 255, 255, 0.1);
-					border-radius: 16px;
-					padding: 14px;
-					margin-bottom: 12px;
-				}
-				.detail-pill {
-					display: inline-block;
-					padding: 6px 10px;
-					border-radius: 999px;
-					background: rgba(79, 209, 197, 0.18);
-					color: var(--cyan-bright);
-					font-size: 0.78rem;
-					font-weight: 700;
+				.role-rows {
+					display: flex;
+					flex-direction: column;
+					gap: 4px;
 					margin-bottom: 10px;
 				}
-				.detail-card h3 {
-					margin: 0 0 8px;
-					font-size: 1rem;
-				}
-				.detail-card p {
-					margin: 0;
-					line-height: 1.58;
-					color: var(--text-secondary);
-				}
-				.detail-list {
-					display: grid;
-					gap: 10px;
-				}
-				.detail-list > div {
+				.role-row {
 					display: flex;
-					justify-content: space-between;
 					align-items: center;
-					padding: 10px 0;
-					border-top: 1px solid rgba(255, 255, 255, 0.08);
-					font-size: 0.84rem;
-					color: var(--text-secondary);
+					gap: 6px;
+					font-size: 0.8rem;
+					color: #d1d5db;
 				}
-				.detail-list strong {
-					color: var(--text-primary);
+				.theme-light .role-row {
+					color: #374151;
 				}
-				@media (max-width: 1120px) {
-					.node-graph-workspace {
-						grid-template-columns: 1fr;
-					}
+				.role-dot {
+					width: 8px;
+					height: 8px;
+					border-radius: 50%;
+					background: #06b6d4;
+					flex-shrink: 0;
 				}
+
+				/* PanelHeader/StatusBox are the exact same dashboard components used
+				   on the main "/" page, which only has a single dark palette (their
+				   CSS relies on --text-primary etc. being near-white). Force this
+				   area to always render on a dark background — even when the graph
+				   canvas itself is switched to the light theme — so that reused
+				   text stays legible instead of rendering near-white-on-white. */
+				.sidebar-content {
+					padding: 16px;
+					overflow-y: auto;
+					flex: 1;
+					background: #0d131f;
+					color: #f1f1ff;
+				}
+
 			`}</style>
 		</>
 	);
