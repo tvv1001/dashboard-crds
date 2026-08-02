@@ -141,6 +141,9 @@ export default function NodeGraphPage() {
 	// drawer — closed by default, opened either via the hamburger button or
 	// automatically whenever a node in the graph is selected/clicked.
 	const [drawerOpen, setDrawerOpen] = useState(false);
+	// Bottom-left toolbar dock (Refresh/Trace/Reset/Center/theme) can be
+	// collapsed down to a small tab pinned to the left edge.
+	const [toolbarMinimized, setToolbarMinimized] = useState(false);
 	// Lightweight nodes added directly from a name/text search's full match
 	// list (no per-match detail fetch — same as the reference site's
 	// "build nodes from search hits" behavior). They render alongside
@@ -638,52 +641,66 @@ export default function NodeGraphPage() {
 				</main>
 
 				{(activeSnapshot || graphData.nodes.length > 0) && (
-					<div className='fg-toolbar-dock'>
-						<div className='fg-toolbar'>
+					<div className={`fg-toolbar-dock${toolbarMinimized ? ' minimized' : ''}`}>
+						{toolbarMinimized ?
 							<button
-								className='fg-toolbar-btn'
-								onClick={handleRefresh}>
-								Refresh ⟳
+								type='button'
+								className='fg-toolbar-expand-btn'
+								onClick={() => setToolbarMinimized(false)}
+								aria-label='Expand toolbar'>
+								☰
 							</button>
-							<button
-								className={`fg-toolbar-btn${traceMode ? ' active' : ''}`}
-								onClick={() => setTraceMode((v) => !v)}>
-								Trace Mode
-							</button>
-							<button
-								className='fg-toolbar-btn danger'
-								onClick={handleResetSession}>
-								Reset Session
-							</button>
-						</div>
-						<div className='fg-toolbar'>
-							<button
-								className={`fg-toolbar-btn${clearNonConnected ? ' active' : ''}`}
-								onClick={() => setClearNonConnected((v) => !v)}>
-								Clear non-connected
-							</button>
-							<button
-								className='fg-toolbar-btn'
-								onClick={() => {
-									setClearNonConnected(false);
-									setFocusedNodeId('primary');
-								}}>
-								Clear Highlight
-							</button>
-						</div>
-						<div className='fg-toolbar fg-toolbar-center-row'>
-							<button
-								className='fg-toolbar-btn fg-center-btn'
-								onClick={handleCenter}>
-								Center ✦
-							</button>
-							<button
-								className='fg-theme-toggle'
-								onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-								aria-label='Toggle theme'>
-								{theme === 'dark' ? '☀️' : '🌙'}
-							</button>
-						</div>
+						:	<>
+								<button
+									type='button'
+									className='fg-toolbar-minimize-btn'
+									onClick={() => setToolbarMinimized(true)}
+									aria-label='Minimize toolbar'>
+									◀
+								</button>
+								<div className='fg-toolbar fg-toolbar-row'>
+									<button
+										className='fg-toolbar-btn'
+										onClick={handleRefresh}>
+										Refresh ⟳
+									</button>
+									<button
+										className={`fg-toolbar-btn${traceMode ? ' active' : ''}`}
+										onClick={() => setTraceMode((v) => !v)}>
+										Trace Mode
+									</button>
+									<button
+										className='fg-toolbar-btn danger'
+										onClick={handleResetSession}>
+										Reset Session
+									</button>
+									<button
+										className={`fg-toolbar-btn${clearNonConnected ? ' active' : ''}`}
+										onClick={() => setClearNonConnected((v) => !v)}>
+										Clear non-connected
+									</button>
+									<button
+										className='fg-toolbar-btn'
+										onClick={() => {
+											setClearNonConnected(false);
+											setFocusedNodeId('primary');
+										}}>
+										Clear Highlight
+									</button>
+									<button
+										className='fg-toolbar-btn fg-center-btn'
+										onClick={handleCenter}>
+										Center ✦
+									</button>
+									<button
+										className='fg-theme-toggle'
+										onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+										aria-label='Toggle theme'>
+										{theme === 'dark' ? '☀️' : '🌙'}
+									</button>
+								</div>
+							</>
+						}
 					</div>
 				)}
 
@@ -997,23 +1014,29 @@ export default function NodeGraphPage() {
 
 				/* Persistent floating toolbar dock — always visible (independent of
 				   the detail drawer's open/closed state) so graph controls stay
-				   reachable regardless of whether a node is selected. */
+				   reachable regardless of whether a node is selected. Pinned to
+				   the bottom-left corner, laid out as a single horizontal row. */
 				.fg-toolbar-dock {
-					width: 340px;
 					background: #0d131f;
 					border: 1px solid rgba(255, 255, 255, 0.08);
 					border-radius: 10px;
 					box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
 					z-index: 12;
 					position: absolute;
-					right: 16px;
-					top: 16px;
-					padding-bottom: 10px;
+					left: 16px;
+					bottom: 16px;
+					display: flex;
+					align-items: center;
 				}
 				.theme-light .fg-toolbar-dock {
 					background: #ffffff;
 					border-color: rgba(0, 0, 0, 0.08);
 					box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+				}
+				.fg-toolbar-dock.minimized {
+					background: transparent;
+					border: none;
+					box-shadow: none;
 				}
 
 				/* Detail panel drawer — hidden off-screen by default, slides in from
@@ -1046,17 +1069,44 @@ export default function NodeGraphPage() {
 					box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
 				}
 
-				.fg-toolbar {
+				.fg-toolbar-minimize-btn,
+				.fg-toolbar-expand-btn {
+					flex-shrink: 0;
+					width: 30px;
+					height: 34px;
+					margin: 8px;
+					border-radius: 6px;
+					border: 1px solid rgba(255, 255, 255, 0.15);
+					background: rgba(255, 255, 255, 0.04);
+					color: inherit;
+					cursor: pointer;
+					font-size: 0.85rem;
+				}
+				.fg-toolbar-expand-btn {
+					margin: 0;
+					background: #0d131f;
+					border: 1px solid rgba(255, 255, 255, 0.08);
+					box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+				}
+				.theme-light .fg-toolbar-expand-btn {
+					background: #ffffff;
+					border-color: rgba(0, 0, 0, 0.08);
+					box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+				}
+				.theme-light .fg-toolbar-minimize-btn {
+					border-color: rgba(0, 0, 0, 0.15);
+				}
+
+				.fg-toolbar-row {
 					display: flex;
 					gap: 8px;
-					padding: 10px 16px 0;
-				}
-				.fg-toolbar-center-row {
-					padding-bottom: 10px;
+					padding: 8px 12px 8px 0;
+					flex-wrap: nowrap;
 				}
 				.fg-toolbar-btn {
-					flex: 1;
-					padding: 8px 6px;
+					flex: none;
+					white-space: nowrap;
+					padding: 8px 12px;
 					border-radius: 6px;
 					border: 1px solid rgba(255, 255, 255, 0.15);
 					background: rgba(255, 255, 255, 0.04);
@@ -1074,10 +1124,8 @@ export default function NodeGraphPage() {
 					color: #f87171;
 					border-color: rgba(248, 113, 113, 0.4);
 				}
-				.fg-center-btn {
-					flex: 1;
-				}
 				.fg-theme-toggle {
+					flex-shrink: 0;
 					width: 34px;
 					height: 34px;
 					border-radius: 50%;
