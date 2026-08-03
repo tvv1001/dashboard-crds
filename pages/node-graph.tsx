@@ -56,6 +56,20 @@ type GraphLink = {
 	label: string;
 };
 
+// Shape returned by GET /api/finra/expand/[nodeId] (see pages/api/_graphIndex.ts).
+// That endpoint reads directly from the Redis-backed saved-payload store and
+// resolves BOTH current and previous employments (for individuals) and
+// current owners/control persons plus current+previous employees (for
+// firms) — i.e. exactly the "reveal connected nodes" data this page needs
+// when a node is clicked, without re-deriving it from scratch here.
+type ExpandApiNode = { id: string; label: string; group: 'individual' | 'firm'; crd: string; city?: string; state?: string };
+type ExpandApiLink = { source: string; target: string; relationship: 'employment' | 'ownership'; isCurrent: boolean };
+
+function expandedLinkLabel(relationship: ExpandApiLink['relationship'], isCurrent: boolean): string {
+	if (relationship === 'ownership') return isCurrent ? 'Owner' : 'Former owner';
+	return isCurrent ? 'Employment' : 'Previous employment';
+}
+
 function getRecordValue(value: unknown): Record<string, unknown> | null {
 	return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
 }
@@ -152,6 +166,18 @@ export default function NodeGraphPage() {
 	const [searchResultNodes, setSearchResultNodes] = useState<GraphNode[]>([]);
 	const [searchBanner, setSearchBanner] = useState<{ query: string; count: number } | null>(null);
 
+	// Click-to-expand: when a node is clicked, its own connections (current
+	// AND previous employments for individuals; owners/control persons plus
+	// current+previous employees for firms) are fetched from
+	// /api/finra/expand and merged into the graph in place — the existing
+	// graph is never replaced. `expandedKeysRef` tracks which entities
+	// (canonical "individual:<crd>" / "firm:<crd>") have already been
+	// expanded so re-clicking a node doesn't refetch.
+	const [expansionNodes, setExpansionNodes] = useState<GraphNode[]>([]);
+	const [expansionLinks, setExpansionLinks] = useState<GraphLink[]>([]);
+	const [expandingNodeId, setExpandingNodeId] = useState<string | null>(null);
+	const expandedKeysRef = useRef<Set<string>>(new Set());
+
 	const activeSnapshot = useMemo(() => {
 		return Object.values(cache).sort((a, b) => b.fetchedAt - a.fetchedAt)[0] ?? null;
 	}, [cache]);
@@ -182,6 +208,80 @@ export default function NodeGraphPage() {
 		if (toArray(finraContent?.currentIAEmployments).length > 0 || toArray(secContent?.currentIAEmployments).length > 0) rows.push('Investment Adviser');
 		return rows;
 	}, [finraContent, secContent]);
+
+	// Resolves any graph node to the canonical "individual:<crd>" /
+	// "firm:<crd>" id that /api/finra/expand expects — the primary node
+	// derives this from the loaded snapshot's own key, relation/search nodes
+	// carry it embedded in their `loadKey` ("finra:<type>:<crd>").
+	const canonicalIdForNode = useCallback(
+		(node: GraphNode): string | null => {
+			if (node.id === 'primary') {
+				return parsedKeyInfo?.crd ? `${entityType}:${parsedKeyInfo.crd}` : null;
+			}
+			if (node.loadKey) {
+				const parts = node.loadKey.split(':');
+				if (parts.length === 3) return `${parts[1]}:${parts[2]}`;
+			}
+			return null;
+		},
+		[entityType, parsedKeyInfo],
+	);
+
+	// Fetches a node's own connections (current + previous employments for
+	// individuals; owners/control persons + current+previous employees for
+	// firms — see pages/api/_graphIndex.ts) and merges them into the graph
+	// as new nodes/links, expanding in place rather than replacing the hub.
+	const expandNode = useCallback(
+		(node: GraphNode) => {
+			const canonicalId = canonicalIdForNode(node);
+			if (!canonicalId || expandedKeysRef.current.has(canonicalId)) return;
+			expandedKeysRef.current.add(canonicalId);
+			setExpandingNodeId(node.id);
+			fetch(`/api/finra/expand/${encodeURIComponent(canonicalId)}?hops=1`)
+				.then((r) => r.json())
+				.then((data) => {
+					const rawNodes: ExpandApiNode[] = Array.isArray(data?.nodes) ? data.nodes : [];
+					const rawLinks: ExpandApiLink[] = Array.isArray(data?.links) ? data.links : [];
+
+					setExpansionNodes((prev) => {
+						const seen = new Set(prev.map((n) => n.id));
+						const merged = prev.slice();
+						for (const raw of rawNodes) {
+							if (raw.id === canonicalId || seen.has(raw.id)) continue;
+							seen.add(raw.id);
+							merged.push({
+								id: raw.id,
+								label: raw.label,
+								kind: 'relation',
+								subLabel: raw.city || raw.state ? [raw.city, raw.state].filter(Boolean).join(', ') : raw.group === 'firm' ? 'Firm' : 'Individual',
+								loadKey: `finra:${raw.group}:${raw.crd}`,
+							});
+						}
+						return merged;
+					});
+
+					setExpansionLinks((prev) => {
+						const linkKey = (l: { source: string; target: string; label: string }) => `${l.source}->${l.target}:${l.label}`;
+						const seen = new Set(prev.map(linkKey));
+						const merged = prev.slice();
+						for (const raw of rawLinks) {
+							const label = expandedLinkLabel(raw.relationship, raw.isCurrent);
+							const candidate = { source: raw.source, target: raw.target, label };
+							if (seen.has(linkKey(candidate))) continue;
+							seen.add(linkKey(candidate));
+							merged.push(candidate);
+						}
+						return merged;
+					});
+				})
+				.catch(() => {
+					// Allow retrying on a future click if the fetch failed.
+					expandedKeysRef.current.delete(canonicalId);
+				})
+				.finally(() => setExpandingNodeId((current) => (current === node.id ? null : current)));
+		},
+		[canonicalIdForNode],
+	);
 
 	// ── Search / load ─────────────────────────────────────────────────────────
 	// Fetches a single explicit key (e.g. "finra:firm:10409") from /api/key and,
@@ -339,6 +439,10 @@ export default function NodeGraphPage() {
 		setDrawerOpen(false);
 		setSearchResultNodes([]);
 		setSearchBanner(null);
+		setExpansionNodes([]);
+		setExpansionLinks([]);
+		setExpandingNodeId(null);
+		expandedKeysRef.current.clear();
 	}, [clear]);
 
 	const [focusedNodeId, setFocusedNodeId] = useState('primary');
@@ -348,13 +452,63 @@ export default function NodeGraphPage() {
 		setFocusedNodeId('primary');
 	}, [activeSnapshot?.resolvedKey]);
 
+	// Auto-expand the primary node the moment its entity loads, so its full
+	// current + previous connections are visible immediately instead of only
+	// the "current" subset buildGraphData derives from the loaded snapshot.
+	useEffect(() => {
+		if (!activeSnapshot || !parsedKeyInfo?.crd) return;
+		expandNode({ id: 'primary', label: entityTitle, kind: 'primary' });
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [activeSnapshot?.resolvedKey, parsedKeyInfo?.crd]);
+
 	const graphData = useMemo(() => {
 		const hub = activeSnapshot ? buildGraphData([finraContent, secContent], entityTitle) : { nodes: [] as GraphNode[], links: [] as GraphLink[] };
-		if (searchResultNodes.length === 0) return hub;
+
+		// Maps canonical "individual:<crd>"/"firm:<crd>" ids to whatever id an
+		// entity already uses in the graph (primary, a hub relation node, or a
+		// search-result node), so expansion results attach to the existing
+		// node instead of creating a duplicate.
+		const canonicalToId = new Map<string, string>();
+		const registerCanonical = (node: GraphNode) => {
+			let canonical: string | null = null;
+			if (node.id === 'primary') {
+				canonical = parsedKeyInfo?.crd ? `${entityType}:${parsedKeyInfo.crd}` : null;
+			} else if (node.loadKey) {
+				const parts = node.loadKey.split(':');
+				canonical = parts.length === 3 ? `${parts[1]}:${parts[2]}` : null;
+			}
+			if (canonical && !canonicalToId.has(canonical)) canonicalToId.set(canonical, node.id);
+		};
+		hub.nodes.forEach(registerCanonical);
+
 		const hubIds = new Set(hub.nodes.map((n) => n.id));
-		const extraNodes = searchResultNodes.filter((n) => !hubIds.has(n.id));
-		return { nodes: [...hub.nodes, ...extraNodes], links: hub.links };
-	}, [activeSnapshot, finraContent, secContent, entityTitle, searchResultNodes]);
+		const extraSearchNodes = searchResultNodes.filter((n) => !hubIds.has(n.id));
+		extraSearchNodes.forEach(registerCanonical);
+
+		const nodes = [...hub.nodes, ...extraSearchNodes];
+		const seenIds = new Set(nodes.map((n) => n.id));
+		for (const expansionNode of expansionNodes) {
+			if (canonicalToId.has(expansionNode.id) || seenIds.has(expansionNode.id)) continue;
+			canonicalToId.set(expansionNode.id, expansionNode.id);
+			seenIds.add(expansionNode.id);
+			nodes.push(expansionNode);
+		}
+
+		const links = [...hub.links];
+		const seenLinkKeys = new Set(links.map((l) => `${l.source}->${l.target}:${l.label}`));
+		for (const expansionLink of expansionLinks) {
+			const source = canonicalToId.get(expansionLink.source) ?? expansionLink.source;
+			const target = canonicalToId.get(expansionLink.target) ?? expansionLink.target;
+			if (source === target) continue;
+			const key = `${source}->${target}:${expansionLink.label}`;
+			const reverseKey = `${target}->${source}:${expansionLink.label}`;
+			if (seenLinkKeys.has(key) || seenLinkKeys.has(reverseKey)) continue;
+			seenLinkKeys.add(key);
+			links.push({ source, target, label: expansionLink.label });
+		}
+
+		return { nodes, links };
+	}, [activeSnapshot, finraContent, secContent, entityTitle, searchResultNodes, expansionNodes, expansionLinks, entityType, parsedKeyInfo]);
 	const focusedNode = useMemo(() => graphData.nodes.find((node) => node.id === focusedNodeId) ?? graphData.nodes[0], [graphData.nodes, focusedNodeId]);
 
 	// Nodes/links kept visible when "Clear non-connected" is active: the
@@ -392,6 +546,103 @@ export default function NodeGraphPage() {
 	const [transform, setTransform] = useState<d3.ZoomTransform>(d3.zoomIdentity);
 	const [graphPositions, setGraphPositions] = useState<Record<string, { x: number; y: number }>>({});
 
+	// Latest node positions, kept in sync so the force-simulation effect
+	// below (which re-runs whenever graphData changes, e.g. after an
+	// in-place expansion) can seed already-placed nodes at their current
+	// spot instead of snapping the whole graph back to random positions
+	// near the center — that full-graph reset was what made expanded
+	// graphs look like nodes "disconnecting" from their links.
+	const positionsRef = useRef<Record<string, { x: number; y: number }>>({});
+	useEffect(() => {
+		positionsRef.current = graphPositions;
+	}, [graphPositions]);
+
+	// Kept in sync with `transform` (React state) so drag handlers — which
+	// run outside the render cycle via pointer event callbacks — can always
+	// read the current zoom/pan without becoming stale closures.
+	const transformRef = useRef(transform);
+	useEffect(() => {
+		transformRef.current = transform;
+	}, [transform]);
+
+	// The live simulation + its node objects (mutated in place by
+	// d3-force each tick). Drag handlers read/write directly into these
+	// refs rather than through React state, matching the standard
+	// d3-force drag pattern (set fx/fy, reheat via alphaTarget).
+	const simulationRef = useRef<d3.Simulation<any, any> | null>(null);
+	const dragNodesRef = useRef<any[]>([]);
+	const dragStateRef = useRef<{ id: string; offsetX: number; offsetY: number; startClientX: number; startClientY: number; moved: boolean } | null>(null);
+	const [draggingNodeId, setDraggingNodeId] = useState<string | null>(null);
+
+	// Converts a pointer's client (screen) coordinates into the graph's own
+	// coordinate space, accounting for both the SVG's viewBox scaling and
+	// the current d3-zoom pan/scale transform applied to the inner <g>.
+	const clientPointToGraph = useCallback((clientX: number, clientY: number) => {
+		const svg = svgRef.current;
+		const ctm = svg?.getScreenCTM();
+		if (!svg || !ctm) return { x: 0, y: 0 };
+		const point = svg.createSVGPoint();
+		point.x = clientX;
+		point.y = clientY;
+		const svgPoint = point.matrixTransform(ctm.inverse());
+		const [x, y] = transformRef.current.invert([svgPoint.x, svgPoint.y]);
+		return { x, y };
+	}, []);
+
+	const handleNodePointerDown = useCallback(
+		(event: React.PointerEvent<SVGGElement>, nodeId: string) => {
+			// Only respond to primary button / touch, and don't let the drag
+			// bubble up to the pan/zoom behavior on the svg.
+			event.stopPropagation();
+			const node = dragNodesRef.current.find((n) => n.id === nodeId);
+			if (!node) return;
+			const graphPoint = clientPointToGraph(event.clientX, event.clientY);
+			dragStateRef.current = {
+				id: nodeId,
+				offsetX: (node.x ?? graphPoint.x) - graphPoint.x,
+				offsetY: (node.y ?? graphPoint.y) - graphPoint.y,
+				startClientX: event.clientX,
+				startClientY: event.clientY,
+				moved: false,
+			};
+			node.fx = node.x;
+			node.fy = node.y;
+			setDraggingNodeId(nodeId);
+			// Reheat the simulation so it keeps ticking (and updating
+			// graphPositions) for the duration of the drag.
+			simulationRef.current?.alphaTarget(0.3).restart();
+			(event.target as Element).setPointerCapture?.(event.pointerId);
+		},
+		[clientPointToGraph],
+	);
+
+	const handleNodePointerMove = useCallback(
+		(event: React.PointerEvent<SVGGElement>) => {
+			const drag = dragStateRef.current;
+			if (!drag) return;
+			const node = dragNodesRef.current.find((n) => n.id === drag.id);
+			if (!node) return;
+			// A small pixel threshold distinguishes an intentional drag from a
+			// plain click, so tapping a node still opens its detail drawer.
+			if (!drag.moved && Math.hypot(event.clientX - drag.startClientX, event.clientY - drag.startClientY) > 4) {
+				drag.moved = true;
+			}
+			const graphPoint = clientPointToGraph(event.clientX, event.clientY);
+			node.fx = graphPoint.x + drag.offsetX;
+			node.fy = graphPoint.y + drag.offsetY;
+		},
+		[clientPointToGraph],
+	);
+
+	const handleNodePointerUp = useCallback((event: React.PointerEvent<SVGGElement>) => {
+		if (!dragStateRef.current) return;
+		dragStateRef.current = null;
+		setDraggingNodeId(null);
+		simulationRef.current?.alphaTarget(0);
+		// Leave fx/fy set so the node stays pinned where it was dropped,
+		// matching standard d3-force drag behavior.
+	}, []);
+
 	// Graph dimensions
 	const width = 1200;
 	const height = 800;
@@ -422,11 +673,24 @@ export default function NodeGraphPage() {
 	useEffect(() => {
 		if (graphData.nodes.length === 0) return;
 
-		const d3Nodes = graphData.nodes.map((n) => ({
-			...n,
-			x: width / 2 + (Math.random() - 0.5) * 40,
-			y: height / 2 + (Math.random() - 0.5) * 40,
-		}));
+		// New nodes (e.g. from an in-place expansion) start near whichever
+		// already-placed neighbor they're linked to, so they visibly "grow
+		// out of" that node instead of dropping in from the center —
+		// existing nodes keep their current position instead of resetting.
+		const neighborPosition = (nodeId: string): { x: number; y: number } | null => {
+			for (const link of graphData.links) {
+				if (link.source === nodeId && positionsRef.current[link.target]) return positionsRef.current[link.target];
+				if (link.target === nodeId && positionsRef.current[link.source]) return positionsRef.current[link.source];
+			}
+			return null;
+		};
+
+		const d3Nodes = graphData.nodes.map((n) => {
+			const existing = positionsRef.current[n.id];
+			if (existing) return { ...n, x: existing.x, y: existing.y };
+			const anchor = neighborPosition(n.id) || { x: width / 2, y: height / 2 };
+			return { ...n, x: anchor.x + (Math.random() - 0.5) * 20, y: anchor.y + (Math.random() - 0.5) * 20 };
+		});
 		const d3Links = graphData.links.map((l) => ({ ...l }));
 
 		// Charge repulsion needs to scale down as node count grows, otherwise
@@ -453,6 +717,9 @@ export default function NodeGraphPage() {
 			.force('y', d3.forceY(height / 2).strength(0.05))
 			.force('collide', d3.forceCollide(40));
 
+		simulationRef.current = simulation;
+		dragNodesRef.current = d3Nodes;
+
 		simulation.on('tick', () => {
 			const pos: Record<string, { x: number; y: number }> = {};
 			d3Nodes.forEach((n) => {
@@ -465,6 +732,9 @@ export default function NodeGraphPage() {
 
 		return () => {
 			simulation.stop();
+			simulationRef.current = null;
+			dragNodesRef.current = [];
+			dragStateRef.current = null;
 		};
 	}, [graphData]);
 
@@ -475,22 +745,36 @@ export default function NodeGraphPage() {
 			// detail drawer, matching the reference site's "closed until a
 			// node is picked" behavior.
 			setDrawerOpen(true);
-			if (nodeId === 'primary') return;
 			const node = graphData.nodes.find((n) => n.id === nodeId);
-			// Drill into the connected entity's own record (firm/individual)
-			// when it has a resolvable CRD, so clicking a relation node
-			// actually reveals that entity's data instead of just a label.
-			if (node?.loadKey) {
+			if (!node) return;
+
+			// Search-result nodes aren't connected to the current hub yet, so
+			// clicking one hydrates it into the new primary/hub entity (as
+			// before) rather than merely expanding it in place.
+			if (nodeId.startsWith('search-') && node.loadKey) {
 				loadKey(node.loadKey);
-				// A clicked search-result node becomes the new hub entity (with
-				// its own "primary" node id in the rebuilt hub graph) — drop it
-				// from the lightweight search layer so it isn't shown twice.
-				if (nodeId.startsWith('search-')) {
-					setSearchResultNodes((prev) => prev.filter((n) => n.id !== nodeId));
-				}
+				setSearchResultNodes((prev) => prev.filter((n) => n.id !== nodeId));
+				return;
 			}
+
+			// Every other node — the primary hub node or any relation node —
+			// reveals its own connections (current + previous employments for
+			// a person; owners/control persons and current+previous employees
+			// for a firm) merged into the existing graph, in place.
+			expandNode(node);
 		},
-		[graphData.nodes, loadKey],
+		[graphData.nodes, loadKey, expandNode],
+	);
+
+	// Wraps `selectNode` so that releasing a drag (which fires a trailing
+	// click) doesn't also re-focus/select the node — only a genuine
+	// click-without-movement should do that.
+	const handleNodeClick = useCallback(
+		(nodeId: string) => {
+			if (dragStateRef.current?.moved) return;
+			selectNode(nodeId);
+		},
+		[selectNode],
 	);
 
 	return (
@@ -611,8 +895,12 @@ export default function NodeGraphPage() {
 								return (
 									<g
 										key={node.id}
-										className={`graph-node-group${dimmed ? ' dimmed' : ''}`}
-										onClick={() => selectNode(node.id)}>
+										className={`graph-node-group${dimmed ? ' dimmed' : ''}${draggingNodeId === node.id ? ' dragging' : ''}${expandingNodeId === node.id ? ' expanding' : ''}`}
+										onClick={() => handleNodeClick(node.id)}
+										onPointerDown={(event) => handleNodePointerDown(event, node.id)}
+										onPointerMove={handleNodePointerMove}
+										onPointerUp={handleNodePointerUp}
+										onPointerCancel={handleNodePointerUp}>
 										<circle
 											className={`graph-node ${node.kind}${isActive ? ' active' : ''}`}
 											cx={position.x}
@@ -957,8 +1245,24 @@ export default function NodeGraphPage() {
 					opacity: 0.12;
 				}
 				.graph-node-group {
-					cursor: pointer;
+					cursor: grab;
 					transition: opacity 150ms ease;
+					touch-action: none;
+				}
+				.graph-node-group.dragging {
+					cursor: grabbing;
+				}
+				.graph-node-group.expanding .graph-node {
+					animation: node-expanding-pulse 2200ms ease-in-out infinite;
+				}
+				@keyframes node-expanding-pulse {
+					0%,
+					100% {
+						opacity: 1;
+					}
+					50% {
+						opacity: 0.7;
+					}
 				}
 				.graph-node-group.dimmed {
 					opacity: 0.25;
