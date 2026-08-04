@@ -816,15 +816,21 @@ function RawFieldRow({ label, value, compact = false }: { label: string; value: 
 // covered by a curated section, so nothing in the raw FINRA/SEC JSON is
 // silently hidden from the UI (e.g. noticeFilings, compilationData,
 // exemptReportingAdvisers, orgScopeStatusFlags, brochures, accountantSurpriseExams).
-function RawFieldGroups({ title, body }: { title: string; body: Record<string, any> | undefined }) {
+function RawFieldGroups({ title, body, source }: { title: string; body: Record<string, any> | undefined; source?: 'finra' | 'sec' }) {
 	if (!body || typeof body !== 'object') return null;
 	const basic = body.basicInformation && typeof body.basicInformation === 'object' ? body.basicInformation : {};
 	const basicEntries = Object.entries(basic).filter(([key, value]) => !RAW_BASIC_INFO_SKIP_KEYS.has(key) && !isEmptyRawValue(value));
 	const topEntries = Object.entries(body).filter(([key, value]) => !RAW_TOP_LEVEL_SKIP_KEYS.has(key) && !isEmptyRawValue(value));
 	if (!basicEntries.length && !topEntries.length) return null;
+	const sourceClass = source ? `record-detail-section--${source}` : '';
 	return (
-		<section className='record-detail-section'>
-			<h4 className='record-detail-section-title'>{title}</h4>
+		<section className={`record-detail-section ${sourceClass}`.trim()}>
+			<h4 className='record-detail-section-title'>
+				{title}
+				{source ?
+					<span className={`record-detail-inline-tag ${sourceTagClass(source === 'finra' ? 'FINRA' : 'SEC')}`}>{source === 'finra' ? 'FINRA' : 'SEC'}</span>
+				:	null}
+			</h4>
 			<div className='raw-field-list'>
 				{basicEntries.map(([key, value]) => (
 					<RawFieldRow
@@ -1498,11 +1504,13 @@ function RecordInfoView({
 					<RawFieldGroups
 						title='Additional FINRA details'
 						body={finraBody}
+						source='finra'
 					/>
 					{hasGenuineSecContent && (
 						<RawFieldGroups
 							title='Additional SEC details'
 							body={secBody}
+							source='sec'
 						/>
 					)}
 					{!isFirmRecord ?

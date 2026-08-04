@@ -14,7 +14,7 @@ export default function MyApp({ Component, pageProps }: AppProps) {
 			.toLowerCase() || 'home'
 	}`;
 	const navItems = [
-		{ href: '/node-graph', label: 'Node Graph' },
+		{ href: '/graph', label: 'Node Graph' },
 		{ href: '/', label: 'Dashboard' },
 		{ href: '/insights', label: 'Insights' },
 	] as const;

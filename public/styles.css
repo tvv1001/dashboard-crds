@@ -1936,28 +1936,44 @@ button:disabled {
 	gap: 9px;
 }
 
-/* Applied to "Previous connections" so it visually recedes behind
-   "Current connections" — same layout, muted/desaturated color scheme. */
+/* Distinguishes which upstream source a "raw details" section came from on
+   a merged FINRA+SEC firm/individual record — same card, colored left
+   accent matching the FINRA (blue) / SEC (green) source tags used
+   elsewhere (record-detail-inline-tag--finra/--sec). */
+.record-detail-section--finra {
+	border-left: 3px solid rgba(59, 130, 246, 0.55);
+}
+
+.record-detail-section--sec {
+	border-left: 3px solid rgba(16, 185, 129, 0.55);
+}
+
+/* Applied to "Previous connections"/"Previous employment" so it visually
+   recedes behind "Current connections" — same layout, but desaturated
+   into neutral slate tones (instead of the app's default blue accent) so
+   it reads as muted/inactive rather than flagged/alerted. */
 .record-detail-section-muted .record-detail-section-title {
 	color: var(--text-muted);
 }
 
 .record-detail-section-muted .record-detail-item {
-	border-color: rgba(146, 34, 70, 0.25);
-	background: rgba(34, 3, 15, 0.9);
+	border-color: rgba(148, 163, 184, 0.18);
+	background: rgba(100, 116, 139, 0.08);
+	opacity: 0.82;
 }
 
 .record-detail-section-muted .record-detail-item-clickable:hover {
-	border-color: rgba(146, 34, 70, 0.35);
-	background: rgba(40, 4, 18, 0.95);
+	border-color: rgba(148, 163, 184, 0.32);
+	background: rgba(100, 116, 139, 0.14);
+	opacity: 1;
 }
 
 .record-detail-section-muted .record-detail-item-title {
-	color: var(--text-secondary);
+	color: var(--text-muted);
 }
 
 .record-detail-section-muted .record-detail-item-subtitle {
-	color: var(--text-muted);
+	color: #7c8ba1;
 }
 
 .record-detail-section-title {
@@ -1967,6 +1983,9 @@ button:disabled {
 	text-transform: uppercase;
 	letter-spacing: 0.06em;
 	color: #cbd5e1;
+	display: flex;
+	align-items: center;
+	gap: 8px;
 }
 
 .record-detail-grid {
@@ -1994,12 +2013,19 @@ button:disabled {
 
 .raw-field-list {
 	display: grid;
-	gap: 6px;
+	grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+	gap: 8px;
+	align-items: start;
 }
 
 .raw-field-list-group {
+	grid-column: span 2;
 	display: grid;
-	gap: 2px;
+	gap: 4px;
+	padding: 8px 9px;
+	border-radius: var(--r-sm, 6px);
+	border: 1px solid rgba(56, 189, 248, 0.16);
+	background: rgba(30, 64, 175, 0.08);
 }
 
 .raw-field-list-item {
@@ -2007,14 +2033,16 @@ button:disabled {
 	flex-wrap: wrap;
 	gap: 6px;
 	align-items: baseline;
-	padding: 4px 0;
-	background: transparent;
-	border: 0;
-	box-shadow: none;
+	padding: 6px 9px;
+	border-radius: var(--r-sm, 6px);
+	border: 1px solid rgba(56, 189, 248, 0.16);
+	background: rgba(30, 64, 175, 0.08);
 }
 
-.raw-field-list-item + .raw-field-list-item {
-	border-top: 1px solid rgba(146, 34, 70, 0.18);
+.raw-field-list-group .raw-field-list-item {
+	padding: 0;
+	border: 0;
+	background: transparent;
 }
 
 .raw-field-list-label {
