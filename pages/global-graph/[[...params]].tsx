@@ -432,41 +432,30 @@ function resolveNodeOverlaps(graph: Graph, opts?: { maxIterations?: number; padd
 }
 
 /**
- * Display radius from connection weight (not raw layout size).
- * Individuals: layout `weight` is a career composite (current+previous employments,
- * state/SRO registrations, principal/BD control categories) — see build-global-graph-layout.
- * Higher weight → larger disk (√weight). Final size is fixed before Sigma mounts.
+ * True fixed screen-pixel node radius for Sigma.
+ *
+ * Sigma 3 formula (scaleSize):
+ *   size / zoomToSizeRatioFunction(camera.ratio)
+ *   * (itemSizesReference === 'positions' ? camera.ratio * graphToViewportRatio : 1)
+ *
+ * With itemSizesReference:'screen' and zoomToSizeRatioFunction:() => 1, rendered
+ * size equals the attribute. We still force the attribute every indexation via
+ * nodeReducer so weight/degree/layout size can never leak into the WebGL buffer.
  */
-function displayNodeSize(degree: number, type?: string, weight?: number): number {
-	const t =
-		type === 'firm' ? 'firm'
-		: type === 'individual' ? 'individual'
-		: 'unknown';
-	// Prefer explicit career/composite weight; fall back to degree.
-	const wRaw = weight != null && Number.isFinite(weight) && weight > 0 ? weight : degree;
-	const dRaw = Number.isFinite(degree) ? degree : 0;
-	// Individuals: never size smaller than either signal (previous jobs / regs live in weight).
-	const w =
-		t === 'individual' ? Math.max(wRaw, dRaw)
-		: wRaw > 0 ? wRaw
-		: dRaw;
-	// Screen-pixel floor (itemSizesReference: 'screen' + identity zoom ratio) —
-	// smallest hubs must stay readable when zoomed in without growing on zoom-out.
-	const leaf = t === 'firm' ? 6.5 : 7.0;
-	const byW = Math.sqrt(Math.max(0, w)) * (t === 'firm' ? 0.48 : 0.55);
-	const cap = t === 'firm' ? 22 : 28;
-	const size = leaf + byW;
-	return Math.min(cap, Math.max(leaf, size));
+const STATIC_NODE_SIZE = 22;
+
+/** Collision / separation radius in graph units — independent of on-screen disk px. */
+const COLLISION_GRAPH_RADIUS = 14;
+
+function staticNodeSize(): number {
+	return STATIC_NODE_SIZE;
 }
 
-/** Stamp final sizes onto layout nodes once so first paint never flashes tiny disks. */
+/** Stamp fixed sizes onto layout nodes once (display only; collision uses COLLISION_GRAPH_RADIUS). */
 function bakeDisplaySizes(payload: LayoutPayload): LayoutPayload {
+	const size = staticNodeSize();
 	for (const n of payload.nodes) {
-		const deg = Number(n.degree) || 0;
-		const w = Number(n.weight) || deg;
-		// Always recompute client-side so size policy stays in one place; layout
-		// bake still used for offline collision radii of matching scale.
-		n.size = displayNodeSize(deg, n.type, w);
+		n.size = size;
 	}
 	return payload;
 }
@@ -685,21 +674,39 @@ export default function GlobalGraphPage() {
 			if (t !== 'firm') selectedIndividuals.add(id);
 		}
 
+		/** Gray / inactive / previous edges stay unlit under selection. */
+		const isDisabledEdge = (attrs: Record<string, unknown>, source: string, target: string): boolean => {
+			if (attrs.isCurrent === false || attrs.inactive === true || attrs.disabled === true) return true;
+			const detail = String(attrs.detail || attrs.label || attrs.edgeLabel || attrs.relationship || '');
+			if (/previous|former|prior|inactive|terminated|disabled/i.test(detail)) return true;
+			// Endpoint marked inactive (layout/expand) — keep its incident spokes from lighting blue.
+			for (const id of [source, target]) {
+				if (!graph.hasNode(id)) continue;
+				if (graph.getNodeAttribute(id, 'inactive') === true) return true;
+			}
+			return false;
+		};
+
 		/**
 		 * Child (individual) selected → only that node + edges to its parent(s).
 		 * Firm selected alone → all firm→child spokes.
 		 * Firm + some children selected → only spokes to those selected children
 		 * (never light sibling employees off the parent).
+		 * Never emphasize gray/disabled/previous lines.
 		 */
-		const isEmphasizedEdge = (source: string, target: string): boolean => {
+		const isEmphasizedEdge = (source: string, target: string, attrs?: Record<string, unknown>): boolean => {
+			if (attrs && isDisabledEdge(attrs, source, target)) return false;
 			const srcSel = selectedHubIds.has(source);
 			const tgtSel = selectedHubIds.has(target);
 			if (!srcSel && !tgtSel) {
 				// Hover preview: only edges incident to the hovered node itself.
-				if (hoverId && (source === hoverId || target === hoverId)) return true;
+				if (hoverId && (source === hoverId || target === hoverId)) {
+					if (attrs && isDisabledEdge(attrs, source, target)) return false;
+					return true;
+				}
 				return false;
 			}
-			// Edge between two selected hubs always counts.
+			// Edge between two selected hubs always counts (unless disabled above).
 			if (srcSel && tgtSel) return true;
 
 			const hub = srcSel ? source : target;
@@ -713,7 +720,7 @@ export default function GlobalGraphPage() {
 			// selected children — do not fan out to every employee on the firm.
 			if (selectedIndividuals.size > 0) return selectedIndividuals.has(other);
 
-			// Firm-only selection (no selected children): full star.
+			// Firm-only selection (no selected children): full star of active spokes.
 			return true;
 		};
 
@@ -729,7 +736,7 @@ export default function GlobalGraphPage() {
 				const et = normalizeEdgeType(String(attrs.edgeType || ''));
 				const typeOn = edgeTypesEnabledRef.current[et] !== false && !attrs.filterHidden && !attrs.typeHidden;
 				if (!typeOn) return;
-				if (isEmphasizedEdge(source, target)) {
+				if (isEmphasizedEdge(source, target, attrs as Record<string, unknown>)) {
 					litNodeIds.add(source);
 					litNodeIds.add(target);
 				}
@@ -738,14 +745,16 @@ export default function GlobalGraphPage() {
 
 		const enabled = edgeTypesEnabledRef.current;
 
-		// Nodes always sit above edges (edge zIndex stays <= 0; nodes >= 1).
+		// Nodes always sit above edges (edge zIndex stays < 0; nodes >= 2).
+		// Size is always STATIC_NODE_SIZE — never grow/shrink on select/hover.
+		const fixedSize = staticNodeSize();
 		graph.forEachNode((node, attrs) => {
 			const baseColor = String(attrs.baseColor || attrs.color || '#94a3b8');
-			const baseSize = Number(attrs.baseSize || attrs.size || 2);
 			if (!hasSelectionOrHover) {
 				graph.setNodeAttribute(node, 'color', baseColor);
-				graph.setNodeAttribute(node, 'size', baseSize);
-				graph.setNodeAttribute(node, 'zIndex', 1);
+				graph.setNodeAttribute(node, 'size', fixedSize);
+				graph.setNodeAttribute(node, 'baseSize', fixedSize);
+				graph.setNodeAttribute(node, 'zIndex', 2);
 				graph.setNodeAttribute(node, 'forceLabel', false);
 				graph.setNodeAttribute(node, 'pinned', false);
 				return;
@@ -762,21 +771,23 @@ export default function GlobalGraphPage() {
 					: isHoverCenter ? '#f8fafc'
 					: baseColor,
 				);
-				graph.setNodeAttribute(node, 'size', baseSize);
+				graph.setNodeAttribute(node, 'size', fixedSize);
+				graph.setNodeAttribute(node, 'baseSize', fixedSize);
 				graph.setNodeAttribute(
 					node,
 					'zIndex',
-					isSelected ? 4
-					: isHoverCenter ? 3
-					: 2,
+					isSelected ? 5
+					: isHoverCenter ? 4
+					: 3,
 				);
 				graph.setNodeAttribute(node, 'forceLabel', highlight || graph.degree(node) > 8);
 				graph.setNodeAttribute(node, 'pinned', isSelected);
 			} else {
-				graph.setNodeAttribute(node, 'color', 'rgba(100,116,139,0.18)');
-				// Dim without shrinking disks (preserves non-overlap footprint).
-				graph.setNodeAttribute(node, 'size', baseSize);
-				graph.setNodeAttribute(node, 'zIndex', 1);
+				// Dim color only — keep full opacity so edge lines cannot show through disks.
+				graph.setNodeAttribute(node, 'color', '#475569');
+				graph.setNodeAttribute(node, 'size', fixedSize);
+				graph.setNodeAttribute(node, 'baseSize', fixedSize);
+				graph.setNodeAttribute(node, 'zIndex', 2);
 				graph.setNodeAttribute(node, 'forceLabel', false);
 				graph.setNodeAttribute(node, 'pinned', false);
 			}
@@ -793,24 +804,27 @@ export default function GlobalGraphPage() {
 			}
 
 			const baseSize = Number(attrs.baseSize) > 0 ? Number(attrs.baseSize) : edgeBaseSize(Number(attrs.weight));
-			const emphasize = hasSelectionOrHover && isEmphasizedEdge(source, target);
+			const disabled = isDisabledEdge(attrs as Record<string, unknown>, source, target);
+			const emphasize = hasSelectionOrHover && !disabled && isEmphasizedEdge(source, target, attrs as Record<string, unknown>);
 
 			graph.setEdgeAttribute(edge, 'hidden', false);
 
 			if (hasSelectionOrHover) {
 				if (emphasize) {
 					// Bright solid blue spokes — child→parent only when child is selected.
+					// zIndex stays negative so edges never climb above node disks.
 					const weightBoost = Math.min(1.4, 1 + (Number(attrs.weight) || 1) * 0.04);
 					const spokeSize = Math.min(SELECTED_EDGE_SIZE_MAX, SELECTED_EDGE_SIZE * weightBoost);
 					graph.setEdgeAttribute(edge, 'type', 'line');
 					graph.setEdgeAttribute(edge, 'color', SELECTED_EDGE_COLOR);
-					graph.setEdgeAttribute(edge, 'zIndex', 1);
+					graph.setEdgeAttribute(edge, 'zIndex', -1);
 					graph.setEdgeAttribute(edge, 'size', spokeSize);
 				} else {
 					// Fade other lines hard so selected spokes read clearly.
+					// Gray/disabled edges stay ghosted (never blue-highlighted).
 					graph.setEdgeAttribute(edge, 'type', 'line');
-					graph.setEdgeAttribute(edge, 'color', 'rgba(100,116,139,0.04)');
-					graph.setEdgeAttribute(edge, 'zIndex', -2);
+					graph.setEdgeAttribute(edge, 'color', disabled ? 'rgba(100,116,139,0.06)' : 'rgba(100,116,139,0.04)');
+					graph.setEdgeAttribute(edge, 'zIndex', -3);
 					graph.setEdgeAttribute(edge, 'size', Math.max(0.4, Math.min(1.1, baseSize > 1 ? baseSize * 0.35 : 0.55)));
 				}
 				return;
@@ -818,7 +832,7 @@ export default function GlobalGraphPage() {
 
 			graph.setEdgeAttribute(edge, 'type', 'line');
 			graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), false));
-			graph.setEdgeAttribute(edge, 'zIndex', -1);
+			graph.setEdgeAttribute(edge, 'zIndex', -2);
 			graph.setEdgeAttribute(edge, 'size', baseSize);
 		});
 
@@ -854,11 +868,12 @@ export default function GlobalGraphPage() {
 			// Restore base geometry if highlight isn't about to repaint.
 			const attrs = graph.getNodeAttributes(nodeId);
 			const baseColor = String(attrs.baseColor || attrs.color || '#94a3b8');
-			const baseSize = Number(attrs.baseSize || attrs.size || 2);
+			const fixedSize = staticNodeSize();
 			if (focusedIdRef.current !== nodeId && hoverIdRef.current !== nodeId && !selectedIdsRef.current.has(nodeId)) {
 				graph.setNodeAttribute(nodeId, 'color', baseColor);
-				graph.setNodeAttribute(nodeId, 'size', baseSize);
-				graph.setNodeAttribute(nodeId, 'zIndex', 1);
+				graph.setNodeAttribute(nodeId, 'size', fixedSize);
+				graph.setNodeAttribute(nodeId, 'baseSize', fixedSize);
+				graph.setNodeAttribute(nodeId, 'zIndex', 2);
 				graph.setNodeAttribute(nodeId, 'forceLabel', false);
 			}
 		} catch {
@@ -1054,7 +1069,8 @@ export default function GlobalGraphPage() {
 	const ensureNodeOnGraph = useCallback((n: LayoutNode): boolean => {
 		const graph = graphRef.current;
 		if (!graph || graph.hasNode(n.id)) return false;
-		const size = Number(n.size) > 0 ? Number(n.size) : displayNodeSize(n.degree, n.type, n.weight);
+		// Hard-coded screen px — never derive from degree/weight/layout size.
+		const size = staticNodeSize();
 		graph.addNode(n.id, {
 			label: n.label,
 			x: n.x * LAYOUT_SPREAD,
@@ -1071,7 +1087,7 @@ export default function GlobalGraphPage() {
 			brokerCount: n.brokerCount || 0,
 			firmLinkCount: n.firmLinkCount || 0,
 			cluster: n.cluster,
-			zIndex: 1,
+			zIndex: 2,
 			forceLabel: false,
 			pinned: false,
 		});
@@ -1099,7 +1115,7 @@ export default function GlobalGraphPage() {
 				filterHidden: false,
 				hidden: false,
 				typeHidden: enabled[et] === false,
-				zIndex: -1,
+				zIndex: -2,
 			});
 			return true;
 		} catch {
@@ -1157,13 +1173,15 @@ export default function GlobalGraphPage() {
 				}
 			}
 
-			// Open dense firm-link clumps (bottom-right style packs) then hard-separate disks.
+			// Open dense firm-link clumps then separate using a fixed graph-space radius
+			// (not the screen-pixel STATIC_NODE_SIZE — those units must stay independent).
 			if (added > 0 && graph.order >= 4) {
 				loosenDenseClusters(graph, { iterations: 12, strength: 0.28, minDegree: 3 });
 				resolveNodeOverlaps(graph, {
 					maxIterations: 220,
-					padding: 7,
-					sizeToGraph: LAYOUT_SPREAD * 0.72,
+					padding: 4,
+					// Force every disk to COLLISION_GRAPH_RADIUS regardless of attrs.size.
+					sizeToGraph: COLLISION_GRAPH_RADIUS / Math.max(1e-6, staticNodeSize()),
 				});
 			}
 
@@ -1413,13 +1431,21 @@ export default function GlobalGraphPage() {
 				const graph = new GraphCtor({ type: 'undirected', multi: false, allowSelfLoops: false });
 				// Reset label hit targets each paint cycle (before labels layer draws).
 				labelHitBoxesRef.current = [];
+				const fixedSize = staticNodeSize();
 				const sigma = new SigmaCtor(graph, containerRef.current, {
 					allowInvalidContainer: true,
 					renderLabels: true,
-					// Node/edge sizes are screen-pixel constants (do not grow when zoomed out).
-					// Default Math.sqrt shrinks slower than spacing → disks overlap when zoomed out.
+					// Screen-pixel sizes: scaleSize(s) = s / zoomFn(ratio) [* positions term].
+					// Linear zoomFn + 'screen' => rendered radius scales exactly with zoom.
 					itemSizesReference: 'screen',
-					zoomToSizeRatioFunction: () => 1,
+					zoomToSizeRatioFunction: (ratio) => ratio,
+					// Clamp every node to STATIC_NODE_SIZE on each indexation (overrides any
+					// stale size/baseSize and ignores degree/weight in the data path).
+					nodeReducer: (_id, attrs) => ({
+						...attrs,
+						size: fixedSize,
+						baseSize: fixedSize,
+					}),
 					// Labels use fixed CSS px via drawLabelAbove; keep threshold low so they stay on.
 					labelRenderedSizeThreshold: 0,
 					labelDensity: 0.55,
@@ -1432,8 +1458,8 @@ export default function GlobalGraphPage() {
 						drawLabelAbove(context, data as any, settings as any, { hover: false, recordHit: true });
 					},
 					defaultDrawNodeHover: (context, data, settings) => {
-						// Disc under cursor + label chip above (not to the right).
-						const size = Number((data as any).size) || 4;
+						// Hover disc uses the same fixed radius (ignore any reducer-stale attr).
+						const size = fixedSize;
 						const x = Number((data as any).x) || 0;
 						const y = Number((data as any).y) || 0;
 						context.fillStyle = String((data as any).color || '#f8fafc');
@@ -1455,6 +1481,47 @@ export default function GlobalGraphPage() {
 					maxCameraRatio: 40,
 					zIndex: true,
 				});
+				// Re-assert after construct — some Sigma paths re-merge defaults once.
+				sigma.setSetting('itemSizesReference', 'screen');
+				sigma.setSetting('zoomToSizeRatioFunction', (ratio) => ratio);
+				sigma.setSetting('nodeReducer', (_id, attrs) => ({
+					...attrs,
+					size: fixedSize,
+					baseSize: fixedSize,
+					// Keep every node above every edge in the zIndex-enabled programs.
+					zIndex: Math.max(2, Number(attrs.zIndex) || 0),
+				}));
+				sigma.setSetting('edgeReducer', (_id, attrs) => ({
+					...attrs,
+					// Edges always stay under the node layer (never compete with disks).
+					zIndex: Math.min(-1, Number(attrs.zIndex) || -1),
+				}));
+
+				// Hard DOM/CSS stack: edges under nodes under labels (Sigma default
+				// append order can lose to host CSS; pin it explicitly).
+				const pinLayerStack = () => {
+					const host = containerRef.current;
+					if (!host) return;
+					const order = ['edges', 'edgeLabels', 'nodes', 'labels', 'hovers', 'hoverNodes', 'mouse'] as const;
+					const zFor: Record<string, number> = {
+						edges: 1,
+						edgeLabels: 2,
+						nodes: 3,
+						labels: 4,
+						hovers: 5,
+						hoverNodes: 6,
+						mouse: 7,
+					};
+					for (const id of order) {
+						const el = host.querySelector(`canvas.sigma-${id}`) as HTMLCanvasElement | null;
+						if (!el) continue;
+						el.style.position = 'absolute';
+						el.style.inset = '0';
+						el.style.zIndex = String(zFor[id] ?? 1);
+						host.appendChild(el); // re-append in paint order (last = top)
+					}
+				};
+				pinLayerStack();
 
 				// Clear hit boxes at the start of each Sigma render so stale rects don't linger.
 				const clearLabelHits = () => {
@@ -2785,6 +2852,28 @@ export default function GlobalGraphPage() {
 					outline: none;
 					width: 100% !important;
 					height: 100% !important;
+					position: absolute !important;
+					inset: 0;
+					/* Default under nodes; specific layers override below. */
+					z-index: 1;
+				}
+				/* Edges must never paint over node disks. */
+				.gg-webgl-host canvas.sigma-edges {
+					z-index: 1 !important;
+				}
+				.gg-webgl-host canvas.sigma-edgeLabels {
+					z-index: 2 !important;
+				}
+				.gg-webgl-host canvas.sigma-nodes {
+					z-index: 3 !important;
+				}
+				.gg-webgl-host canvas.sigma-labels,
+				.gg-webgl-host canvas.sigma-hovers,
+				.gg-webgl-host canvas.sigma-hoverNodes {
+					z-index: 4 !important;
+				}
+				.gg-webgl-host canvas.sigma-mouse {
+					z-index: 5 !important;
 				}
 				.fg-loading-overlay,
 				.fg-empty-card {

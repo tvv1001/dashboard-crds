@@ -2236,10 +2236,13 @@ export default function NodeGraphPage() {
 								if (!sourcePos || !targetPos) return null;
 								const dimmed = traceConnectedIds ? !(traceConnectedIds.has(sourceId) && traceConnectedIds.has(targetId)) : false;
 								const isPrevious = link.isCurrent === false || /previous|former|prior/i.test(String(link.label || ''));
+								// Selection only lights active/current spokes — never gray previous/disabled lines.
+								const touchesSelection = Boolean(focusedNodeId) && (sourceId === focusedNodeId || targetId === focusedNodeId);
+								const isSelectedSpoke = touchesSelection && !isPrevious && !dimmed;
 								return (
 									<line
 										key={`${sourceId}-${targetId}-${link.label}-${isPrevious ? 'prev' : 'curr'}`}
-										className={`graph-link-glow${isPrevious ? ' previous' : ' current'}${dimmed ? ' dimmed' : ''}`}
+										className={`graph-link-glow${isPrevious ? ' previous' : ' current'}${dimmed ? ' dimmed' : ''}${isSelectedSpoke ? ' selected' : ''}${touchesSelection && isPrevious ? ' selection-muted' : ''}`}
 										x1={sourcePos.x}
 										y1={sourcePos.y}
 										x2={targetPos.x}
@@ -2819,7 +2822,7 @@ export default function NodeGraphPage() {
 					stroke: rgba(6, 182, 212, 0.55);
 					stroke-width: 1.75;
 				}
-				/* Previous / former relationships: thinner light gray. */
+				/* Previous / former relationships: thinner light gray (never selection-highlighted). */
 				.graph-link-glow.previous {
 					stroke: rgba(203, 213, 225, 0.42);
 					stroke-width: 0.9;
@@ -2827,6 +2830,21 @@ export default function NodeGraphPage() {
 				}
 				.theme-light .graph-link-glow.previous {
 					stroke: rgba(148, 163, 184, 0.55);
+				}
+				/* Active spoke on selected node only (current edges). */
+				.graph-link-glow.current.selected {
+					stroke: rgba(56, 189, 248, 0.95);
+					stroke-width: 2.6;
+				}
+				/* Gray/previous edges that touch the selection stay muted — not blue. */
+				.graph-link-glow.previous.selection-muted {
+					stroke: rgba(148, 163, 184, 0.28);
+					stroke-width: 0.85;
+					opacity: 0.55;
+				}
+				.theme-light .graph-link-glow.previous.selection-muted {
+					stroke: rgba(148, 163, 184, 0.4);
+					opacity: 0.5;
 				}
 				.graph-link-glow.dimmed {
 					opacity: 0.12;
