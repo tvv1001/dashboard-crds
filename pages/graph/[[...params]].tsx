@@ -5,7 +5,7 @@ import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import * as d3 from 'd3';
 import { useSharedGraphState } from '../../src/hooks/useSharedGraphState';
 import { parseCrdKey } from '../../src/lib/parseKey';
-import { extractNamesFromPayload, getContentBlock } from '../../src/lib/extractNames';
+import { extractNamesFromPayload, getContentBlock, resolveEntityDisplayName } from '../../src/lib/extractNames';
 import { toProperCaseName } from '../../src/lib/format';
 import { PanelHeader } from '../../src/components/panel/PanelHeader';
 import { StatusBox } from '../../src/components/panel/StatusBox';
@@ -576,12 +576,20 @@ export default function NodeGraphPage() {
 	const secContent = useMemo(() => getContentBlock(parsedPayload, 'sec', entityType), [parsedPayload, entityType]);
 	const primaryContent = (finraContent?.basicInformation ? finraContent : secContent) as Record<string, any> | null;
 
-	const nameInfo = useMemo(() => extractNamesFromPayload(primaryContent, entityType), [primaryContent, entityType]);
+	const nameInfo = useMemo(() => extractNamesFromPayload(primaryContent ?? parsedPayload, entityType), [primaryContent, parsedPayload, entityType]);
 
 	const entityTitle = useMemo(() => {
-		if (entityType === 'individual' && nameInfo.primary) return toProperCaseName(nameInfo.primary);
-		return nameInfo.primary || activeSnapshot?.resolvedKey || activeSnapshot?.key || 'Shared record';
-	}, [nameInfo, entityType, activeSnapshot]);
+		const crd = parsedKeyInfo?.crd || '';
+		const resolved = resolveEntityDisplayName({
+			payload: parsedPayload,
+			type: entityType,
+			crd,
+			candidates: [nameInfo.primary],
+		});
+		const title = resolved || crd || activeSnapshot?.resolvedKey || activeSnapshot?.key || '';
+		if (entityType === 'individual' && title && title !== crd) return toProperCaseName(title);
+		return title;
+	}, [nameInfo, entityType, activeSnapshot, parsedPayload, parsedKeyInfo]);
 
 	// Hub business location (firm office or individual's current branch) so
 	// the primary node participates in location clustering with neighbors.
@@ -737,10 +745,10 @@ export default function NodeGraphPage() {
 
 	// ── Search / load ─────────────────────────────────────────────────────────
 	// Fetches a single explicit key (e.g. "finra:firm:10409") from /api/key and,
-	// if found, stores it in the shared graph cache. Returns whether the
-	// backend actually found FINRA or SEC data for that key (as opposed to an
-	// empty/orphan placeholder), so callers can decide whether to try an
-	// alternate guess (e.g. individual vs firm) before giving up.
+	// if found, stores it in the shared graph cache. Treats orphan CRD bundles
+	// (scraped from a parent firm with no live FINRA/SEC profile) as found so
+	// deep-links like /graph/individual/<orphanCrd> don't show a false "not found"
+	// error under search.
 	const fetchAndApplyKey = useCallback(
 		(key: string, requestKey: string, options?: { force?: boolean; asHub?: boolean }) => {
 			return fetch(`/api/key?name=${encodeURIComponent(key)}${options?.force ? `&t=${Date.now()}` : ''}`)
@@ -750,10 +758,21 @@ export default function NodeGraphPage() {
 					return data;
 				})
 				.then((data) => {
-					const found = Boolean(data?.bundle?.sources?.finra?.found || data?.bundle?.sources?.sec?.found);
+					const bundle = data?.bundle && typeof data.bundle === 'object' ? data.bundle : null;
+					const liveFound = Boolean(bundle?.sources?.finra?.found || bundle?.sources?.sec?.found);
+					const orphan =
+						bundle?.orphan && typeof bundle.orphan === 'object' ? bundle.orphan
+						: data?.orphan && typeof data.orphan === 'object' ? data.orphan
+						: null;
+					const hasOrphanCard = Boolean(orphan);
+					const found = liveFound || hasOrphanCard;
 					if (!found) return { found: false as const, data, resolvedKey: key, detailValue: null as string | null };
 					const resolvedKey = typeof data?.resolvedKey === 'string' ? data.resolvedKey : key;
-					const detailValue = typeof data?.rawPayload === 'string' ? data.rawPayload : JSON.stringify(data?.payload ?? data ?? null, null, 2);
+					// Prefer API rawPayload (dashboard/StatusBox parity); fall back to orphan bundle JSON.
+					const detailValue =
+						typeof data?.rawPayload === 'string' ? data.rawPayload
+						: bundle ? JSON.stringify(bundle, null, 2)
+						: JSON.stringify(data?.payload ?? data ?? null, null, 2);
 					const snapshot = { key: requestKey, resolvedKey, detailJson: detailValue, fetchedAt: Date.now(), source: 'shared' as const };
 					setSnapshot(requestKey, snapshot);
 					if (resolvedKey !== requestKey) setSnapshot(resolvedKey, snapshot);
@@ -971,7 +990,12 @@ export default function NodeGraphPage() {
 						const crd = idValue(match.crd);
 						if (!type || !crd) return null;
 						const id = `search-${type}-${crd}`;
-						const label = stringValue(match.name) || `${type === 'firm' ? 'Firm' : 'Individual'} ${crd}`;
+						const label =
+							resolveEntityDisplayName({
+								type: type as GraphEntityType,
+								crd,
+								candidates: [stringValue(match.name), stringValue(match.displayName)],
+							}) || crd;
 						return {
 							id,
 							label,

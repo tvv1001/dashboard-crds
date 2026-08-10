@@ -8,7 +8,7 @@ import { StatusConsole } from './StatusConsole';
 import { StatusBox } from './StatusBox';
 import { LocalNameSearch } from './LocalNameSearch';
 import { parseCrdKey } from '../../lib/parseKey';
-import { extractNamesFromPayload, getContentBlock } from '../../lib/extractNames';
+import { extractNamesFromPayload, getContentBlock, resolveEntityDisplayName } from '../../lib/extractNames';
 
 interface Props {
 	activeKey: string;
@@ -144,11 +144,14 @@ export function Panel({
 		const signature = `${parsed.type}:${parsed.crd}`;
 		try {
 			const payload = JSON.parse(detailJson);
-			const orphanName =
-				payload && typeof payload === 'object' && payload.orphan && typeof payload.orphan === 'object' && typeof payload.orphan.name === 'string' ? payload.orphan.name : '';
-			const content = getContentBlock(payload, parsed.source, parsed.type);
-			const name = orphanName || extractNamesFromPayload(content ?? payload, parsed.type as 'individual' | 'firm').primary;
-			if (name) {
+			const name = resolveEntityDisplayName({
+				payload,
+				type: parsed.type as 'individual' | 'firm',
+				crd: parsed.crd,
+				source: parsed.source,
+			});
+			// Skip bare-CRD-only values so history keeps waiting for a real name.
+			if (name && name !== parsed.crd) {
 				setHistoryNameCache((prev) => {
 					if (prev[signature] === name) return prev;
 					const next = { ...prev, [signature]: name };
@@ -176,8 +179,11 @@ export function Panel({
 					const finraMatch = payloads.find((p) => p.key === `finra:${entryParsed.type}:${entryParsed.crd}`) as (SavedPayload & { displayName?: string }) | undefined;
 					const secMatch = payloads.find((p) => p.key === `sec:${entryParsed.type}:${entryParsed.crd}`) as (SavedPayload & { displayName?: string }) | undefined;
 					const signature = `${entryParsed.type}:${entryParsed.crd}`;
-					const label =
-						historyNameCache[signature] || finraMatch?.displayName || secMatch?.displayName || `${entryParsed.type === 'firm' ? 'Firm' : 'Individual'} ${entryParsed.crd}`;
+					const label = resolveEntityDisplayName({
+						type: entryParsed.type as 'individual' | 'firm',
+						crd: entryParsed.crd,
+						candidates: [historyNameCache[signature], finraMatch?.displayName, secMatch?.displayName],
+					});
 					return { key, label, hasFinra: Boolean(finraMatch), hasSec: Boolean(secMatch), ...entryParsed };
 				})
 				.filter((entry): entry is NonNullable<typeof entry> => entry != null),

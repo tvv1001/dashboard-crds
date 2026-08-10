@@ -79,9 +79,7 @@ function buildNodeFromPayload(type: CycleNodeType, crd: string, payload: Record<
 			.filter(Boolean)
 			.join(' ');
 		if (Array.isArray(payload.otherNames)) {
-			otherNames = (payload.otherNames as Record<string, unknown>[])
-				.map((nm) => [nm.firstName, nm.lastName].filter(Boolean).join(' '))
-				.join(', ');
+			otherNames = (payload.otherNames as Record<string, unknown>[]).map((nm) => [nm.firstName, nm.lastName].filter(Boolean).join(' ')).join(', ');
 		}
 		const emps = Array.isArray(payload.currentEmployments) ? (payload.currentEmployments as Record<string, unknown>[]) : [];
 		const branch = getObj(emps[0]?.branchLocation);
@@ -100,9 +98,7 @@ function buildNodeFromPayload(type: CycleNodeType, crd: string, payload: Record<
 		const disc = Array.isArray(payload.disclosures) ? (payload.disclosures as Record<string, unknown>[]) : [];
 		const terms = disc.filter((d) => d.disclosureType === 'Termination' || d.DisclosureType === 'Termination');
 		if (terms.length > 0) {
-			terminationDetail = terms
-				.map((t) => getObj(t.disclosureDetail).allegations || getObj(t.DisclosureDetail).Allegations || 'Terminated')
-				.join('; ');
+			terminationDetail = terms.map((t) => getObj(t.disclosureDetail).allegations || getObj(t.DisclosureDetail).Allegations || 'Terminated').join('; ');
 		}
 		disclosureDetail = disc.length > 0 ? `Has ${disc.length} disclosures` : 'None';
 	} else {
@@ -262,8 +258,8 @@ export function mergeNodeIntoGraph(graph: CycleGraph, type: CycleNodeType, crd: 
 }
 
 export function formatNodeLabel(node: CycleGraphNode | undefined, fallbackType: CycleNodeType, fallbackCrd: string): string {
-	if (!node) return `CRD ${fallbackCrd}`;
-	const name = node.name || (node.type === 'individual' ? `CRD ${node.crd}` : `Firm ${node.crd}`);
+	if (!node) return fallbackCrd;
+	const name = node.name || node.crd;
 	if (node.type === 'firm' && node.secNumber) {
 		return `${name} :: CRD# ${node.crd} / SEC# ${node.secNumber}`;
 	}

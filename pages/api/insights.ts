@@ -143,7 +143,6 @@ async function mapWithConcurrency<T, R>(items: T[], limit: number, fn: (item: T)
 	return results;
 }
 
-
 // FINRA directOwners/indirectOwners rows store `legalName` as
 // "LAST, FIRST MIDDLE" in all caps — reformat to "First Middle Last" title
 // case for display, matching how individual names read elsewhere in the app.
@@ -160,7 +159,7 @@ function formatOwnerName(raw: string): string {
 			word
 				.split('-')
 				.map((part) => (part ? part.charAt(0).toUpperCase() + part.slice(1) : part))
-				.join('-')
+				.join('-'),
 		)
 		.join(' ');
 }
@@ -193,10 +192,7 @@ async function loadNodeFromMatch(crd: string, entry: { key: string; source: stri
 	// "established" date exists for a person).
 	const firmAddress = getObject(payload.firmAddressDetails) || {};
 	const branchOffice = payload.currentEmployments?.[0]?.branchOfficeLocations?.[0];
-	const address =
-		type === 'firm'
-			? formatAddress(firmAddress.officeAddress) || formatAddress(firmAddress.mailingAddress) || undefined
-			: formatAddress(branchOffice) || undefined;
+	const address = type === 'firm' ? formatAddress(firmAddress.officeAddress) || formatAddress(firmAddress.mailingAddress) || undefined : formatAddress(branchOffice) || undefined;
 	const established = type === 'firm' ? toAddressText(bi.formedDate) || undefined : undefined;
 
 	return {
@@ -263,10 +259,16 @@ async function loadNode(crd: string, requestedType?: string): Promise<LoadNodeRe
 	} else if (distinctTypes.length > 1) {
 		const options = await Promise.all(
 			distinctTypes.map(async (type) => {
-				const preferred = matches.filter((entry) => entry.type === type).sort((a, b) => (a.source === 'finra' ? -1 : b.source === 'finra' ? 1 : 0))[0];
+				const preferred = matches
+					.filter((entry) => entry.type === type)
+					.sort((a, b) =>
+						a.source === 'finra' ? -1
+						: b.source === 'finra' ? 1
+						: 0,
+					)[0];
 				const { info } = await loadNodeFromMatch(crd, preferred);
 				return { crd, type: type as 'individual' | 'firm', name: info.name, source: info.source };
-			})
+			}),
 		);
 		return { kind: 'ambiguous', options };
 	}
@@ -326,7 +328,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 			const owner = nodeData.owner;
 			const info: NodeInfo = {
 				crd,
-				name: owner.name || `CRD ${crd}`,
+				name: owner.name || crd,
 				type: 'individual',
 				source: 'scraped',
 				location: formatAddress(owner.officeAddress) || formatAddress(owner.mailingAddress) || undefined,
@@ -335,7 +337,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 			const connections: Connection[] = [
 				{
 					targetCrd: owner.parentCrd,
-					targetName: owner.firmName || `Firm CRD ${owner.parentCrd}`,
+					targetName: owner.firmName || owner.parentCrd,
 					type: 'OWNER/EXEC',
 					role: owner.position || undefined,
 				},

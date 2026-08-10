@@ -1,9 +1,22 @@
 'use client';
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { parseCrdKey } from '../../lib/parseKey';
 import { bucketConnectionRows, extractConnectionRows, isCurrentConnectionRow } from './connectionData';
 import { deriveStatusBadge, deriveTerminatedBadge, type RecordStatusBadge } from '../../lib/statusBadge';
 import { toProperCaseName } from '../../lib/format';
+
+/** Most-recent-first node selection row for the Log tab. */
+export type SelectionLogEntry = {
+	id: string;
+	label: string;
+	/** `Name :: CRD# n` or `Name :: CRD# n / SEC# m` */
+	display: string;
+	type?: 'individual' | 'firm' | 'unknown' | string;
+	crd?: string;
+	secNumber?: string | null;
+	key?: string;
+	ts?: number;
+};
 
 interface Props {
 	statusMsg: string;
@@ -14,6 +27,10 @@ interface Props {
 	fetchLog: string[];
 	onClearLog: () => void;
 	onSelectKey: (key: string) => void;
+	/** Optional structured selection history (newest first). Prefer over plain fetchLog strings. */
+	selectionLog?: SelectionLogEntry[];
+	onClearSelectionLog?: () => void;
+	onFocusSelectionLogEntry?: (entry: SelectionLogEntry) => void;
 }
 
 type DetailTab = 'info' | 'log';
@@ -1310,7 +1327,7 @@ function RecordInfoView({
 					.filter(Boolean),
 			),
 		).sort((a, b) => a.localeCompare(b));
-		const headlineName = mergedNames[0]?.value || `CRD ${crd}`;
+		const headlineName = mergedNames[0]?.value || crd;
 		const linkedFallbackType: 'individual' | 'firm' = type === 'individual' ? 'firm' : 'individual';
 		const isFirmRecord = type === 'firm';
 		return (
@@ -1561,7 +1578,8 @@ function RecordInfoView({
 	const directOwners = toArray(body.directOwners);
 	const affiliateDisclosures = body.affiliateDisclosures && typeof body.affiliateDisclosures === 'object' ? body.affiliateDisclosures : {};
 
-	const name = pickFirstNonEmpty(basic.iaFirmName, basic.firmName, basic.fullName, basic.individualName) || (parsedKey ? `CRD ${parsedKey.crd}` : 'CRD record');
+	const name =
+		pickFirstNonEmpty(basic.iaFirmName, basic.firmName, basic.fullName, basic.individualName, basic.orgName, (body as any)?.orphan?.name) || (parsedKey ? parsedKey.crd : '');
 	const crd = pickFirstNonEmpty(basic.firmId, basic.individualId, basic.crdNumber, parsedKey?.crd);
 	const secNumber = pickFirstNonEmpty(basic.iaSECNumber, basic.bdSECNumber);
 	const officeAddress = formatAddress(body.iaFirmAddressDetails?.officeAddress) || formatAddress(body.firmAddressDetails?.officeAddress) || extractCurrentBranchOfficeAddress(body);
@@ -1836,9 +1854,35 @@ function RecordInfoView({
 	);
 }
 
-export function StatusBox({ statusMsg, statusHtml, detailJson, panelLoading, activeKey, fetchLog, onClearLog, onSelectKey }: Props) {
+export function StatusBox({
+	statusMsg,
+	statusHtml,
+	detailJson,
+	panelLoading,
+	activeKey,
+	fetchLog,
+	onClearLog,
+	onSelectKey,
+	selectionLog = [],
+	onClearSelectionLog,
+	onFocusSelectionLogEntry,
+}: Props) {
 	const [jsonCopied, setJsonCopied] = useState(false);
 	const [activeTab, setActiveTab] = useState<DetailTab>('info');
+	const [logFilter, setLogFilter] = useState('');
+	const [logCopied, setLogCopied] = useState(false);
+
+	const hasSelectionLog = selectionLog.length > 0;
+	const showLogTab = Boolean(detailJson) || hasSelectionLog || fetchLog.length > 0;
+
+	const filteredSelectionLog = useMemo(() => {
+		const q = logFilter.trim().toLowerCase();
+		if (!q) return selectionLog;
+		return selectionLog.filter((row) => {
+			const hay = `${row.display} ${row.label} ${row.crd || ''} ${row.secNumber || ''} ${row.id} ${row.type || ''}`.toLowerCase();
+			return hay.includes(q);
+		});
+	}, [logFilter, selectionLog]);
 
 	async function handleCopyJson() {
 		if (!detailJson) return;
@@ -1851,12 +1895,33 @@ export function StatusBox({ statusMsg, statusHtml, detailJson, panelLoading, act
 		}
 	}
 
+	async function handleCopySelectionLog() {
+		const text = (filteredSelectionLog.length ? filteredSelectionLog : selectionLog).map((r) => r.display).join('\n');
+		if (!text) return;
+		try {
+			await navigator.clipboard.writeText(text);
+			setLogCopied(true);
+			window.setTimeout(() => setLogCopied(false), 1200);
+		} catch {
+			setLogCopied(false);
+		}
+	}
+
+	function handleActivateLogEntry(entry: SelectionLogEntry) {
+		if (onFocusSelectionLogEntry) {
+			onFocusSelectionLogEntry(entry);
+			return;
+		}
+		const key = entry.key || (entry.crd ? `finra:${entry.type === 'firm' ? 'firm' : 'individual'}:${entry.crd}` : '');
+		if (key) onSelectKey(key);
+	}
+
 	return (
 		<div className='status-box'>
 			<div className='status-box-header'>
 				<div className='status-box-header-left'>
 					{statusMsg && <div className='status-msg'>{statusMsg}</div>}
-					{detailJson && (
+					{showLogTab && (
 						<div className='record-detail-tabs'>
 							<button
 								type='button'
@@ -1868,13 +1933,22 @@ export function StatusBox({ statusMsg, statusHtml, detailJson, panelLoading, act
 								type='button'
 								className={`record-detail-tab ${activeTab === 'log' ? 'active' : ''}`}
 								onClick={() => setActiveTab('log')}>
-								Log
+								Log{hasSelectionLog ? ` (${selectionLog.length})` : ''}
 							</button>
 						</div>
 					)}
 				</div>
 				<div className='status-box-header-actions'>
-					{fetchLog.length > 0 && (
+					{activeTab === 'log' && hasSelectionLog && (
+						<button
+							type='button'
+							className='clear-log-btn'
+							onClick={() => (onClearSelectionLog ? onClearSelectionLog() : onClearLog())}
+							title='Clear selection log'>
+							Clear
+						</button>
+					)}
+					{activeTab !== 'log' && fetchLog.length > 0 && (
 						<button
 							className='clear-log-btn'
 							onClick={onClearLog}
@@ -1885,9 +1959,9 @@ export function StatusBox({ statusMsg, statusHtml, detailJson, panelLoading, act
 				</div>
 			</div>
 
-			{activeTab === 'log' && fetchLog.length > 0 && <pre className='terminal-output'>{[...fetchLog].reverse().join('\n')}</pre>}
+			{activeTab === 'log' && !hasSelectionLog && fetchLog.length > 0 && <pre className='terminal-output'>{[...fetchLog].reverse().join('\n')}</pre>}
 
-			{panelLoading && (
+			{panelLoading && activeTab === 'info' && (
 				<div
 					className='panel-loading-state'
 					role='status'
@@ -1908,7 +1982,104 @@ export function StatusBox({ statusMsg, statusHtml, detailJson, panelLoading, act
 				/>
 			)}
 
-			{detailJson && activeTab === 'log' && !panelLoading && (
+			{activeTab === 'log' && hasSelectionLog && (
+				<div className='selection-log'>
+					<div className='selection-log-toolbar'>
+						<span className='selection-log-title'>Selection Log</span>
+						<div className='selection-log-actions'>
+							<button
+								type='button'
+								className='selection-log-btn'
+								onClick={handleCopySelectionLog}
+								title='Copy visible log lines'>
+								{logCopied ? 'Copied' : 'Copy All'}
+							</button>
+							<button
+								type='button'
+								className='selection-log-btn'
+								onClick={() => (onClearSelectionLog ? onClearSelectionLog() : onClearLog())}
+								title='Clear selection log'>
+								Clear
+							</button>
+						</div>
+					</div>
+					<input
+						type='search'
+						className='selection-log-filter'
+						value={logFilter}
+						onChange={(e) => setLogFilter(e.target.value)}
+						placeholder='Filter log…'
+						aria-label='Filter selection log'
+					/>
+					<ul className='selection-log-list'>
+						{filteredSelectionLog.length === 0 ?
+							<li className='selection-log-empty'>No matches for “{logFilter.trim()}”</li>
+						:	filteredSelectionLog.map((entry, idx) => {
+								const isActive = Boolean(entry.crd && activeKey && activeKey.endsWith(`:${entry.crd}`)) || entry.id === activeKey.split(':').pop();
+								const colorClass =
+									entry.type === 'firm' ? 'is-firm'
+									: entry.type === 'individual' ? 'is-individual'
+									: 'is-unknown';
+								return (
+									<li
+										key={`${entry.id}-${entry.ts || idx}-${idx}`}
+										className={`selection-log-item ${colorClass}${isActive ? ' is-active' : ''}`}>
+										<button
+											type='button'
+											className='selection-log-main'
+											onClick={() => handleActivateLogEntry(entry)}
+											title={entry.display}>
+											<span className='selection-log-label'>{entry.display}</span>
+										</button>
+										<div className='selection-log-item-actions'>
+											<button
+												type='button'
+												className='selection-log-icon-btn'
+												title='Focus on map'
+												aria-label={`Focus ${entry.label}`}
+												onClick={() => handleActivateLogEntry(entry)}>
+												+
+											</button>
+											<button
+												type='button'
+												className='selection-log-icon-btn'
+												title='Copy line'
+												aria-label={`Copy ${entry.label}`}
+												onClick={async () => {
+													try {
+														await navigator.clipboard.writeText(entry.display);
+													} catch {
+														// ignore
+													}
+												}}>
+												⧉
+											</button>
+										</div>
+									</li>
+								);
+							})
+						}
+					</ul>
+					{detailJson && !panelLoading ?
+						<details className='selection-log-raw'>
+							<summary>Raw payload JSON</summary>
+							<div className='code-sample-wrap'>
+								<button
+									type='button'
+									className={`code-copy-btn ${jsonCopied ? 'is-copied' : ''}`}
+									onClick={handleCopyJson}
+									title={jsonCopied ? 'Copied!' : 'Copy code sample'}
+									aria-label={jsonCopied ? 'Code sample copied' : 'Copy code sample'}>
+									{jsonCopied ? '✓' : '⧉'}
+								</button>
+								<pre className='terminal-output json-detail'>{detailJson}</pre>
+							</div>
+						</details>
+					:	null}
+				</div>
+			)}
+
+			{detailJson && activeTab === 'log' && !hasSelectionLog && !panelLoading && (
 				<div className='code-sample-wrap'>
 					<button
 						type='button'
@@ -1922,7 +2093,7 @@ export function StatusBox({ statusMsg, statusHtml, detailJson, panelLoading, act
 				</div>
 			)}
 
-			{!detailJson && statusHtml && (
+			{!detailJson && statusHtml && activeTab === 'info' && (
 				<div
 					className='status-html-content'
 					dangerouslySetInnerHTML={{ __html: statusHtml }}

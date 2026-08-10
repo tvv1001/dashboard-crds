@@ -6,7 +6,53 @@ import type Graph from 'graphology';
 import type Sigma from 'sigma';
 import { useSharedGraphState } from '../../src/hooks/useSharedGraphState';
 import { PanelHeader } from '../../src/components/panel/PanelHeader';
-import { StatusBox } from '../../src/components/panel/StatusBox';
+import { StatusBox, type SelectionLogEntry } from '../../src/components/panel/StatusBox';
+
+function pickSecNumberFromDetailJson(detailJson: string | null | undefined): string | null {
+	if (!detailJson) return null;
+	try {
+		const root = JSON.parse(detailJson);
+		const walk = (node: unknown, depth = 0): Record<string, unknown> | null => {
+			if (!node || typeof node !== 'object' || depth > 8) return null;
+			const obj = node as Record<string, unknown>;
+			if (obj.basicInformation && typeof obj.basicInformation === 'object') {
+				return obj.basicInformation as Record<string, unknown>;
+			}
+			for (const key of ['content', 'data', 'payload', 'finraBrokerCheck', 'sources', 'finra', 'sec']) {
+				const child = obj[key];
+				if (child && typeof child === 'object') {
+					const found = walk(child, depth + 1);
+					if (found) return found;
+				}
+			}
+			// bundle.sources.finra.payload shape
+			if (obj.payload && typeof obj.payload === 'object') {
+				const found = walk(obj.payload, depth + 1);
+				if (found) return found;
+			}
+			return null;
+		};
+		const bi = walk(root) || {};
+		const sec =
+			bi.bdSECNumber != null && String(bi.bdSECNumber).trim() ? String(bi.bdSECNumber).trim()
+			: bi.iaSECNumber != null && String(bi.iaSECNumber).trim() ? String(bi.iaSECNumber).trim()
+			: null;
+		return sec;
+	} catch {
+		return null;
+	}
+}
+
+function formatSelectionLogDisplay(label: string, crd: string, secNumber?: string | null): string {
+	// Prefer real node labels; never invent "Individual/Firm …" generics.
+	const raw = String(label || '')
+		.replace(/\s+/g, ' ')
+		.trim();
+	const generic = !raw || /^(individual|firm|person|crd)(\s+#?\d+)?$/i.test(raw) || raw.toLowerCase() === `crd ${crd}`.toLowerCase();
+	const name = generic ? String(crd || '').trim() || raw : raw;
+	if (secNumber) return `${name} :: CRD# ${crd} / SEC# ${secNumber}`;
+	return `${name} :: CRD# ${crd}`;
+}
 
 type LayoutNode = {
 	id: string;
@@ -88,21 +134,28 @@ function normalizeEdgeType(raw: string | undefined): EdgeTypeKey {
 /** d3-force bake is already wide; client scale opens dense firm clusters more. */
 const LAYOUT_SPREAD = 1.7;
 
+type LabelHitBox = { nodeId: string; x: number; y: number; w: number; h: number };
+
+/** Viewport-space label rects from the last labels paint (for click/hover hit-tests). */
+const labelHitBoxesRef: { current: LabelHitBox[] } = { current: [] };
+
 /**
  * Draw labels centered above the node disk (Sigma default is to the right).
+ * Font size is always CSS/screen px (not zoom-scaled). Optionally records hit boxes.
  */
 function drawLabelAbove(
 	context: CanvasRenderingContext2D,
-	data: { x: number; y: number; size: number; label: string | null; color: string },
+	data: { x: number; y: number; size: number; label: string | null; color: string; key?: string },
 	settings: {
 		labelSize: number;
 		labelFont: string;
 		labelWeight: string;
 		labelColor: { color?: string; attribute?: string };
 	},
-	opts?: { hover?: boolean },
+	opts?: { hover?: boolean; recordHit?: boolean },
 ) {
 	if (!data.label) return;
+	// Fixed screen-pixel type — never scale with camera ratio.
 	const size = settings.labelSize;
 	const font = settings.labelFont;
 	const weight = settings.labelWeight;
@@ -116,8 +169,12 @@ function drawLabelAbove(
 	const w = Math.round(metrics.width + padX * 2);
 	const h = Math.round(size + padY * 2);
 	const x = data.x - w / 2;
-	// Place fully above the disk with a small gap.
+	// Place fully above the disk with a small gap (data.size is already viewport px).
 	const y = data.y - data.size - h - 4;
+
+	if (opts?.recordHit && data.key) {
+		labelHitBoxesRef.current.push({ nodeId: String(data.key), x, y, w, h });
+	}
 
 	if (opts?.hover) {
 		context.fillStyle = 'rgba(15,23,42,0.88)';
@@ -147,6 +204,20 @@ function drawLabelAbove(
 	context.textBaseline = 'middle';
 	context.textAlign = 'left';
 	context.fillText(text, x + padX, y + h / 2);
+}
+
+function hitTestLabel(clientX: number, clientY: number, container: HTMLElement | null): string | null {
+	if (!container) return null;
+	const rect = container.getBoundingClientRect();
+	const x = clientX - rect.left;
+	const y = clientY - rect.top;
+	// Top-most last drawn wins — walk reverse.
+	const boxes = labelHitBoxesRef.current;
+	for (let i = boxes.length - 1; i >= 0; i--) {
+		const b = boxes[i];
+		if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return b.nodeId;
+	}
+	return null;
 }
 
 /**
@@ -379,10 +450,13 @@ function displayNodeSize(degree: number, type?: string, weight?: number): number
 		t === 'individual' ? Math.max(wRaw, dRaw)
 		: wRaw > 0 ? wRaw
 		: dRaw;
-	const leaf = t === 'firm' ? 3.0 : 3.2;
-	const byW = Math.sqrt(Math.max(0, w)) * (t === 'firm' ? 0.52 : 0.62);
-	const cap = t === 'firm' ? 21 : 26;
-	return Math.min(cap, leaf + byW);
+	// Screen-pixel floor (itemSizesReference: 'screen' + identity zoom ratio) —
+	// smallest hubs must stay readable when zoomed in without growing on zoom-out.
+	const leaf = t === 'firm' ? 6.5 : 7.0;
+	const byW = Math.sqrt(Math.max(0, w)) * (t === 'firm' ? 0.48 : 0.55);
+	const cap = t === 'firm' ? 22 : 28;
+	const size = leaf + byW;
+	return Math.min(cap, Math.max(leaf, size));
 }
 
 /** Stamp final sizes onto layout nodes once so first paint never flashes tiny disks. */
@@ -419,6 +493,12 @@ function edgeColor(type: string, dimmed: boolean): string {
 	return dimmed ? `rgba(${base},0.05)` : `rgba(${base},${a})`;
 }
 
+/** Solid blue stroke for edges incident to the current selection (no dashes). */
+const SELECTED_EDGE_COLOR = 'rgba(56,189,248,1)';
+/** Screen-pixel thickness for selected hub→child spokes (itemSizesReference: screen). */
+const SELECTED_EDGE_SIZE = 2.8;
+const SELECTED_EDGE_SIZE_MAX = 4.2;
+
 /**
  * Global network map: WebGL via Sigma + graphology, positions precomputed offline.
  * Routes mirror ego graph / dashboard:
@@ -433,6 +513,8 @@ export default function GlobalGraphPage() {
 	const graphRef = useRef<Graph | null>(null);
 	const focusedIdRef = useRef<string | null>(null);
 	const pinnedIdRef = useRef<string | null>(null);
+	/** Multi-select set — previous selections stay until Clear Highlight. */
+	const selectedIdsRef = useRef<Set<string>>(new Set());
 	const hoverIdRef = useRef<string | null>(null);
 	const cameraPinUnlockRef = useRef<(() => void) | null>(null);
 	/** Last URL entity we applied or wrote — avoids replace loops. */
@@ -474,6 +556,8 @@ export default function GlobalGraphPage() {
 	const [generatedAt, setGeneratedAt] = useState<string | null>(null);
 	const [hover, setHover] = useState<HoverInfo | null>(null);
 	const [focus, setFocus] = useState<FocusInfo | null>(null);
+	/** Drives Clear Highlight enablement for multi-select (ref alone doesn't re-render). */
+	const [selectionCount, setSelectionCount] = useState(0);
 	const [filter, setFilter] = useState<'all' | 'firm' | 'individual'>('all');
 	const [query, setQuery] = useState('');
 	const [lodHint, setLodHint] = useState('blank · search to add');
@@ -491,7 +575,9 @@ export default function GlobalGraphPage() {
 		loading: boolean;
 		error: string;
 	} | null>(null);
+	const [selectionLog, setSelectionLog] = useState<SelectionLogEntry[]>([]);
 	const panelRequestRef = useRef(0);
+	const lastLoggedFocusIdRef = useRef<string | null>(null);
 	const { cache, setSnapshot, clear: clearSharedCache } = useSharedGraphState();
 	const [edgeTypesEnabled, setEdgeTypesEnabled] = useState<Record<EdgeTypeKey, boolean>>({
 		employment: true,
@@ -543,6 +629,8 @@ export default function GlobalGraphPage() {
 		return EDGE_TYPE_META.filter((m) => m.key === 'employment' || m.key === 'ownership');
 	}, [stats]);
 
+	const labelPointerCleanupRef = useRef<(() => void) | null>(null);
+
 	const destroySigma = useCallback(() => {
 		if (cameraPinUnlockRef.current) {
 			try {
@@ -552,6 +640,15 @@ export default function GlobalGraphPage() {
 			}
 			cameraPinUnlockRef.current = null;
 		}
+		if (labelPointerCleanupRef.current) {
+			try {
+				labelPointerCleanupRef.current();
+			} catch {
+				// ignore
+			}
+			labelPointerCleanupRef.current = null;
+		}
+		labelHitBoxesRef.current = [];
 		if (sigmaRef.current) {
 			try {
 				sigmaRef.current.kill();
@@ -572,12 +669,71 @@ export default function GlobalGraphPage() {
 
 		const focusId = focusedIdRef.current;
 		const hoverId = hoverIdRef.current;
-		const activeId = hoverId || focusId;
+		const selected = selectedIdsRef.current;
 
-		const neighborSet = new Set<string>();
-		if (activeId && graph.hasNode(activeId)) {
-			neighborSet.add(activeId);
-			graph.forEachNeighbor(activeId, (n) => neighborSet.add(n));
+		// Stable selection hubs (multi-select + primary focus). Hover is separate so
+		// mousing a firm doesn't light every employee while a child is selected.
+		const selectedHubIds = new Set<string>();
+		for (const id of selected) {
+			if (graph.hasNode(id)) selectedHubIds.add(id);
+		}
+		if (focusId && graph.hasNode(focusId)) selectedHubIds.add(focusId);
+
+		const selectedIndividuals = new Set<string>();
+		for (const id of selectedHubIds) {
+			const t = String(graph.getNodeAttribute(id, 'nodeType') || '');
+			if (t !== 'firm') selectedIndividuals.add(id);
+		}
+
+		/**
+		 * Child (individual) selected → only that node + edges to its parent(s).
+		 * Firm selected alone → all firm→child spokes.
+		 * Firm + some children selected → only spokes to those selected children
+		 * (never light sibling employees off the parent).
+		 */
+		const isEmphasizedEdge = (source: string, target: string): boolean => {
+			const srcSel = selectedHubIds.has(source);
+			const tgtSel = selectedHubIds.has(target);
+			if (!srcSel && !tgtSel) {
+				// Hover preview: only edges incident to the hovered node itself.
+				if (hoverId && (source === hoverId || target === hoverId)) return true;
+				return false;
+			}
+			// Edge between two selected hubs always counts.
+			if (srcSel && tgtSel) return true;
+
+			const hub = srcSel ? source : target;
+			const other = srcSel ? target : source;
+			const hubType = String(graph.getNodeAttribute(hub, 'nodeType') || '');
+
+			// Individual hub: every direct edge (to parent firm / other employers).
+			if (hubType !== 'firm') return true;
+
+			// Firm hub: if any individuals are selected, only keep edges to those
+			// selected children — do not fan out to every employee on the firm.
+			if (selectedIndividuals.size > 0) return selectedIndividuals.has(other);
+
+			// Firm-only selection (no selected children): full star.
+			return true;
+		};
+
+		const litNodeIds = new Set<string>();
+		for (const id of selectedHubIds) litNodeIds.add(id);
+		if (hoverId && graph.hasNode(hoverId)) litNodeIds.add(hoverId);
+
+		const hasSelectionOrHover = selectedHubIds.size > 0 || Boolean(hoverId && graph.hasNode(hoverId));
+
+		// Collect endpoints of emphasized edges so parent firm stays lit for a child pick.
+		if (hasSelectionOrHover) {
+			graph.forEachEdge((edge, attrs, source, target) => {
+				const et = normalizeEdgeType(String(attrs.edgeType || ''));
+				const typeOn = edgeTypesEnabledRef.current[et] !== false && !attrs.filterHidden && !attrs.typeHidden;
+				if (!typeOn) return;
+				if (isEmphasizedEdge(source, target)) {
+					litNodeIds.add(source);
+					litNodeIds.add(target);
+				}
+			});
 		}
 
 		const enabled = edgeTypesEnabledRef.current;
@@ -586,39 +742,36 @@ export default function GlobalGraphPage() {
 		graph.forEachNode((node, attrs) => {
 			const baseColor = String(attrs.baseColor || attrs.color || '#94a3b8');
 			const baseSize = Number(attrs.baseSize || attrs.size || 2);
-			if (!activeId) {
-				const isPinned = node === focusId;
-				graph.setNodeAttribute(node, 'color', isPinned ? '#ffffff' : baseColor);
-				// Keep baked non-overlap radii — emphasize pin with color/z only.
+			if (!hasSelectionOrHover) {
+				graph.setNodeAttribute(node, 'color', baseColor);
 				graph.setNodeAttribute(node, 'size', baseSize);
-				graph.setNodeAttribute(node, 'zIndex', isPinned ? 4 : 1);
-				graph.setNodeAttribute(node, 'forceLabel', isPinned);
-				graph.setNodeAttribute(node, 'pinned', isPinned);
+				graph.setNodeAttribute(node, 'zIndex', 1);
+				graph.setNodeAttribute(node, 'forceLabel', false);
+				graph.setNodeAttribute(node, 'pinned', false);
 				return;
 			}
-			const on = neighborSet.has(node);
+			const on = litNodeIds.has(node);
 			if (on) {
-				const isPinned = node === focusId;
-				const isCenter = node === activeId;
-				// Pinned selection stays brightest; do not inflate size (would re-overlap neighbors).
-				const highlight = isPinned || isCenter;
+				const isSelected = selected.has(node) || node === focusId;
+				const isHoverCenter = node === hoverId;
+				const highlight = isSelected || isHoverCenter;
 				graph.setNodeAttribute(
 					node,
 					'color',
-					isPinned ? '#ffffff'
-					: isCenter ? '#f8fafc'
+					isSelected ? '#ffffff'
+					: isHoverCenter ? '#f8fafc'
 					: baseColor,
 				);
 				graph.setNodeAttribute(node, 'size', baseSize);
 				graph.setNodeAttribute(
 					node,
 					'zIndex',
-					isPinned ? 4
-					: isCenter ? 3
+					isSelected ? 4
+					: isHoverCenter ? 3
 					: 2,
 				);
 				graph.setNodeAttribute(node, 'forceLabel', highlight || graph.degree(node) > 8);
-				graph.setNodeAttribute(node, 'pinned', isPinned);
+				graph.setNodeAttribute(node, 'pinned', isSelected);
 			} else {
 				graph.setNodeAttribute(node, 'color', 'rgba(100,116,139,0.18)');
 				// Dim without shrinking disks (preserves non-overlap footprint).
@@ -630,7 +783,7 @@ export default function GlobalGraphPage() {
 		});
 
 		// No selection: all type-enabled edges stay thin/visible.
-		// Selection/hover: only edges to the active node's neighbors (1-hop spokes).
+		// With selection(s)/hover: emphasize only the allowed spokes; fade the rest.
 		graph.forEachEdge((edge, attrs, source, target) => {
 			const et = normalizeEdgeType(String(attrs.edgeType || ''));
 			const typeOn = enabled[et] !== false && !attrs.filterHidden && !attrs.typeHidden;
@@ -640,22 +793,30 @@ export default function GlobalGraphPage() {
 			}
 
 			const baseSize = Number(attrs.baseSize) > 0 ? Number(attrs.baseSize) : edgeBaseSize(Number(attrs.weight));
-			const touchesActive = Boolean(activeId && (source === activeId || target === activeId));
+			const emphasize = hasSelectionOrHover && isEmphasizedEdge(source, target);
 
-			if (activeId) {
-				// Hide every line that is not a direct spoke of the selected/hovered node.
-				if (!touchesActive) {
-					graph.setEdgeAttribute(edge, 'hidden', true);
-					return;
+			graph.setEdgeAttribute(edge, 'hidden', false);
+
+			if (hasSelectionOrHover) {
+				if (emphasize) {
+					// Bright solid blue spokes — child→parent only when child is selected.
+					const weightBoost = Math.min(1.4, 1 + (Number(attrs.weight) || 1) * 0.04);
+					const spokeSize = Math.min(SELECTED_EDGE_SIZE_MAX, SELECTED_EDGE_SIZE * weightBoost);
+					graph.setEdgeAttribute(edge, 'type', 'line');
+					graph.setEdgeAttribute(edge, 'color', SELECTED_EDGE_COLOR);
+					graph.setEdgeAttribute(edge, 'zIndex', 1);
+					graph.setEdgeAttribute(edge, 'size', spokeSize);
+				} else {
+					// Fade other lines hard so selected spokes read clearly.
+					graph.setEdgeAttribute(edge, 'type', 'line');
+					graph.setEdgeAttribute(edge, 'color', 'rgba(100,116,139,0.04)');
+					graph.setEdgeAttribute(edge, 'zIndex', -2);
+					graph.setEdgeAttribute(edge, 'size', Math.max(0.4, Math.min(1.1, baseSize > 1 ? baseSize * 0.35 : 0.55)));
 				}
-				graph.setEdgeAttribute(edge, 'hidden', false);
-				graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), false));
-				graph.setEdgeAttribute(edge, 'zIndex', 0);
-				graph.setEdgeAttribute(edge, 'size', Math.min(0.14, baseSize * 1.85));
 				return;
 			}
 
-			graph.setEdgeAttribute(edge, 'hidden', false);
+			graph.setEdgeAttribute(edge, 'type', 'line');
 			graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), false));
 			graph.setEdgeAttribute(edge, 'zIndex', -1);
 			graph.setEdgeAttribute(edge, 'size', baseSize);
@@ -684,12 +845,17 @@ export default function GlobalGraphPage() {
 		const graph = graphRef.current;
 		if (!graph || !nodeId || !graph.hasNode(nodeId)) return;
 		try {
+			// Keep multi-selected nodes pinned until Clear Highlight.
+			if (selectedIdsRef.current.has(nodeId)) {
+				graph.setNodeAttribute(nodeId, 'pinned', true);
+				return;
+			}
 			graph.setNodeAttribute(nodeId, 'pinned', false);
 			// Restore base geometry if highlight isn't about to repaint.
 			const attrs = graph.getNodeAttributes(nodeId);
 			const baseColor = String(attrs.baseColor || attrs.color || '#94a3b8');
 			const baseSize = Number(attrs.baseSize || attrs.size || 2);
-			if (focusedIdRef.current !== nodeId && hoverIdRef.current !== nodeId) {
+			if (focusedIdRef.current !== nodeId && hoverIdRef.current !== nodeId && !selectedIdsRef.current.has(nodeId)) {
 				graph.setNodeAttribute(nodeId, 'color', baseColor);
 				graph.setNodeAttribute(nodeId, 'size', baseSize);
 				graph.setNodeAttribute(nodeId, 'zIndex', 1);
@@ -926,6 +1092,8 @@ export default function GlobalGraphPage() {
 				weight: e.weight,
 				size,
 				baseSize: size,
+				// Sigma render type: solid straight segment (not dashed/dotted).
+				type: 'line',
 				color: edgeColor(e.type || 'employment', false),
 				edgeType: e.type || 'employment',
 				filterHidden: false,
@@ -1040,6 +1208,8 @@ export default function GlobalGraphPage() {
 		setVisibleCount(0);
 		pinnedIdRef.current = null;
 		focusedIdRef.current = null;
+		selectedIdsRef.current.clear();
+		setSelectionCount(0);
 		hoverIdRef.current = null;
 		appliedRouteKeyRef.current = null;
 		setFocus(null);
@@ -1086,9 +1256,10 @@ export default function GlobalGraphPage() {
 				}
 			}
 
-			// Unlock previous selection before pinning the new one.
+			// Multi-select: keep previous hubs; only unlock camera pin when leaving a node
+			// that is no longer in the selection set (should not happen for prior picks).
 			const prevPinned = pinnedIdRef.current;
-			if (prevPinned && prevPinned !== nodeId) {
+			if (prevPinned && prevPinned !== nodeId && !selectedIdsRef.current.has(prevPinned)) {
 				unlockPinnedNode(prevPinned);
 			}
 
@@ -1100,7 +1271,12 @@ export default function GlobalGraphPage() {
 				: null;
 			focusedIdRef.current = nodeId;
 			pinnedIdRef.current = nodeId;
-			graph.setNodeAttribute(nodeId, 'pinned', true);
+			selectedIdsRef.current.add(nodeId);
+			setSelectionCount(selectedIdsRef.current.size);
+			// Ensure every selected hub stays marked pinned for camera/render.
+			for (const id of selectedIdsRef.current) {
+				if (graph.hasNode(id)) graph.setNodeAttribute(id, 'pinned', true);
+			}
 			setFocus({
 				id: nodeId,
 				label: String(attrs.label || nodeId),
@@ -1124,9 +1300,7 @@ export default function GlobalGraphPage() {
 				appliedRouteKeyRef.current = `${nodeType}:${nodeId}`;
 			}
 
-			// Hold the focused hub in the viewport (URL deep-links included).
-			// Camera x/y must be framed/normalized coords (handled inside attachCameraPin).
-			// Do not change zoom on select — keep the user's current ratio.
+			// Pan toward the newest hub without zooming; prior selections stay highlighted.
 			attachCameraPin(nodeId, {
 				animate: opts?.animate !== false,
 				fitRatio: false,
@@ -1142,7 +1316,8 @@ export default function GlobalGraphPage() {
 	);
 
 	const clearFocus = useCallback(() => {
-		const prev = pinnedIdRef.current || focusedIdRef.current;
+		const graph = graphRef.current;
+		const selected = [...selectedIdsRef.current];
 		if (cameraPinUnlockRef.current) {
 			try {
 				cameraPinUnlockRef.current();
@@ -1151,7 +1326,11 @@ export default function GlobalGraphPage() {
 			}
 			cameraPinUnlockRef.current = null;
 		}
-		unlockPinnedNode(prev);
+		selectedIdsRef.current.clear();
+		setSelectionCount(0);
+		for (const id of selected) unlockPinnedNode(id);
+		const prev = pinnedIdRef.current || focusedIdRef.current;
+		if (prev && !selected.includes(prev)) unlockPinnedNode(prev);
 		pinnedIdRef.current = null;
 		focusedIdRef.current = null;
 		appliedRouteKeyRef.current = null;
@@ -1159,10 +1338,13 @@ export default function GlobalGraphPage() {
 		// Keep nodes on canvas; bare /global-graph while map stays populated.
 		syncGlobalRoute(null, null);
 		applyHighlight();
-		const sigma = sigmaRef.current;
-		if (sigma) {
+		// Do not reset camera on clear-highlight — only drop selection styling.
+		if (graph) {
+			// ensure pinned flags cleared after unlock
 			try {
-				sigma.getCamera().animatedReset({ duration: 350 });
+				for (const id of selected) {
+					if (graph.hasNode(id)) graph.setNodeAttribute(id, 'pinned', false);
+				}
 			} catch {
 				// ignore
 			}
@@ -1229,10 +1411,17 @@ export default function GlobalGraphPage() {
 
 				// Blank graph — search adds nodes onto the canvas.
 				const graph = new GraphCtor({ type: 'undirected', multi: false, allowSelfLoops: false });
+				// Reset label hit targets each paint cycle (before labels layer draws).
+				labelHitBoxesRef.current = [];
 				const sigma = new SigmaCtor(graph, containerRef.current, {
 					allowInvalidContainer: true,
 					renderLabels: true,
-					labelRenderedSizeThreshold: 4,
+					// Node/edge sizes are screen-pixel constants (do not grow when zoomed out).
+					// Default Math.sqrt shrinks slower than spacing → disks overlap when zoomed out.
+					itemSizesReference: 'screen',
+					zoomToSizeRatioFunction: () => 1,
+					// Labels use fixed CSS px via drawLabelAbove; keep threshold low so they stay on.
+					labelRenderedSizeThreshold: 0,
 					labelDensity: 0.55,
 					labelGridCellSize: 120,
 					labelSize: 12,
@@ -1240,7 +1429,7 @@ export default function GlobalGraphPage() {
 					labelWeight: '600',
 					labelColor: { color: '#e2e8f0' },
 					defaultDrawNodeLabel: (context, data, settings) => {
-						drawLabelAbove(context, data as any, settings as any, { hover: false });
+						drawLabelAbove(context, data as any, settings as any, { hover: false, recordHit: true });
 					},
 					defaultDrawNodeHover: (context, data, settings) => {
 						// Disc under cursor + label chip above (not to the right).
@@ -1257,50 +1446,55 @@ export default function GlobalGraphPage() {
 						context.arc(x, y, Math.max(1.5, size * 0.45), 0, Math.PI * 2);
 						context.closePath();
 						context.fill();
-						drawLabelAbove(context, data as any, settings as any, { hover: true });
+						drawLabelAbove(context, data as any, settings as any, { hover: true, recordHit: true });
 					},
 					defaultEdgeColor: 'rgba(100,116,139,0.03)',
+					defaultEdgeType: 'line',
 					defaultNodeColor: '#22d3ee',
 					minCameraRatio: 0.004,
 					maxCameraRatio: 40,
 					zIndex: true,
 				});
 
+				// Clear hit boxes at the start of each Sigma render so stale rects don't linger.
+				const clearLabelHits = () => {
+					labelHitBoxesRef.current = [];
+				};
+				sigma.on('beforeRender', clearLabelHits);
+
 				let lastLodMode: string | null = null;
 				const updateLod = () => {
 					const ratio = sigma.getCamera().ratio;
-					const active = Boolean(focusedIdRef.current || hoverIdRef.current);
+					const active = Boolean(focusedIdRef.current || hoverIdRef.current || selectedIdsRef.current.size > 0);
 					const empty = graph.order === 0;
-					// Labels still LOD by zoom; edges stay drawn (thin) at every level.
+					// Smaller camera.ratio = more zoomed in. Labels only when sufficiently close.
+					const LABELS_MAX_RATIO = 0.22;
+					const labelsOn = !empty && ratio < LABELS_MAX_RATIO;
 					const mode =
 						empty ? 'overview'
-						: active ? 'focus'
-						: ratio < 0.18 ? 'detail'
-						: ratio < 0.55 ? 'mid'
+						: labelsOn && ratio < 0.12 ? 'detail'
+						: labelsOn ? 'mid'
 						: 'overview';
 					const modeChanged = mode !== lastLodMode;
 					lastLodMode = mode;
 					edgeLodModeRef.current = mode;
+					// Sizes are constant screen px; don't cull labels by disk size once zoomed in.
+					sigma.setSetting('labelRenderedSizeThreshold', 0);
 					if (empty) {
 						sigma.setSetting('renderLabels', false);
+						labelHitBoxesRef.current = [];
 						if (modeChanged) setLodHint('blank · search to add');
 						return;
 					}
-					if (ratio < 0.12 || graph.order < 40) {
+					if (labelsOn) {
 						sigma.setSetting('renderLabels', true);
-						sigma.setSetting('labelDensity', 0.55);
-						sigma.setSetting('labelRenderedSizeThreshold', 4);
-						if (modeChanged) setLodHint(active ? 'focus · edges on' : 'detail · edges on');
-					} else if (ratio < 0.55) {
-						sigma.setSetting('renderLabels', true);
-						sigma.setSetting('labelDensity', 0.2);
-						sigma.setSetting('labelRenderedSizeThreshold', 9);
-						if (modeChanged) setLodHint(active ? 'focus · edges on' : 'mid · edges on');
+						sigma.setSetting('labelDensity', ratio < 0.12 || graph.order < 40 ? 0.55 : 0.32);
+						if (modeChanged) setLodHint(active ? 'focus · labels on' : 'zoomed · labels on');
 					} else {
-						sigma.setSetting('renderLabels', active);
-						sigma.setSetting('labelDensity', 0.08);
-						sigma.setSetting('labelRenderedSizeThreshold', 14);
-						if (modeChanged) setLodHint(active ? 'focus · edges on' : 'overview · edges on');
+						// Zoomed out: hide all node labels (hover chip still draws via hover layer).
+						sigma.setSetting('renderLabels', false);
+						labelHitBoxesRef.current = [];
+						if (modeChanged) setLodHint(active ? 'focus · zoom in for labels' : 'overview · zoom in for labels');
 					}
 					if (modeChanged) applyHighlightRef.current();
 				};
@@ -1332,28 +1526,77 @@ export default function GlobalGraphPage() {
 					applyHighlightRef.current();
 					updateLod();
 				});
-				sigma.on('clickNode', ({ node, event }) => {
-					event.original.preventDefault();
-					event.original.stopPropagation();
+				const activateNode = (node: string, original?: MouseEvent | TouchEvent | null, openEgo = false) => {
 					addNodeToCanvasRef.current(node, { withNeighbors: true });
 					focusNodeRef.current(node, {
-						openEgo: Boolean(event.original.altKey || event.original.metaKey),
+						openEgo,
 						animate: true,
 						addIfMissing: false,
 					});
+				};
+
+				sigma.on('clickNode', ({ node, event }) => {
+					event.original.preventDefault();
+					event.original.stopPropagation();
+					const oe = event.original as MouseEvent;
+					activateNode(node, oe, Boolean(oe.altKey || oe.metaKey));
 				});
 				sigma.on('doubleClickNode', ({ node, event }) => {
 					event.preventSigmaDefault();
 					focusNodeRef.current(node, { openEgo: true, addIfMissing: false });
 				});
-				sigma.on('clickStage', () => {
-					if (focusedIdRef.current) clearFocusRef.current();
+				// Label chips sit on the labels canvas (not the WebGL node picker).
+				// clickStage fires when the node pick buffer misses — still select via label hit-test.
+				sigma.on('clickStage', ({ event }) => {
+					const oe = event.original as MouseEvent;
+					const labelNode = hitTestLabel(oe.clientX, oe.clientY, containerRef.current);
+					if (labelNode && graph.hasNode(labelNode)) {
+						oe.preventDefault();
+						oe.stopPropagation();
+						activateNode(labelNode, oe, Boolean(oe.altKey || oe.metaKey));
+					}
+					// else: keep multi-select — Clear Highlight only
 				});
+
+				// Pointer over a label chip (above the disk) — cursor + hover parity.
+				const onContainerMove = (ev: MouseEvent) => {
+					const el = containerRef.current;
+					const labelNode = hitTestLabel(ev.clientX, ev.clientY, el);
+					if (el) el.style.cursor = labelNode ? 'pointer' : '';
+					if (!labelNode || !graph.hasNode(labelNode)) return;
+					if (hoverIdRef.current === labelNode) return;
+					// Don't steal hover while the pointer is over a different node disk.
+					if (hoverIdRef.current && hoverIdRef.current !== labelNode) return;
+					hoverIdRef.current = labelNode;
+					const attrs = graph.getNodeAttributes(labelNode);
+					setHover({
+						id: labelNode,
+						label: String(attrs.label || labelNode),
+						type: String(attrs.nodeType || 'unknown'),
+						degree: Number(attrs.degree) || 0,
+						cluster: typeof attrs.cluster === 'number' ? attrs.cluster : undefined,
+						region: attrs.region ? String(attrs.region) : undefined,
+						regionGroup: attrs.regionGroup ? String(attrs.regionGroup) : undefined,
+						brokerCount: Number(attrs.brokerCount) || 0,
+						firmLinkCount: Number(attrs.firmLinkCount) || 0,
+						weight: Number(attrs.weight) || Number(attrs.degree) || 0,
+					});
+					applyHighlightRef.current();
+					updateLod();
+				};
+				const containerEl = containerRef.current;
+				containerEl.addEventListener('mousemove', onContainerMove);
+				labelPointerCleanupRef.current = () => {
+					containerEl.removeEventListener('mousemove', onContainerMove);
+					containerEl.style.cursor = '';
+				};
 
 				graphRef.current = graph;
 				sigmaRef.current = sigma;
 				focusedIdRef.current = null;
 				pinnedIdRef.current = null;
+				selectedIdsRef.current.clear();
+				setSelectionCount(0);
 				setFocus(null);
 				setLodHint('blank · search to add');
 				if (!cancelled) setStatus('ready');
@@ -1389,11 +1632,40 @@ export default function GlobalGraphPage() {
 			}
 			visibleIdsRef.current.delete(id);
 		}
+		for (const id of drop) selectedIdsRef.current.delete(id);
+		setSelectionCount(selectedIdsRef.current.size);
 		if (focusedIdRef.current && drop.includes(focusedIdRef.current)) {
 			pinnedIdRef.current = null;
 			focusedIdRef.current = null;
-			setFocus(null);
-			syncGlobalRoute(null, null);
+			const remaining = [...selectedIdsRef.current];
+			const next = remaining.length ? remaining[remaining.length - 1] : null;
+			if (next && graph.hasNode(next)) {
+				const attrs = graph.getNodeAttributes(next);
+				focusedIdRef.current = next;
+				pinnedIdRef.current = next;
+				setFocus({
+					id: next,
+					label: String(attrs.label || next),
+					type: String(attrs.nodeType || 'unknown'),
+					degree: Number(attrs.degree) || 0,
+					cluster: typeof attrs.cluster === 'number' ? attrs.cluster : undefined,
+					region: attrs.region ? String(attrs.region) : undefined,
+					regionGroup: attrs.regionGroup ? String(attrs.regionGroup) : undefined,
+					brokerCount: Number(attrs.brokerCount) || 0,
+					firmLinkCount: Number(attrs.firmLinkCount) || 0,
+					weight: Number(attrs.weight) || Number(attrs.degree) || 0,
+					neighborCount: graph.degree(next),
+				});
+				const t =
+					attrs.nodeType === 'firm' ? 'firm'
+					: attrs.nodeType === 'individual' ? 'individual'
+					: null;
+				if (t && /^\d+$/.test(next)) syncGlobalRoute(t, next);
+				else syncGlobalRoute(null, null);
+			} else {
+				setFocus(null);
+				syncGlobalRoute(null, null);
+			}
 		}
 		setVisibleCount(visibleIdsRef.current.size);
 		applyHighlight();
@@ -1638,7 +1910,7 @@ export default function GlobalGraphPage() {
 		[cache, setSnapshot],
 	);
 
-	// When focus changes, hydrate the node-graph-style detail drawer.
+	// When focus changes, hydrate the node-graph-style detail drawer and append Selection Log.
 	useEffect(() => {
 		if (!focus) {
 			setPanelSnapshot(null);
@@ -1646,9 +1918,59 @@ export default function GlobalGraphPage() {
 		}
 		loadPanelForFocus(focus.id, focus.type, focus.label);
 		setDrawerOpen(true);
+
+		// Most-recent-first selection history (dedupe consecutive same id; re-click moves to top).
+		if (lastLoggedFocusIdRef.current !== focus.id) {
+			lastLoggedFocusIdRef.current = focus.id;
+			const crd = /^\d+$/.test(focus.id) ? focus.id : focus.id.split(':').pop() || focus.id;
+			const type =
+				focus.type === 'firm' ? 'firm'
+				: focus.type === 'individual' ? 'individual'
+				: 'unknown';
+			const key = /^\d+$/.test(crd) ? `finra:${type === 'firm' ? 'firm' : 'individual'}:${crd}` : focus.id;
+			const entry: SelectionLogEntry = {
+				id: focus.id,
+				label: focus.label || crd,
+				display: formatSelectionLogDisplay(focus.label || crd, crd, null),
+				type,
+				crd,
+				secNumber: null,
+				key,
+				ts: Date.now(),
+			};
+			setSelectionLog((prev) => {
+				const without = prev.filter((row) => row.id !== entry.id && row.crd !== entry.crd);
+				return [entry, ...without].slice(0, 200);
+			});
+		}
 		// Intentionally only re-run when the focused CRD changes (not when cache identity changes).
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [focus?.id]);
+
+	// Enrich the latest log row with SEC# once panel payload arrives.
+	useEffect(() => {
+		if (!panelSnapshot?.detailJson || panelSnapshot.loading) return;
+		const sec = pickSecNumberFromDetailJson(panelSnapshot.detailJson);
+		if (!sec) return;
+		const crdFromKey = String(panelSnapshot.resolvedKey || panelSnapshot.key || '')
+			.split(':')
+			.pop();
+		if (!crdFromKey) return;
+		setSelectionLog((prev) => {
+			let changed = false;
+			const next = prev.map((row) => {
+				if (row.crd !== crdFromKey && row.id !== crdFromKey) return row;
+				if (row.secNumber === sec && row.display.includes(`SEC# ${sec}`)) return row;
+				changed = true;
+				return {
+					...row,
+					secNumber: sec,
+					display: formatSelectionLogDisplay(row.label, row.crd || crdFromKey, sec),
+				};
+			});
+			return changed ? next : prev;
+		});
+	}, [panelSnapshot?.detailJson, panelSnapshot?.loading, panelSnapshot?.key, panelSnapshot?.resolvedKey]);
 
 	const handleCenter = useCallback(() => {
 		const sigma = sigmaRef.current;
@@ -1669,6 +1991,8 @@ export default function GlobalGraphPage() {
 		clearCanvas();
 		clearSharedCache();
 		setPanelSnapshot(null);
+		setSelectionLog([]);
+		lastLoggedFocusIdRef.current = null;
 		setDrawerOpen(false);
 		setSearchBanner(null);
 		setQuery('');
@@ -1947,8 +2271,9 @@ export default function GlobalGraphPage() {
 										type='button'
 										className='fg-toolbar-btn'
 										onClick={clearFocus}
-										disabled={!focus}>
-										Clear Highlight
+										disabled={!focus && selectionCount === 0}
+										title={selectionCount > 1 ? `Clear ${selectionCount} highlighted nodes` : 'Clear highlight'}>
+										Clear Highlight{selectionCount > 1 ? ` (${selectionCount})` : ''}
 									</button>
 									<button
 										type='button'
@@ -2041,6 +2366,15 @@ export default function GlobalGraphPage() {
 								activeKey={panelActiveKey}
 								fetchLog={[]}
 								onClearLog={() => {}}
+								selectionLog={selectionLog}
+								onClearSelectionLog={() => {
+									setSelectionLog([]);
+									lastLoggedFocusIdRef.current = null;
+								}}
+								onFocusSelectionLogEntry={(entry) => {
+									const crd = entry.crd || entry.id;
+									if (crd) void focusNode(crd, { animate: true, addIfMissing: true });
+								}}
 								onSelectKey={(key) => {
 									const parts = String(key || '').split(':');
 									const crd = parts[parts.length - 1];

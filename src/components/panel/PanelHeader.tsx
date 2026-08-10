@@ -1,7 +1,7 @@
 'use client';
 import React, { useMemo } from 'react';
 import { parseCrdKey } from '../../lib/parseKey';
-import { extractNamesFromPayload, getContentBlock } from '../../lib/extractNames';
+import { extractNamesFromPayload, getContentBlock, resolveEntityDisplayName } from '../../lib/extractNames';
 import { deriveStatusBadge, deriveTerminatedBadge, type RecordStatusBadge } from '../../lib/statusBadge';
 
 interface Props {
@@ -18,12 +18,15 @@ export function PanelHeader({ activeKey, payloads, detailJson, onSelectKey }: Pr
 		if (!parsed) return null;
 		try {
 			const payload = JSON.parse(detailJson);
-			if (payload && typeof payload === 'object' && payload.orphan && typeof payload.orphan === 'object') {
-				const orphanName = typeof payload.orphan.name === 'string' ? payload.orphan.name : '';
-				return { primary: orphanName, aliases: [] };
-			}
+			const primary = resolveEntityDisplayName({
+				payload,
+				type: parsed.type as 'individual' | 'firm',
+				crd: parsed.crd,
+				source: parsed.source,
+			});
 			const content = getContentBlock(payload, parsed.source, parsed.type);
-			return extractNamesFromPayload(content ?? payload, parsed.type as 'individual' | 'firm');
+			const extracted = extractNamesFromPayload(content ?? payload, parsed.type as 'individual' | 'firm');
+			return { primary: primary || extracted.primary, aliases: extracted.aliases };
 		} catch (e) {
 			return null;
 		}
@@ -136,7 +139,7 @@ export function PanelHeader({ activeKey, payloads, detailJson, onSelectKey }: Pr
 					<div className='banner-title-stack'>
 						<div className='current-crd-text'>
 							<div className='current-crd-name-block'>
-								<div className='current-crd-main-name'>{nameInfo?.primary || (type === 'individual' ? '' : '')}</div>
+								<div className='current-crd-main-name'>{nameInfo?.primary || crd}</div>
 								{nameInfo?.primary && nameInfo.aliases[0] && (
 									<div className='current-crd-meta-line'>
 										<span className='crd-sub-label'>{nameInfo.aliases[0]}</span>

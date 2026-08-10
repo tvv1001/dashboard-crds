@@ -25,8 +25,7 @@ function extractFromPayload(key: string, payload: unknown): { name: string; bcSc
 
 	let name = '';
 	if (isInd) {
-		const parts = [bi.firstName, bi.middleName, bi.lastName]
-			.filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
+		const parts = [bi.firstName, bi.middleName, bi.lastName].filter((v): v is string => typeof v === 'string' && v.trim().length > 0);
 		name = parts.join(' ').trim();
 	} else {
 		name = String(bi.firmName ?? bi.iaFirmName ?? '').trim();
@@ -48,13 +47,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 		const allKeys = result.keys;
 
 		// Group by CRD — track latest mtime and all sources
-		const groupMap = new Map<string, {
-			crd: string;
-			type: 'individual' | 'firm';
-			keys: string[];
-			sources: string[];
-			mtime: number;
-		}>();
+		const groupMap = new Map<
+			string,
+			{
+				crd: string;
+				type: 'individual' | 'firm';
+				keys: string[];
+				sources: string[];
+				mtime: number;
+			}
+		>();
 
 		for (const entry of allKeys) {
 			const groupKey = `${entry.type}:${entry.crd}`;
@@ -94,7 +96,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 				return {
 					crd: g.crd,
 					type: g.type,
-					name: name || `CRD ${g.crd}`,
+					name: name || g.crd,
 					bcScope,
 					iaScope,
 					sources: g.sources.sort(),

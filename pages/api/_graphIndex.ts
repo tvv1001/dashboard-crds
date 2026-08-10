@@ -76,22 +76,69 @@ function personDisplayName(content: Record<string, unknown> | null, crd: string)
 		.map((part) => String(part || '').trim())
 		.filter(Boolean)
 		.join(' ');
-	const rawName = name || (bi.individualName as string) || (bi.fullName as string);
+	const orphan = getObject((content as any)?.orphan);
+	const rawName =
+		name ||
+		(bi.individualName as string) ||
+		(bi.fullName as string) ||
+		(typeof orphan?.name === 'string' ? orphan.name : '') ||
+		(content?.name as string) ||
+		(content?.ownerName as string) ||
+		(content?.legalName as string);
 	// Upstream FINRA/SEC records mix ALL CAPS, lowercase, and Title Case
 	// across name fields, so normalize before displaying.
-	return rawName ? toProperCaseName(rawName) : `CRD ${crd}`;
+	// Prefer bare CRD digits over generic "Individual/CRD …" labels.
+	return rawName ? toProperCaseName(rawName) : crd;
 }
 
 function firmDisplayName(content: Record<string, unknown> | null, crd: string): string {
 	const bi = getObject(content?.basicInformation) || content || {};
-	return (bi.firmName as string) || (bi.orgName as string) || (bi.organizationName as string) || `Firm ${crd}`;
+	return (bi.firmName as string) || (bi.orgName as string) || (bi.organizationName as string) || (bi.iaFirmName as string) || (content?.firmName as string) || crd;
+}
+
+function isGenericGraphLabel(label: string, type: GraphEntityType, crd: string): boolean {
+	const trimmed = String(label || '')
+		.replace(/\s+/g, ' ')
+		.trim();
+	if (!trimmed) return true;
+	const lower = trimmed.toLowerCase();
+	if (/^(individual|firm|person|crd)(\s+#?\d+)?$/i.test(trimmed)) return true;
+	if (lower === `crd ${crd}`.toLowerCase() || lower === crd.toLowerCase()) return true;
+	if (lower === `${type} ${crd}`.toLowerCase()) return true;
+	return false;
 }
 
 async function getEntityLabel(type: GraphEntityType, crd: string): Promise<string> {
 	const { keys } = await listSavedKeysWithStats({ includeCrds: [crd], type, limit: 10, sort: 'crd-desc' });
 	const withName = keys.find((entry) => entry.crd === crd && entry.type === type && entry.displayName);
-	if (withName?.displayName) return withName.displayName;
-	return type === 'individual' ? `CRD ${crd}` : `Firm ${crd}`;
+	if (withName?.displayName && !isGenericGraphLabel(withName.displayName, type, crd)) {
+		return withName.displayName;
+	}
+	// Orphan individuals only exist as owner refs on a firm payload.
+	if (type === 'individual') {
+		const owner = await findOwnerReference(crd).catch(() => null);
+		if (owner?.name && !isGenericGraphLabel(owner.name, type, crd)) {
+			return toProperCaseName(owner.name);
+		}
+	}
+	try {
+		const bundle = await loadCombinedSavedPayloadBundle(`finra:${type}:${crd}`);
+		for (const source of ['finra', 'sec'] as const) {
+			const record = bundle.sources[source];
+			if (!record?.found || !record.payload) continue;
+			const content = record.payload as Record<string, unknown>;
+			const label = type === 'individual' ? personDisplayName(content, crd) : firmDisplayName(content, crd);
+			if (label && !isGenericGraphLabel(label, type, crd)) return label;
+		}
+		const orphan = (bundle as any)?.orphan;
+		if (orphan && typeof orphan === 'object' && typeof orphan.name === 'string' && orphan.name.trim()) {
+			return toProperCaseName(orphan.name);
+		}
+	} catch {
+		// fall through
+	}
+	// Last resort: bare CRD — never "Individual/Firm <crd>".
+	return crd;
 }
 
 // Same active/inactive policy as the graph UI (`isDetailPayloadInactive`): gray
@@ -332,7 +379,7 @@ function indexOwnersFromFirmPayload(index: Map<string, OwnerReference>, parentCr
 		index.set(ownerCrd, {
 			parentType: 'firm',
 			parentCrd,
-			name: toFirstMiddleLastOrder(properCaseName) || `CRD ${ownerCrd}`,
+			name: toFirstMiddleLastOrder(properCaseName) || ownerCrd,
 			position: String(owner.position || '').trim(),
 			firmName,
 			officeAddress,
@@ -456,7 +503,7 @@ async function getIndividualNeighbors(crd: string): Promise<{ nodes: GraphNode[]
 				// (sometimes inconsistently cased) name embedded in the employment row.
 				const canonicalLabel = await getEntityLabel('firm', firmCrd);
 				const embeddedName = String(row.firmName || '').trim();
-				const label = canonicalLabel && canonicalLabel !== `Firm ${firmCrd}` ? canonicalLabel : embeddedName || canonicalLabel;
+				const label = canonicalLabel && !isGenericGraphLabel(canonicalLabel, 'firm', firmCrd) ? canonicalLabel : embeddedName || canonicalLabel || firmCrd;
 				nodes.set(firmId, { id: firmId, label, group: 'firm', crd: firmCrd });
 			}
 			links.push({ source: personId, target: firmId, relationship: 'employment', isCurrent });
@@ -499,8 +546,8 @@ async function getFirmNeighbors(crd: string): Promise<{ nodes: GraphNode[]; link
 					// normalized to Title Case) over the raw embedded owner name, which
 					// upstream sources store inconsistently (ALL CAPS, lowercase, etc).
 					const canonicalLabel = await getEntityLabel('individual', ownerCrd);
-					const embeddedName = toProperCaseName(owner.ownerName);
-					const label = canonicalLabel && canonicalLabel !== `CRD ${ownerCrd}` ? canonicalLabel : embeddedName || canonicalLabel;
+					const embeddedName = toProperCaseName(owner.ownerName || owner.legalName || owner.name);
+					const label = canonicalLabel && !isGenericGraphLabel(canonicalLabel, 'individual', ownerCrd) ? canonicalLabel : embeddedName || canonicalLabel || ownerCrd;
 					nodes.set(ownerId, { id: ownerId, label, group: 'individual', crd: ownerCrd });
 				}
 				links.push({ source: ownerId, target: firmId, relationship: 'ownership', isCurrent: true });
