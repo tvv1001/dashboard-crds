@@ -20,6 +20,11 @@ function selectionFromPath(path: string): CrdSelection | null {
 	if (match) {
 		return { type: match[1].toLowerCase() as 'individual' | 'firm', crd: match[2] };
 	}
+	// Global map: /global-graph/individual/123 or /global-graph/firm/123
+	match = clean.match(/^\/global-graph\/(individual|firm)\/(\d+)\/?$/i);
+	if (match) {
+		return { type: match[1].toLowerCase() as 'individual' | 'firm', crd: match[2] };
+	}
 	return null;
 }
 
@@ -69,10 +74,12 @@ export default function MyApp({ Component, pageProps }: AppProps) {
 	}`;
 
 	const graphHref = selection ? `/graph/${selection.type}/${selection.crd}` : '/graph';
+	const globalGraphHref = selection ? `/global-graph/${selection.type}/${selection.crd}` : '/global-graph';
 	const dashboardHref = selection ? `/${selection.type}/${selection.crd}` : '/';
 
 	const navItems = [
 		{ href: graphHref, activePrefix: '/graph', label: 'Node Graph' },
+		{ href: globalGraphHref, activePrefix: '/global-graph', label: 'Global Map' },
 		{ href: dashboardHref, activePrefix: '/', label: 'Dashboard' },
 		{ href: '/insights', activePrefix: '/insights', label: 'Insights' },
 	] as const;
