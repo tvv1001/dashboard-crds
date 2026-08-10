@@ -361,29 +361,38 @@ function resolveNodeOverlaps(graph: Graph, opts?: { maxIterations?: number; padd
 }
 
 /**
- * Display radius from degree (not raw layout size).
- * Small/leaf nodes are ~500% larger than the old ~0.9–1.4 disks (~6×).
- * Higher connection count → larger disk (√degree). Final size is fixed before Sigma mounts.
+ * Display radius from connection weight (not raw layout size).
+ * Individuals: layout `weight` is a career composite (current+previous employments,
+ * state/SRO registrations, principal/BD control categories) — see build-global-graph-layout.
+ * Higher weight → larger disk (√weight). Final size is fixed before Sigma mounts.
  */
 function displayNodeSize(degree: number, type?: string, weight?: number): number {
 	const t =
 		type === 'firm' ? 'firm'
 		: type === 'individual' ? 'individual'
 		: 'unknown';
-	const w = weight != null && Number.isFinite(weight) && weight > 0 ? weight : degree;
-	// ~50% of prior global-map scale so orbits read cleaner.
-	const leaf = t === 'firm' ? 3.0 : 2.7;
-	const byW = Math.sqrt(Math.max(0, w)) * (t === 'firm' ? 0.52 : 0.48);
-	return Math.min(21, leaf + byW);
+	// Prefer explicit career/composite weight; fall back to degree.
+	const wRaw = weight != null && Number.isFinite(weight) && weight > 0 ? weight : degree;
+	const dRaw = Number.isFinite(degree) ? degree : 0;
+	// Individuals: never size smaller than either signal (previous jobs / regs live in weight).
+	const w =
+		t === 'individual' ? Math.max(wRaw, dRaw)
+		: wRaw > 0 ? wRaw
+		: dRaw;
+	const leaf = t === 'firm' ? 3.0 : 3.2;
+	const byW = Math.sqrt(Math.max(0, w)) * (t === 'firm' ? 0.52 : 0.62);
+	const cap = t === 'firm' ? 21 : 26;
+	return Math.min(cap, leaf + byW);
 }
 
 /** Stamp final sizes onto layout nodes once so first paint never flashes tiny disks. */
 function bakeDisplaySizes(payload: LayoutPayload): LayoutPayload {
 	for (const n of payload.nodes) {
-		const w = Number(n.weight) || Number(n.degree) || 0;
+		const deg = Number(n.degree) || 0;
+		const w = Number(n.weight) || deg;
 		// Always recompute client-side so size policy stays in one place; layout
 		// bake still used for offline collision radii of matching scale.
-		n.size = displayNodeSize(Number(n.degree) || 0, n.type, w);
+		n.size = displayNodeSize(deg, n.type, w);
 	}
 	return payload;
 }
@@ -620,8 +629,8 @@ export default function GlobalGraphPage() {
 			}
 		});
 
-		// Edges stay visible at every zoom/focus — only type filters may hide them.
-		// Focus lightly emphasizes incident edges without hiding the rest.
+		// No selection: all type-enabled edges stay thin/visible.
+		// Selection/hover: only edges to the active node's neighbors (1-hop spokes).
 		graph.forEachEdge((edge, attrs, source, target) => {
 			const et = normalizeEdgeType(String(attrs.edgeType || ''));
 			const typeOn = enabled[et] !== false && !attrs.filterHidden && !attrs.typeHidden;
@@ -632,11 +641,24 @@ export default function GlobalGraphPage() {
 
 			const baseSize = Number(attrs.baseSize) > 0 ? Number(attrs.baseSize) : edgeBaseSize(Number(attrs.weight));
 			const touchesActive = Boolean(activeId && (source === activeId || target === activeId));
+
+			if (activeId) {
+				// Hide every line that is not a direct spoke of the selected/hovered node.
+				if (!touchesActive) {
+					graph.setEdgeAttribute(edge, 'hidden', true);
+					return;
+				}
+				graph.setEdgeAttribute(edge, 'hidden', false);
+				graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), false));
+				graph.setEdgeAttribute(edge, 'zIndex', 0);
+				graph.setEdgeAttribute(edge, 'size', Math.min(0.14, baseSize * 1.85));
+				return;
+			}
+
 			graph.setEdgeAttribute(edge, 'hidden', false);
-			graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), Boolean(activeId) && !touchesActive));
-			graph.setEdgeAttribute(edge, 'zIndex', touchesActive ? 0 : -1);
-			// Hairline by default; only a small bump for the active star.
-			graph.setEdgeAttribute(edge, 'size', touchesActive ? Math.min(0.12, baseSize * 1.65) : baseSize);
+			graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), false));
+			graph.setEdgeAttribute(edge, 'zIndex', -1);
+			graph.setEdgeAttribute(edge, 'size', baseSize);
 		});
 
 		sigma.refresh();
@@ -1560,8 +1582,16 @@ export default function GlobalGraphPage() {
 				})
 				.then((data) => {
 					if (panelRequestRef.current !== requestId) return;
-					const found = Boolean(data?.bundle?.sources?.finra?.found || data?.bundle?.sources?.sec?.found);
-					if (!found) {
+					// Match dashboard /api/key consumers (StatusBox): live FINRA/SEC hits
+					// OR synthetic orphan bundles scraped from a parent firm page.
+					const bundle = data?.bundle && typeof data.bundle === 'object' ? data.bundle : null;
+					const found = Boolean(bundle?.sources?.finra?.found || bundle?.sources?.sec?.found);
+					const orphan =
+						bundle?.orphan && typeof bundle.orphan === 'object' ? bundle.orphan
+						: data?.orphan && typeof data.orphan === 'object' ? data.orphan
+						: null;
+					const hasOrphanCard = Boolean(orphan);
+					if (!found && !hasOrphanCard) {
 						setPanelSnapshot({
 							key: requestKey,
 							resolvedKey: requestKey,
@@ -1572,7 +1602,11 @@ export default function GlobalGraphPage() {
 						return;
 					}
 					const resolvedKey = typeof data?.resolvedKey === 'string' ? data.resolvedKey : requestKey;
-					const detailValue = typeof data?.rawPayload === 'string' ? data.rawPayload : JSON.stringify(data?.payload ?? data ?? null, null, 2);
+					// Prefer API rawPayload (same string dashboard feeds StatusBox).
+					const detailValue =
+						typeof data?.rawPayload === 'string' ? data.rawPayload
+						: bundle ? JSON.stringify(bundle, null, 2)
+						: JSON.stringify(data?.payload ?? data ?? null, null, 2);
 					const snapshot = {
 						key: requestKey,
 						resolvedKey,

@@ -255,12 +255,261 @@ function nodeColor(type: string, _degree: number, regionGroup?: string): string 
 	return '#94a3b8';
 }
 
-/** Size from composite weight (firms) or degree (brokers). ~50% of prior scale. */
+/** Size from composite weight (firms) or career weight (brokers). */
 function nodeSize(degree: number, type: string, weight?: number): number {
 	const w = weight != null && Number.isFinite(weight) ? weight : degree;
-	const leaf = type === 'firm' ? 3.0 : 2.7;
-	const scale = type === 'firm' ? 0.52 : 0.48;
-	return Math.min(21, leaf + Math.sqrt(Math.max(0, w)) * scale);
+	// Individuals get a slightly steeper curve so multi-registration careers read larger.
+	const leaf = type === 'firm' ? 3.0 : 3.2;
+	const scale = type === 'firm' ? 0.52 : 0.62;
+	const cap = type === 'firm' ? 21 : 26;
+	return Math.min(cap, leaf + Math.sqrt(Math.max(0, w)) * scale);
+}
+
+function rawDataRoots(): string[] {
+	return [
+		path.resolve(process.cwd(), 'data', 'raw'),
+		path.resolve(process.cwd(), '..', 'Data-finra-sec', 'data', 'raw'),
+		path.resolve(process.cwd(), '..', 'newwest-new-data-vis', 'data', 'raw'),
+		path.resolve(process.cwd(), '..', 'finra-data-chart-next-01', 'data', 'raw'),
+		path.resolve(process.cwd(), '..', 'finra-data-large-view', 'data', 'raw'),
+		'/home/lenny/Dev/webDev/Data-finra-sec/data/raw',
+		'/home/lenny/Dev/webDev/newwest-new-data-vis/data/raw',
+		'/home/lenny/Dev/webDev/finra-data-chart-next-01/data/raw',
+	];
+}
+
+async function existingRawRoots(): Promise<string[]> {
+	const out: string[] = [];
+	for (const r of rawDataRoots()) {
+		try {
+			await fs.access(r);
+			out.push(r);
+		} catch {
+			// skip
+		}
+	}
+	return out;
+}
+
+function unwrapRecordPayload(doc: unknown): Record<string, unknown> | null {
+	if (!doc || typeof doc !== 'object') return null;
+	const root = doc as Record<string, unknown>;
+	const queue: unknown[] = [root, root.content, root.payload, root.data, root.finraBrokerCheck, root.secInvestmentAdvisor, root.iacontent];
+	for (const item of queue) {
+		if (!item || typeof item !== 'object') continue;
+		const o = item as Record<string, unknown>;
+		if (o.basicInformation || o.currentEmployments || o.previousEmployments || o.registeredStates || o.registeredSROs || o.registrationCount) {
+			return o;
+		}
+	}
+	return root;
+}
+
+function asRowArray(v: unknown): Record<string, unknown>[] {
+	if (!Array.isArray(v)) return [];
+	return v.filter((x): x is Record<string, unknown> => Boolean(x) && typeof x === 'object' && !Array.isArray(x));
+}
+
+function firmIdFromRow(row: Record<string, unknown>): string | null {
+	for (const k of ['firmId', 'firmCRD', 'firmCrd', 'firmCrdNumber', 'crdNumber', 'crd', 'orgCrd', 'organizationCrdNumber']) {
+		const v = row[k];
+		if (v == null) continue;
+		const s = String(v).trim();
+		if (/^\d+$/.test(s)) return s;
+	}
+	return null;
+}
+
+/** Principal / BD control-style registration categories (and exams). */
+function isControlOrPrincipalLabel(label: string): boolean {
+	const s = label.toLowerCase();
+	if (!s) return false;
+	return (
+		s.includes('principal') ||
+		s.includes('control') ||
+		s.includes('financial and operations') ||
+		s.includes('finop') ||
+		s.includes('compliance officer') ||
+		s.includes('operations professional') ||
+		s.includes('supervis') ||
+		/\bbd\b/.test(s) ||
+		s.includes('broker-dealer') ||
+		s.includes('broker dealer')
+	);
+}
+
+type IndividualCareerMetrics = {
+	/** Unique firm CRDs across current/previous BC+IA employments. */
+	uniqueFirms: number;
+	/** Raw employment/registration rows (concurrent multi-firm regs count separately). */
+	employmentRows: number;
+	currentEmploymentRows: number;
+	previousEmploymentRows: number;
+	stateRegistrations: number;
+	sroRegistrations: number;
+	/** Principal/control/BD-style categories on SRO registrations. */
+	controlCategories: number;
+	principalExams: number;
+	/** Composite used for node size / ranking. */
+	careerWeight: number;
+};
+
+function careerMetricsFromPayload(content: Record<string, unknown> | null | undefined): IndividualCareerMetrics | null {
+	if (!content) return null;
+	const current = [...asRowArray(content.currentEmployments), ...asRowArray(content.currentIAEmployments)];
+	const previous = [...asRowArray(content.previousEmployments), ...asRowArray(content.previousIAEmployments)];
+	const employmentRows = current.length + previous.length;
+	const firmSet = new Set<string>();
+	for (const row of [...current, ...previous]) {
+		const id = firmIdFromRow(row);
+		if (id) firmSet.add(id);
+	}
+	const states = asRowArray(content.registeredStates);
+	const sros = asRowArray(content.registeredSROs);
+	const stateRegistrations = states.length;
+	let sroRegistrations = sros.length;
+	let controlCategories = 0;
+	for (const sro of sros) {
+		const cats =
+			Array.isArray(sro.CategoriesList) ? sro.CategoriesList
+			: Array.isArray(sro.categoriesList) ? sro.categoriesList
+			: [];
+		for (const c of cats) {
+			const label = String(c || '');
+			if (isControlOrPrincipalLabel(label)) controlCategories++;
+		}
+		// status rows without categories still count as a registration slot
+		if (!cats.length && (sro.sro || sro.status)) sroRegistrations = Math.max(sroRegistrations, 1);
+	}
+	const regCount = content.registrationCount && typeof content.registrationCount === 'object' ? (content.registrationCount as Record<string, unknown>) : {};
+	const approvedState = Number(regCount.approvedStateRegistrationCount) || 0;
+	const approvedSro = Number(regCount.approvedSRORegistrationCount) || 0;
+	const approvedFinra = Number(regCount.approvedFinraRegistrationCount) || 0;
+	const approvedIa = Number(regCount.approvedIAStateRegistrationCount) || 0;
+	// Prefer explicit list lengths; fall back to registrationCount scalars.
+	const stateRegs = Math.max(stateRegistrations, approvedState);
+	const sroRegs = Math.max(sroRegistrations, approvedSro, approvedFinra);
+
+	let principalExams = 0;
+	for (const row of [...asRowArray(content.principalExamCategory), ...asRowArray(content.productExamCategory), ...asRowArray(content.stateExamCategory)]) {
+		const label = `${row.examCategory || ''} ${row.examName || ''} ${row.examScope || ''}`;
+		if (
+			isControlOrPrincipalLabel(label) ||
+			(String(row.examScope || '').toUpperCase() === 'BC' &&
+				String(row.examCategory || '')
+					.toLowerCase()
+					.includes('principal'))
+		) {
+			principalExams++;
+		} else if (
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 24') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 27') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 28') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 14') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 4') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 9') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 10') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 23') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 26') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 39') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 51') ||
+			String(row.examCategory || '')
+				.toLowerCase()
+				.includes('series 53')
+		) {
+			principalExams++;
+		}
+	}
+
+	const uniqueFirms = firmSet.size;
+	// Career weight: multi-firm history + concurrent employment rows + state/SRO regs + BD/control.
+	const careerWeight =
+		uniqueFirms * 1.15 +
+		employmentRows * 0.85 +
+		current.length * 0.75 + // active multi-firm BD regs weigh extra
+		stateRegs * 0.9 +
+		sroRegs * 2.5 +
+		controlCategories * 3.5 +
+		principalExams * 1.25 +
+		approvedIa * 0.5;
+
+	if (uniqueFirms <= 0 && employmentRows <= 0 && stateRegs <= 0 && controlCategories <= 0) return null;
+	return {
+		uniqueFirms,
+		employmentRows,
+		currentEmploymentRows: current.length,
+		previousEmploymentRows: previous.length,
+		stateRegistrations: stateRegs,
+		sroRegistrations: sroRegs,
+		controlCategories,
+		principalExams,
+		careerWeight: Math.max(1, careerWeight),
+	};
+}
+
+/**
+ * Enrich kept individuals with career metrics from local BrokerCheck dumps
+ * (current + previous employments, state/SRO registrations, principal/BD control categories).
+ */
+async function loadIndividualCareerWeights(individualIds: string[]): Promise<Map<string, IndividualCareerMetrics>> {
+	const out = new Map<string, IndividualCareerMetrics>();
+	if (!individualIds.length) return out;
+	const roots = await existingRawRoots();
+	if (!roots.length) {
+		console.log('No individual raw dirs found — career weights fall back to network degree');
+		return out;
+	}
+	console.log(`Loading individual career weights from ${roots[0]} (+${Math.max(0, roots.length - 1)} fallbacks) for ${individualIds.length} brokers…`);
+	let hit = 0;
+	let miss = 0;
+	for (const id of individualIds) {
+		let found = false;
+		for (const root of roots) {
+			for (const prefix of [`finra:individual:${id}.json`, `sec:individual:${id}.json`]) {
+				const fp = path.join(root, prefix);
+				try {
+					const txt = await fs.readFile(fp, 'utf-8');
+					const doc = JSON.parse(txt) as unknown;
+					const content = unwrapRecordPayload(doc);
+					const metrics = careerMetricsFromPayload(content);
+					if (metrics) {
+						out.set(id, metrics);
+						hit++;
+						found = true;
+						break;
+					}
+				} catch {
+					// try next
+				}
+			}
+			if (found) break;
+		}
+		if (!found) miss++;
+	}
+	console.log(`Individual career weights: ${hit} resolved, ${miss} missing`);
+	return out;
 }
 
 /** Deterministic 0..1 hash for stable orbit angles. */
@@ -385,23 +634,7 @@ function orbitChildrenAroundParents(graph: Graph, opts?: { padding?: number }): 
  */
 async function loadFirmRegions(firmIds: string[]): Promise<Map<string, { state?: string; country?: string; city?: string }>> {
 	const out = new Map<string, { state?: string; country?: string; city?: string }>();
-	const roots = [
-		path.resolve(process.cwd(), 'data', 'raw'),
-		path.resolve(process.cwd(), '..', 'newwest-new-data-vis', 'data', 'raw'),
-		path.resolve(process.cwd(), '..', 'finra-data-chart-next-01', 'data', 'raw'),
-		path.resolve(process.cwd(), '..', 'finra-data-large-view', 'data', 'raw'),
-		'/home/lenny/Dev/webDev/newwest-new-data-vis/data/raw',
-		'/home/lenny/Dev/webDev/finra-data-chart-next-01/data/raw',
-	];
-	const existingRoots: string[] = [];
-	for (const r of roots) {
-		try {
-			await fs.access(r);
-			existingRoots.push(r);
-		} catch {
-			// skip
-		}
-	}
+	const existingRoots = await existingRawRoots();
 	if (!existingRoots.length) {
 		console.log('No firm raw dirs found — region weights fall back to Unknown');
 		return out;
@@ -601,10 +834,26 @@ async function main() {
 	const adj = index.graph || {};
 
 	// Connectivity metrics
+	// Unique undirected neighbor counts (current + previous employments are both in
+	// network-index). Do NOT double-count directed out/in copies of the same pair.
+	const neighborSets = new Map<string, Set<string>>();
 	const degree = new Map<string, number>();
+	const employmentDegree = new Map<string, number>();
 	const brokerCount = new Map<string, number>();
 	const firmNeighbors = new Map<string, Map<string, number>>();
-	const bump = (id: string, n = 1) => degree.set(id, (degree.get(id) || 0) + n);
+	const ensureNeighbors = (id: string) => {
+		let s = neighborSets.get(id);
+		if (!s) {
+			s = new Set();
+			neighborSets.set(id, s);
+		}
+		return s;
+	};
+	const linkPair = (a: string, b: string) => {
+		if (!a || !b || a === b) return;
+		ensureNeighbors(a).add(b);
+		ensureNeighbors(b).add(a);
+	};
 	const bumpFirmLink = (a: string, b: string, w = 1) => {
 		if (a === b) return;
 		const x = a < b ? a : b;
@@ -615,15 +864,29 @@ async function main() {
 	};
 
 	const indFirms = new Map<string, string[]>();
+	const employmentNeighborSets = new Map<string, Set<string>>();
+	const ensureEmp = (id: string) => {
+		let s = employmentNeighborSets.get(id);
+		if (!s) {
+			s = new Set();
+			employmentNeighborSets.set(id, s);
+		}
+		return s;
+	};
 
 	for (const [src, edges] of Object.entries(adj)) {
 		if (!Array.isArray(edges)) continue;
-		bump(src, edges.length);
 		const srcType = metadata[src]?.type;
 		for (const e of edges) {
 			const tgt = e?.to != null ? String(e.to) : '';
 			if (!tgt) continue;
-			bump(tgt, 1);
+			linkPair(src, tgt);
+			const et = String(e?.type || 'employment');
+			// Employment / ownership / succession all count as "career" connections for sizing.
+			if (et === 'employment' || et === 'ownership' || et === 'succession' || !et) {
+				ensureEmp(src).add(tgt);
+				ensureEmp(tgt).add(src);
+			}
 			const tgtType = metadata[tgt]?.type;
 			if (srcType === 'firm' && tgtType === 'firm') {
 				const w = typeof e.weight === 'number' && Number.isFinite(e.weight) ? e.weight : 1;
@@ -637,6 +900,13 @@ async function main() {
 				indFirms.get(src)!.push(tgt);
 			}
 		}
+	}
+
+	for (const [id, set] of neighborSets) {
+		degree.set(id, set.size);
+	}
+	for (const [id, set] of employmentNeighborSets) {
+		employmentDegree.set(id, set.size);
 	}
 
 	{
@@ -700,12 +970,15 @@ async function main() {
 		candidates = candidates.filter((id) => (metadata[id]?.type || '') === 'firm');
 	}
 	candidates = candidates.filter((id) => (degree.get(id) || 0) >= opts.minDegree);
+
+	// Pre-score individuals by network employment degree for selection; refine with payload career after keep.
 	const scoreOf = (id: string) => {
 		if (metadata[id]?.type === 'firm') return firmWeight.get(id) || degree.get(id) || 0;
-		return degree.get(id) || 0;
+		// Individuals: full employment history (current + previous firms) from network-index.
+		return employmentDegree.get(id) || degree.get(id) || 0;
 	};
 
-	// Balanced pick: firms by composite weight, individuals by degree.
+	// Balanced pick: firms by composite weight, individuals by career connections.
 	// Pure global sort by firm weight floods the graph with firms only.
 	const keptIds: string[] = [];
 	if (opts.firmsOnly) {
@@ -738,6 +1011,9 @@ async function main() {
 	const firmKept = keptIds.filter((id) => metadata[id]?.type === 'firm').length;
 	const indKept = keptIds.filter((id) => metadata[id]?.type === 'individual').length;
 	console.log(`Selected ${kept.size} nodes (max ${opts.maxNodes}, firms=${firmKept}, individuals=${indKept}, firmsOnly=${opts.firmsOnly})`);
+
+	const keptIndividuals = keptIds.filter((id) => (metadata[id]?.type || '') === 'individual');
+	const individualCareer = await loadIndividualCareerWeights(keptIndividuals);
 
 	type EdgeAcc = { source: string; target: string; type: string; weight: number };
 	const edgeMap = new Map<string, EdgeAcc>();
@@ -818,32 +1094,43 @@ async function main() {
 	for (const id of keptIds) {
 		const meta = metadata[id] || {};
 		const t = meta.type === 'firm' || meta.type === 'individual' ? meta.type : 'unknown';
+		// Unique undirected neighbors across the full network-index (includes previous employments).
 		const deg = degree.get(id) || 0;
+		const empDeg = employmentDegree.get(id) || 0;
 		const fr = t === 'firm' ? firmRegion.get(id) : undefined;
 		const state = fr?.state;
 		const rGroup = t === 'firm' ? regionGroupFor(state, fr?.country) : undefined;
 		const brokers = t === 'firm' ? brokerCount.get(id) || 0 : 0;
 		const fl = t === 'firm' ? firmLinkCount.get(id) || 0 : 0;
-		const weight = t === 'firm' ? firmWeight.get(id) || deg : deg;
+		const career = t === 'individual' ? individualCareer.get(id) : undefined;
+		// Individuals: career weight folds current+previous employments, state/SRO regs, BD/control.
+		// degree stays as connection footprint; weight drives display size.
+		const networkFootprint = Math.max(empDeg, deg, career?.uniqueFirms || 0);
+		const weight =
+			t === 'firm' ? firmWeight.get(id) || deg
+			: career ? Math.max(career.careerWeight, networkFootprint)
+			: Math.max(empDeg, deg);
+		const sizeBasis = t === 'firm' ? deg : Math.round(weight);
 		const h = Number(id) || id.split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
 		const baseAng = rGroup != null ? (REGION_GROUP_ANGLE[rGroup] ?? 0) : (h % 360) * (Math.PI / 180);
 		const jitter = ((h % 50) - 25) * 0.012;
 		const angle = baseAng + jitter;
 		// Wide region seed — d3 charge expands further from here.
-		const radius = t === 'firm' ? 900 + Math.min(2200, Math.sqrt(weight) * 28) + (h % 180) : 500 + (deg % 400) + (h % 120);
+		const radius = t === 'firm' ? 900 + Math.min(2200, Math.sqrt(weight) * 28) + (h % 180) : 500 + (sizeBasis % 400) + (h % 120);
 		graph.addNode(id, {
 			x: Math.cos(angle) * radius + ((h % 97) - 48) * 3,
 			y: Math.sin(angle) * radius + ((h % 89) - 44) * 3,
-			size: nodeSize(deg, t, weight),
+			size: nodeSize(sizeBasis, t, weight),
 			label: String(meta.name || id).slice(0, 80),
 			nodeType: t,
-			degree: deg,
+			// degree = network/employment footprint; weight = career composite for sizing.
+			degree: networkFootprint,
 			weight,
 			region: state || '',
 			regionGroup: rGroup || '',
 			brokerCount: brokers,
 			firmLinkCount: fl,
-			color: nodeColor(t, deg, rGroup),
+			color: nodeColor(t, networkFootprint, rGroup),
 		});
 	}
 
