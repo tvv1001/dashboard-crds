@@ -6,6 +6,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { bucketConnectionRows, extractConnectionRows } from '../../src/components/panel/connectionData';
 import { toProperCaseName } from '../../src/lib/format';
+import { deriveStatusBadge, deriveTerminatedBadge } from '../../src/lib/statusBadge';
 import { listSavedKeysWithStats, loadSavedPayload, normalizeRawPayload, loadCombinedSavedPayloadBundle, type SavedKeyStat } from './_lib';
 
 export type GraphEntityType = 'individual' | 'firm';
@@ -20,6 +21,8 @@ export interface GraphNode {
 	// index only — see buildFirmEmployeeIndex/getFirmNeighbors below).
 	city?: string;
 	state?: string;
+	/** True when FINRA/SEC saved payloads show inactive/terminated and not active. */
+	inactive?: boolean;
 }
 
 export interface GraphLink {
@@ -89,6 +92,53 @@ async function getEntityLabel(type: GraphEntityType, crd: string): Promise<strin
 	const withName = keys.find((entry) => entry.crd === crd && entry.type === type && entry.displayName);
 	if (withName?.displayName) return withName.displayName;
 	return type === 'individual' ? `CRD ${crd}` : `Firm ${crd}`;
+}
+
+// Same active/inactive policy as the graph UI (`isDetailPayloadInactive`): gray
+// only when at least one source is inactive/terminated and none are active.
+function evaluateContentActivity(content: Record<string, unknown> | null | undefined, source: 'finra' | 'sec'): 'active' | 'inactive' | null {
+	if (!content || typeof content !== 'object') return null;
+	const bi = getObject(content.basicInformation) || {};
+	const terminated = deriveTerminatedBadge([bi.firmStatus, bi.firmStatusDate], [content.firmStatus, content.firmStatusDate]);
+	const status = deriveStatusBadge(source === 'sec' ? bi.iaScope : bi.bcScope, content.status, content.currentStatus);
+	const labels = [terminated?.label, status?.label].filter(Boolean).join(' ').toLowerCase();
+	if (!labels) return null;
+	if (/(^|\s)active(\s|$)/.test(labels) && !/inactive/.test(labels) && !/terminated/.test(labels)) return 'active';
+	if (/inactive|terminated|not in scope|notinscope/.test(labels)) return 'inactive';
+	return null;
+}
+
+const entityInactiveCache = new Map<string, Promise<boolean>>();
+
+async function isEntityInactive(type: GraphEntityType, crd: string): Promise<boolean> {
+	const cacheKey = `${type}:${crd}`;
+	let promise = entityInactiveCache.get(cacheKey);
+	if (!promise) {
+		promise = (async () => {
+			try {
+				const bundle = await loadCombinedSavedPayloadBundle(`finra:${type}:${crd}`);
+				const flags: Array<'active' | 'inactive'> = [];
+				for (const source of ['finra', 'sec'] as const) {
+					const record = bundle.sources[source];
+					if (!record?.found || !record.payload) continue;
+					const flag = evaluateContentActivity(record.payload as Record<string, unknown>, source);
+					if (flag) flags.push(flag);
+				}
+				if (!flags.length) return false;
+				return flags.every((f) => f === 'inactive');
+			} catch {
+				return false;
+			}
+		})();
+		entityInactiveCache.set(cacheKey, promise);
+	}
+	return promise;
+}
+
+async function annotateNodeInactive(node: GraphNode): Promise<GraphNode> {
+	if (typeof node.inactive === 'boolean') return node;
+	const inactive = await isEntityInactive(node.group, node.crd);
+	return inactive ? { ...node, inactive: true } : { ...node, inactive: false };
 }
 
 function extractFirmCrd(row: Record<string, unknown>): string {
@@ -269,7 +319,8 @@ function indexOwnersFromFirmPayload(index: Map<string, OwnerReference>, parentCr
 	if (!owners.length) return;
 	const basicInformation = normalized.basicInformation && typeof normalized.basicInformation === 'object' ? (normalized.basicInformation as Record<string, unknown>) : {};
 	const firmAddressDetails = normalized.firmAddressDetails && typeof normalized.firmAddressDetails === 'object' ? (normalized.firmAddressDetails as Record<string, unknown>) : {};
-	const iaFirmAddressDetails = normalized.iaFirmAddressDetails && typeof normalized.iaFirmAddressDetails === 'object' ? (normalized.iaFirmAddressDetails as Record<string, unknown>) : {};
+	const iaFirmAddressDetails =
+		normalized.iaFirmAddressDetails && typeof normalized.iaFirmAddressDetails === 'object' ? (normalized.iaFirmAddressDetails as Record<string, unknown>) : {};
 	const firmName = String(basicInformation.iaFirmName || basicInformation.firmName || '').trim() || undefined;
 	const officeAddress = firmAddressDetails.officeAddress || iaFirmAddressDetails.officeAddress || undefined;
 	const mailingAddress = firmAddressDetails.mailingAddress || iaFirmAddressDetails.mailingAddress || undefined;
@@ -532,5 +583,8 @@ export async function expandNodes(seedIds: string[], hops: number | 'all' = 1): 
 		hopCount += 1;
 	}
 
-	return { nodes: Array.from(nodes.values()), links };
+	// Resolve inactive flags for every returned node so the client can gray
+	// them on first paint (before any click-to-load panel payload).
+	const annotated = await Promise.all(Array.from(nodes.values()).map((node) => annotateNodeInactive(node)));
+	return { nodes: annotated, links };
 }

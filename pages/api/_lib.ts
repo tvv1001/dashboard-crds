@@ -684,13 +684,67 @@ function extractDisplayNameFromContent(filename: string, content: Record<string,
 	return asName(bi.firmName, bi.orgName, bi.organizationName, bi.legalName) || asName(content.firmName, content.orgName, content.organizationName, content.legalName, content.name);
 }
 
+/** Parse first JSON value from a file that may have trailing garbage (e.g. concurrent writes). */
+function parseJsonDocumentLenient(raw: string): unknown {
+	const text = String(raw || '')
+		.replace(/^\uFEFF/, '')
+		.trim();
+	if (!text) throw new SyntaxError('Empty JSON document');
+	try {
+		return JSON.parse(text);
+	} catch (firstError) {
+		// Concatenated / partially-appended documents: take the first complete value.
+		let depth = 0;
+		let inString = false;
+		let escaped = false;
+		let start = -1;
+		for (let i = 0; i < text.length; i++) {
+			const ch = text[i];
+			if (inString) {
+				if (escaped) {
+					escaped = false;
+					continue;
+				}
+				if (ch === '\\') {
+					escaped = true;
+					continue;
+				}
+				if (ch === '"') inString = false;
+				continue;
+			}
+			if (ch === '"') {
+				inString = true;
+				continue;
+			}
+			if (ch === '{' || ch === '[') {
+				if (depth === 0) start = i;
+				depth += 1;
+				continue;
+			}
+			if (ch === '}' || ch === ']') {
+				depth -= 1;
+				if (depth === 0 && start >= 0) {
+					const slice = text.slice(start, i + 1);
+					try {
+						return JSON.parse(slice);
+					} catch {
+						// keep scanning for another complete value
+						start = -1;
+					}
+				}
+			}
+		}
+		throw firstError;
+	}
+}
+
 async function readSavedKeyIndexFile() {
 	try {
 		const raw = await fs.readFile(rawKeysIndexPath, 'utf-8');
-		const parsed = JSON.parse(raw);
+		const parsed = parseJsonDocumentLenient(raw);
 		const entriesSource =
 			Array.isArray(parsed) ? parsed
-			: parsed && Array.isArray(parsed.entries) ? parsed.entries
+			: parsed && typeof parsed === 'object' && Array.isArray((parsed as { entries?: unknown }).entries) ? (parsed as { entries: unknown[] }).entries
 			: null;
 		if (!entriesSource) return null;
 		const entries = entriesSource.filter((entry: unknown): entry is SavedKeyStat => {
@@ -704,12 +758,17 @@ async function readSavedKeyIndexFile() {
 				(candidate.source === 'finra' || candidate.source === 'sec')
 			);
 		});
-		const generatedAt = parsed && typeof parsed === 'object' && !Array.isArray(parsed) && typeof parsed.generatedAt === 'string' ? parsed.generatedAt : null;
+		const generatedAt =
+			parsed && typeof parsed === 'object' && !Array.isArray(parsed) && typeof (parsed as { generatedAt?: unknown }).generatedAt === 'string' ?
+				(parsed as { generatedAt: string }).generatedAt
+			:	null;
 		return { entries: sortSavedKeyStats(entries, 'date-desc'), generatedAt };
 	} catch (error) {
 		const err = error as NodeJS.ErrnoException;
 		if (err?.code === 'ENOENT') return null;
-		throw error;
+		// Corrupt index must not 500 every /api/key — fall through to Redis rebuild.
+		console.warn('Failed to read saved-key index file', formatErrorMessage(error));
+		return null;
 	}
 }
 
@@ -723,7 +782,10 @@ async function writeSavedKeyIndexFile(entries: SavedKeyStat[]) {
 		null,
 		2,
 	);
-	await fs.writeFile(rawKeysIndexPath, payload, 'utf-8');
+	// Atomic write: avoids truncated/concatenated JSON when multiple writers race.
+	const tempPath = `${rawKeysIndexPath}.${process.pid}.${Date.now()}.tmp`;
+	await fs.writeFile(tempPath, payload, 'utf-8');
+	await fs.rename(tempPath, rawKeysIndexPath);
 }
 
 async function buildSavedKeyIndexFromRedis() {
