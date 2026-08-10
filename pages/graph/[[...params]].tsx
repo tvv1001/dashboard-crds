@@ -152,8 +152,14 @@ export default function NodeGraphPage() {
 	// /node-graph route.
 	const routeParams = useMemo(() => {
 		const raw = (router.query as { params?: string | string[] }).params;
-		const parts = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [];
-		const type = parts[0] === 'firm' ? 'firm' : parts[0] === 'individual' ? 'individual' : null;
+		const parts =
+			Array.isArray(raw) ? raw
+			: typeof raw === 'string' ? [raw]
+			: [];
+		const type =
+			parts[0] === 'firm' ? 'firm'
+			: parts[0] === 'individual' ? 'individual'
+			: null;
 		const crd = parts[1] && /^\d+$/.test(parts[1]) ? parts[1] : null;
 		return type && crd ? { type: type as 'individual' | 'firm', crd } : null;
 	}, [router.query]);
@@ -267,7 +273,10 @@ export default function NodeGraphPage() {
 								id: raw.id,
 								label: raw.label,
 								kind: 'relation',
-								subLabel: raw.city || raw.state ? [raw.city, raw.state].filter(Boolean).join(', ') : raw.group === 'firm' ? 'Firm' : 'Individual',
+								subLabel:
+									raw.city || raw.state ? [raw.city, raw.state].filter(Boolean).join(', ')
+									: raw.group === 'firm' ? 'Firm'
+									: 'Individual',
 								loadKey: `finra:${raw.group}:${raw.crd}`,
 							});
 						}
@@ -395,7 +404,10 @@ export default function NodeGraphPage() {
 		fetch(`/api/redis-search?q=${encodeURIComponent(query)}`)
 			.then((r) => r.json())
 			.then((json) => {
-				const matches = Array.isArray(json?.matches) ? json.matches : Array.isArray(json?.results) ? json.results : [];
+				const matches =
+					Array.isArray(json?.matches) ? json.matches
+					: Array.isArray(json?.results) ? json.results
+					: [];
 				if (!matches.length) {
 					setSearchError(`No matches found for "${query}"`);
 					setSearchLoading(false);
@@ -405,7 +417,10 @@ export default function NodeGraphPage() {
 				// entity, same as before.
 				if (matches.length === 1) {
 					const only = matches[0];
-					const type = only.type === 'firm' ? 'firm' : only.type === 'individual' ? 'individual' : '';
+					const type =
+						only.type === 'firm' ? 'firm'
+						: only.type === 'individual' ? 'individual'
+						: '';
 					const key = only.key || (type && only.crd ? `${type}:${only.crd}` : String(only.crd));
 					loadKey(key);
 					return;
@@ -417,7 +432,10 @@ export default function NodeGraphPage() {
 				const capped = matches.slice(0, 100);
 				const newNodes: GraphNode[] = capped
 					.map((match: any): GraphNode | null => {
-						const type = match.type === 'firm' ? 'firm' : match.type === 'individual' ? 'individual' : '';
+						const type =
+							match.type === 'firm' ? 'firm'
+							: match.type === 'individual' ? 'individual'
+							: '';
 						const crd = idValue(match.crd);
 						if (!type || !crd) return null;
 						const id = `search-${type}-${crd}`;
@@ -676,8 +694,19 @@ export default function NodeGraphPage() {
 				drag.moved = true;
 			}
 			const graphPoint = clientPointToGraph(event.clientX, event.clientY);
-			node.fx = graphPoint.x + drag.offsetX;
-			node.fy = graphPoint.y + drag.offsetY;
+			const x = graphPoint.x + drag.offsetX;
+			const y = graphPoint.y + drag.offsetY;
+			node.fx = x;
+			node.fy = y;
+			node.x = x;
+			node.y = y;
+			// Update React positions immediately (not only on the next force
+			// tick) so edges stay glued to the dragged node frame-by-frame.
+			setGraphPositions((prev) => {
+				const cur = prev[drag.id];
+				if (cur && cur.x === x && cur.y === y) return prev;
+				return { ...prev, [drag.id]: { x, y } };
+			});
 		},
 		[clientPointToGraph],
 	);
@@ -733,13 +762,28 @@ export default function NodeGraphPage() {
 			return null;
 		};
 
+		// Preserve pin state (fx/fy) across simulation rebuilds so dragged
+		// nodes stay put and their edges keep the same endpoints.
+		const prevById = new Map((dragNodesRef.current || []).map((n: any) => [n.id, n]));
+
 		const d3Nodes = graphData.nodes.map((n) => {
+			const prev = prevById.get(n.id);
 			const existing = positionsRef.current[n.id];
-			if (existing) return { ...n, x: existing.x, y: existing.y };
-			const anchor = neighborPosition(n.id) || { x: width / 2, y: height / 2 };
-			return { ...n, x: anchor.x + (Math.random() - 0.5) * 20, y: anchor.y + (Math.random() - 0.5) * 20 };
+			const base =
+				existing ?
+					{ ...n, x: existing.x, y: existing.y }
+				:	(() => {
+						const anchor = neighborPosition(n.id) || { x: width / 2, y: height / 2 };
+						return { ...n, x: anchor.x + (Math.random() - 0.5) * 20, y: anchor.y + (Math.random() - 0.5) * 20 };
+					})();
+			if (prev && typeof prev.fx === 'number') (base as any).fx = prev.fx;
+			if (prev && typeof prev.fy === 'number') (base as any).fy = prev.fy;
+			return base;
 		});
-		const d3Links = graphData.links.map((l) => ({ ...l }));
+		// Always pass fresh link objects with string endpoints — d3 mutates
+		// source/target into node refs; rebuilding from strings keeps the
+		// forceLink id resolver correct after graph merges/expansions.
+		const d3Links = graphData.links.map((l) => ({ source: l.source, target: l.target, label: l.label }));
 
 		// Charge repulsion needs to scale down as node count grows, otherwise
 		// large unlinked clusters (e.g. 100 search-result nodes with no links
@@ -755,7 +799,8 @@ export default function NodeGraphPage() {
 				d3
 					.forceLink(d3Links)
 					.id((d: any) => d.id)
-					.distance(140),
+					.distance(140)
+					.strength(0.85),
 			)
 			.force('charge', d3.forceManyBody().strength(chargeStrength))
 			.force('center', d3.forceCenter(width / 2, height / 2))
@@ -772,17 +817,21 @@ export default function NodeGraphPage() {
 			const pos: Record<string, { x: number; y: number }> = {};
 			d3Nodes.forEach((n) => {
 				if (n.id) {
-					pos[n.id] = { x: n.x ?? 0, y: n.y ?? 0 };
+					// Prefer fixed drag coordinates so link endpoints match the
+					// pinned node exactly even if forces nudge x/y slightly.
+					pos[n.id] = {
+						x: typeof n.fx === 'number' ? n.fx : (n.x ?? 0),
+						y: typeof n.fy === 'number' ? n.fy : (n.y ?? 0),
+					};
 				}
 			});
 			setGraphPositions(pos);
+			positionsRef.current = pos;
 		});
 
 		return () => {
 			simulation.stop();
-			simulationRef.current = null;
-			dragNodesRef.current = [];
-			dragStateRef.current = null;
+			if (simulationRef.current === simulation) simulationRef.current = null;
 		};
 	}, [graphData]);
 
@@ -919,13 +968,15 @@ export default function NodeGraphPage() {
 						aria-label='Relationship graph'>
 						<g transform={transform.toString()}>
 							{visibleLinks.map((link) => {
-								const sourcePos = graphPositions[link.source];
-								const targetPos = graphPositions[link.target];
+								const sourceId = typeof link.source === 'string' ? link.source : String((link as any).source?.id ?? link.source);
+								const targetId = typeof link.target === 'string' ? link.target : String((link as any).target?.id ?? link.target);
+								const sourcePos = graphPositions[sourceId];
+								const targetPos = graphPositions[targetId];
 								if (!sourcePos || !targetPos) return null;
-								const dimmed = traceConnectedIds ? !(traceConnectedIds.has(link.source) && traceConnectedIds.has(link.target)) : false;
+								const dimmed = traceConnectedIds ? !(traceConnectedIds.has(sourceId) && traceConnectedIds.has(targetId)) : false;
 								return (
 									<line
-										key={`${link.source}-${link.target}`}
+										key={`${sourceId}-${targetId}-${link.label}`}
 										className={`graph-link-glow${dimmed ? ' dimmed' : ''}`}
 										x1={sourcePos.x}
 										y1={sourcePos.y}
@@ -940,10 +991,13 @@ export default function NodeGraphPage() {
 								const isPrimary = node.kind === 'primary';
 								const isActive = focusedNodeId === node.id;
 								const dimmed = traceConnectedIds ? !traceConnectedIds.has(node.id) : false;
+								// Translate the group so circle/label stay locked to the
+								// same origin as link endpoints (cx/cy stay fixed at 0).
 								return (
 									<g
 										key={node.id}
 										className={`graph-node-group${dimmed ? ' dimmed' : ''}${draggingNodeId === node.id ? ' dragging' : ''}${expandingNodeId === node.id ? ' expanding' : ''}`}
+										transform={`translate(${position.x},${position.y})`}
 										onClick={() => handleNodeClick(node.id)}
 										onPointerDown={(event) => handleNodePointerDown(event, node.id)}
 										onPointerMove={handleNodePointerMove}
@@ -951,21 +1005,21 @@ export default function NodeGraphPage() {
 										onPointerCancel={handleNodePointerUp}>
 										<circle
 											className={`graph-node ${node.kind}${isActive ? ' active' : ''}`}
-											cx={position.x}
-											cy={position.y}
+											cx={0}
+											cy={0}
 											r={isPrimary ? 12 : 8}
 										/>
 										{isPrimary && roleRows.includes('Investment Adviser') && (
 											<circle
 												className='graph-node-adviser-badge'
-												cx={position.x + 14}
-												cy={position.y - 8}
+												cx={14}
+												cy={-8}
 												r={5}
 											/>
 										)}
 										<text
-											x={position.x}
-											y={position.y - (isPrimary ? 20 : 16)}
+											x={0}
+											y={isPrimary ? -20 : -16}
 											className={`graph-label${isActive ? ' active' : ''}`}>
 											{node.label}
 										</text>
@@ -1094,7 +1148,11 @@ export default function NodeGraphPage() {
 			<style
 				jsx
 				global>{`
-				html, body, #__next, .app-shell, .app-page {
+				html,
+				body,
+				#__next,
+				.app-shell,
+				.app-page {
 					height: 100%;
 					margin: 0;
 					padding: 0;
@@ -1283,17 +1341,19 @@ export default function NodeGraphPage() {
 					cursor: grabbing;
 				}
 				.graph-link-glow {
-					stroke: rgba(6, 182, 212, 0.4);
-					stroke-width: 1.5;
+					stroke: rgba(6, 182, 212, 0.55);
+					stroke-width: 1.75;
 					stroke-linecap: round;
-					filter: drop-shadow(0 0 4px rgba(6, 182, 212, 0.6));
+					/* No geometric transitions — edges must track node x/y every frame. */
 					transition: opacity 150ms ease;
+					pointer-events: none;
 				}
 				.graph-link-glow.dimmed {
 					opacity: 0.12;
 				}
 				.graph-node-group {
 					cursor: grab;
+					/* Opacity only — never transition transform/position or links detach. */
 					transition: opacity 150ms ease;
 					touch-action: none;
 				}
@@ -1318,7 +1378,12 @@ export default function NodeGraphPage() {
 				.graph-node {
 					stroke: #ffffff;
 					stroke-width: 1.5;
-					transition: all 200ms ease;
+					/* Never use transition: all — animated cx/cy lags force ticks
+					   and makes lines look disconnected from nodes. */
+					transition:
+						fill 150ms ease,
+						stroke-width 150ms ease,
+						filter 150ms ease;
 				}
 				.graph-node.primary {
 					fill: #06b6d4;
@@ -1554,7 +1619,6 @@ export default function NodeGraphPage() {
 					background: #0d131f;
 					color: #f1f1ff;
 				}
-
 			`}</style>
 		</>
 	);
