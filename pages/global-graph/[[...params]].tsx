@@ -85,8 +85,160 @@ function normalizeEdgeType(raw: string | undefined): EdgeTypeKey {
 	return 'other';
 }
 
-/** d3-force bake is already wide; keep a light client scale only. */
-const LAYOUT_SPREAD = 1.25;
+/** d3-force bake is already wide; client scale opens dense firm clusters more. */
+const LAYOUT_SPREAD = 1.7;
+
+/**
+ * Draw labels centered above the node disk (Sigma default is to the right).
+ */
+function drawLabelAbove(
+	context: CanvasRenderingContext2D,
+	data: { x: number; y: number; size: number; label: string | null; color: string },
+	settings: {
+		labelSize: number;
+		labelFont: string;
+		labelWeight: string;
+		labelColor: { color?: string; attribute?: string };
+	},
+	opts?: { hover?: boolean },
+) {
+	if (!data.label) return;
+	const size = settings.labelSize;
+	const font = settings.labelFont;
+	const weight = settings.labelWeight;
+	const color = settings.labelColor.attribute ? (data as any)[settings.labelColor.attribute] || settings.labelColor.color || '#e2e8f0' : settings.labelColor.color || '#e2e8f0';
+
+	context.font = `${weight} ${size}px ${font}`;
+	const text = String(data.label);
+	const metrics = context.measureText(text);
+	const padX = opts?.hover ? 6 : 4;
+	const padY = opts?.hover ? 3 : 2;
+	const w = Math.round(metrics.width + padX * 2);
+	const h = Math.round(size + padY * 2);
+	const x = data.x - w / 2;
+	// Place fully above the disk with a small gap.
+	const y = data.y - data.size - h - 4;
+
+	if (opts?.hover) {
+		context.fillStyle = 'rgba(15,23,42,0.88)';
+		context.strokeStyle = 'rgba(148,163,184,0.55)';
+		context.lineWidth = 1;
+		const r = 4;
+		context.beginPath();
+		context.moveTo(x + r, y);
+		context.lineTo(x + w - r, y);
+		context.quadraticCurveTo(x + w, y, x + w, y + r);
+		context.lineTo(x + w, y + h - r);
+		context.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+		context.lineTo(x + r, y + h);
+		context.quadraticCurveTo(x, y + h, x, y + h - r);
+		context.lineTo(x, y + r);
+		context.quadraticCurveTo(x, y, x + r, y);
+		context.closePath();
+		context.fill();
+		context.stroke();
+	} else {
+		// Soft halo so thin labels stay readable on dark/light edges.
+		context.fillStyle = 'rgba(2,6,23,0.55)';
+		context.fillRect(x - 1, y - 1, w + 2, h + 2);
+	}
+
+	context.fillStyle = color;
+	context.textBaseline = 'middle';
+	context.textAlign = 'left';
+	context.fillText(text, x + padX, y + h / 2);
+}
+
+/**
+ * Extra open-up for dense on-canvas neighborhoods (e.g. firm-link clumps).
+ * Expands each node away from the centroid of its on-canvas neighbors.
+ */
+function loosenDenseClusters(graph: Graph, opts?: { iterations?: number; strength?: number; minDegree?: number }) {
+	const iterations = opts?.iterations ?? 10;
+	const strength = opts?.strength ?? 0.22;
+	const minDegree = opts?.minDegree ?? 3;
+	if (graph.order < 4) return;
+
+	for (let iter = 0; iter < iterations; iter++) {
+		const deltas = new Map<string, { dx: number; dy: number }>();
+		graph.forEachNode((id) => {
+			const deg = graph.degree(id);
+			if (deg < minDegree) return;
+			let cx = 0;
+			let cy = 0;
+			let n = 0;
+			graph.forEachNeighbor(id, (nb) => {
+				cx += Number(graph.getNodeAttribute(nb, 'x')) || 0;
+				cy += Number(graph.getNodeAttribute(nb, 'y')) || 0;
+				n++;
+			});
+			if (n < minDegree) return;
+			cx /= n;
+			cy /= n;
+			const x = Number(graph.getNodeAttribute(id, 'x')) || 0;
+			const y = Number(graph.getNodeAttribute(id, 'y')) || 0;
+			let dx = x - cx;
+			let dy = y - cy;
+			let dist = Math.hypot(dx, dy);
+			if (dist < 1e-6) {
+				const ang = (Number(id.replace(/\D/g, '').slice(-4) || '1') % 360) * (Math.PI / 180);
+				dx = Math.cos(ang);
+				dy = Math.sin(ang);
+				dist = 1;
+			}
+			// Push outward from local neighborhood centroid; denser hubs get more air.
+			const boost = strength * (0.65 + Math.min(1.8, Math.sqrt(deg) * 0.18));
+			const scale = boost * (8 + Math.min(40, 120 / Math.max(dist, 1)));
+			const prev = deltas.get(id) || { dx: 0, dy: 0 };
+			prev.dx += (dx / dist) * scale;
+			prev.dy += (dy / dist) * scale;
+			deltas.set(id, prev);
+		});
+
+		// Also gently separate high-degree pairs that sit too close.
+		const hubs: string[] = [];
+		graph.forEachNode((id) => {
+			if (graph.degree(id) >= minDegree) hubs.push(id);
+		});
+		for (let i = 0; i < hubs.length; i++) {
+			const a = hubs[i];
+			const ax = Number(graph.getNodeAttribute(a, 'x')) || 0;
+			const ay = Number(graph.getNodeAttribute(a, 'y')) || 0;
+			const ar = (Number(graph.getNodeAttribute(a, 'size')) || 4) * LAYOUT_SPREAD * 0.9;
+			for (let j = i + 1; j < hubs.length; j++) {
+				const b = hubs[j];
+				const bx = Number(graph.getNodeAttribute(b, 'x')) || 0;
+				const by = Number(graph.getNodeAttribute(b, 'y')) || 0;
+				const br = (Number(graph.getNodeAttribute(b, 'size')) || 4) * LAYOUT_SPREAD * 0.9;
+				let dx = bx - ax;
+				let dy = by - ay;
+				let dist = Math.hypot(dx, dy);
+				const minD = ar + br + 18;
+				if (dist >= minD) continue;
+				if (dist < 1e-6) {
+					dx = 1;
+					dy = 0;
+					dist = 1;
+				}
+				const push = ((minD - dist) * 0.35) / dist;
+				const da = deltas.get(a) || { dx: 0, dy: 0 };
+				const db = deltas.get(b) || { dx: 0, dy: 0 };
+				da.dx -= dx * push;
+				da.dy -= dy * push;
+				db.dx += dx * push;
+				db.dy += dy * push;
+				deltas.set(a, da);
+				deltas.set(b, db);
+			}
+		}
+
+		if (!deltas.size) break;
+		for (const [id, d] of deltas) {
+			graph.setNodeAttribute(id, 'x', (Number(graph.getNodeAttribute(id, 'x')) || 0) + d.dx);
+			graph.setNodeAttribute(id, 'y', (Number(graph.getNodeAttribute(id, 'y')) || 0) + d.dy);
+		}
+	}
+}
 
 /**
  * Hard non-overlap: treat each node as a disk of radius ~display size in graph units
@@ -236,18 +388,26 @@ function bakeDisplaySizes(payload: LayoutPayload): LayoutPayload {
 	return payload;
 }
 
+/** Thin progressive-map edges — always drawn; alpha stays low so stacks stay readable. */
+function edgeBaseSize(weight?: number): number {
+	// ~half of prior stroke so lines stay hairline even when many stack.
+	return Math.min(0.055, 0.012 + (Number(weight) || 1) * 0.0025);
+}
+
 function edgeColor(type: string, dimmed: boolean): string {
 	const base =
 		type === 'firm_link' || type === 'ownership' ? '167,139,250'
 		: type === 'location' ? '52,211,153'
 		: type === 'succession' ? '251,146,60'
-		: '100,116,139';
-	// Very faint — 24k edges stack into white otherwise.
+		: '148,163,184';
+	// Slightly clearer than before so thin lines remain visible; dimmed stays ghosted.
 	const a =
-		type === 'firm_link' ? 0.1
-		: type === 'ownership' ? 0.14
-		: 0.028;
-	return dimmed ? `rgba(${base},0.012)` : `rgba(${base},${a})`;
+		type === 'firm_link' ? 0.22
+		: type === 'ownership' ? 0.26
+		: type === 'location' ? 0.18
+		: type === 'succession' ? 0.2
+		: 0.14;
+	return dimmed ? `rgba(${base},0.05)` : `rgba(${base},${a})`;
 }
 
 /**
@@ -362,8 +522,8 @@ export default function GlobalGraphPage() {
 		},
 		[router],
 	);
-	/** Camera/focus edge visibility: overview hides bulk lines so nodes stay readable. */
-	const edgeLodModeRef = useRef<'overview' | 'mid' | 'detail' | 'focus'>('overview');
+	/** Camera LOD label only — edges stay visible at every zoom (user preference). */
+	const edgeLodModeRef = useRef<'overview' | 'mid' | 'detail' | 'focus'>('detail');
 	const edgeLodIndexRef = useRef(0);
 
 	const availableEdgeTypes = useMemo(() => {
@@ -460,8 +620,8 @@ export default function GlobalGraphPage() {
 			}
 		});
 
-		const lod = activeId ? 'focus' : edgeLodModeRef.current;
-		let sampleI = 0;
+		// Edges stay visible at every zoom/focus — only type filters may hide them.
+		// Focus lightly emphasizes incident edges without hiding the rest.
 		graph.forEachEdge((edge, attrs, source, target) => {
 			const et = normalizeEdgeType(String(attrs.edgeType || ''));
 			const typeOn = enabled[et] !== false && !attrs.filterHidden && !attrs.typeHidden;
@@ -470,40 +630,13 @@ export default function GlobalGraphPage() {
 				return;
 			}
 
-			// Edges always below nodes (zIndex <= 0).
-			if (lod === 'focus' && activeId) {
-				const touches = source === activeId || target === activeId;
-				graph.setEdgeAttribute(edge, 'hidden', !touches);
-				if (touches) {
-					graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), false));
-					graph.setEdgeAttribute(edge, 'zIndex', 0);
-					graph.setEdgeAttribute(edge, 'size', Math.min(0.7, Number(attrs.baseSize || 0.12) * 1.5));
-				} else {
-					graph.setEdgeAttribute(edge, 'color', 'rgba(30,41,59,0.02)');
-					graph.setEdgeAttribute(edge, 'zIndex', -2);
-					graph.setEdgeAttribute(edge, 'size', Math.max(0.04, Number(attrs.baseSize || 0.1) * 0.25));
-				}
-				return;
-			}
-
-			if (lod === 'overview') {
-				graph.setEdgeAttribute(edge, 'hidden', true);
-				graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), false));
-				graph.setEdgeAttribute(edge, 'zIndex', -1);
-				graph.setEdgeAttribute(edge, 'size', Number(attrs.baseSize || 0.1));
-				return;
-			}
-
-			if (lod === 'mid') {
-				const keep = sampleI % 8 === 0;
-				sampleI++;
-				graph.setEdgeAttribute(edge, 'hidden', !keep);
-			} else {
-				graph.setEdgeAttribute(edge, 'hidden', false);
-			}
-			graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), false));
-			graph.setEdgeAttribute(edge, 'zIndex', -1);
-			graph.setEdgeAttribute(edge, 'size', Number(attrs.baseSize || 0.1));
+			const baseSize = Number(attrs.baseSize) > 0 ? Number(attrs.baseSize) : edgeBaseSize(Number(attrs.weight));
+			const touchesActive = Boolean(activeId && (source === activeId || target === activeId));
+			graph.setEdgeAttribute(edge, 'hidden', false);
+			graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), Boolean(activeId) && !touchesActive));
+			graph.setEdgeAttribute(edge, 'zIndex', touchesActive ? 0 : -1);
+			// Hairline by default; only a small bump for the active star.
+			graph.setEdgeAttribute(edge, 'size', touchesActive ? Math.min(0.12, baseSize * 1.65) : baseSize);
 		});
 
 		sigma.refresh();
@@ -564,7 +697,8 @@ export default function GlobalGraphPage() {
 		let disposed = false;
 		const retryTimers: number[] = [];
 		const doAnimate = opts?.animate !== false;
-		const fitRatio = opts?.fitRatio !== false;
+		// Never change zoom on selection unless an explicit caller opts in.
+		const fitRatio = opts?.fitRatio === true;
 
 		const readGraphPos = (s: Sigma, id: string) => {
 			const g = s.getGraph();
@@ -611,7 +745,7 @@ export default function GlobalGraphPage() {
 
 		const desiredRatio = (current: number) => {
 			if (!fitRatio) return current;
-			// Sigma: smaller ratio = closer. Ease in from overview; avoid extreme zooms.
+			// Opt-in only: Sigma smaller ratio = closer.
 			let next = current;
 			if (!Number.isFinite(next) || next <= 0) next = 0.35;
 			if (next > 0.85) next = 0.35;
@@ -632,6 +766,7 @@ export default function GlobalGraphPage() {
 			if (!framed) return;
 			const cam = s.getCamera();
 			const state = cam.getState();
+			// Preserve current zoom (ratio) on selection — pan only.
 			const next = {
 				x: framed.x,
 				y: framed.y,
@@ -763,7 +898,7 @@ export default function GlobalGraphPage() {
 		if (graph.hasEdge(e.source, e.target)) return false;
 		const enabled = edgeTypesEnabledRef.current;
 		const et = normalizeEdgeType(e.type);
-		const size = Math.min(0.11, 0.01 + (e.weight || 1) * 0.006);
+		const size = edgeBaseSize(e.weight);
 		try {
 			graph.addEdgeWithKey(e.id || `${e.source}:${e.target}`, e.source, e.target, {
 				weight: e.weight,
@@ -832,13 +967,23 @@ export default function GlobalGraphPage() {
 				}
 			}
 
+			// Open dense firm-link clumps (bottom-right style packs) then hard-separate disks.
+			if (added > 0 && graph.order >= 4) {
+				loosenDenseClusters(graph, { iterations: 12, strength: 0.28, minDegree: 3 });
+				resolveNodeOverlaps(graph, {
+					maxIterations: 220,
+					padding: 7,
+					sizeToGraph: LAYOUT_SPREAD * 0.72,
+				});
+			}
+
 			setVisibleCount(visibleIdsRef.current.size);
 			if (added > 0 || graph.hasNode(nodeId)) {
-				// Show edges among the progressive graph (not full-map overview hide).
-				edgeLodModeRef.current = graph.order > 80 ? 'mid' : 'detail';
-				setLodHint(graph.order > 80 ? 'mid · sparse edges' : 'detail · edges on');
+				edgeLodModeRef.current = 'detail';
+				setLodHint('edges on');
 				applyHighlight();
 				try {
+					// Positions changed — reindex so labels/hit-tests track new coords.
 					sigma.refresh();
 				} catch {
 					// ignore
@@ -959,9 +1104,10 @@ export default function GlobalGraphPage() {
 
 			// Hold the focused hub in the viewport (URL deep-links included).
 			// Camera x/y must be framed/normalized coords (handled inside attachCameraPin).
+			// Do not change zoom on select — keep the user's current ratio.
 			attachCameraPin(nodeId, {
 				animate: opts?.animate !== false,
-				fitRatio: true,
+				fitRatio: false,
 			});
 
 			if (opts?.openEgo) {
@@ -1066,8 +1212,31 @@ export default function GlobalGraphPage() {
 					renderLabels: true,
 					labelRenderedSizeThreshold: 4,
 					labelDensity: 0.55,
-					labelGridCellSize: 140,
+					labelGridCellSize: 120,
+					labelSize: 12,
+					labelFont: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif',
+					labelWeight: '600',
 					labelColor: { color: '#e2e8f0' },
+					defaultDrawNodeLabel: (context, data, settings) => {
+						drawLabelAbove(context, data as any, settings as any, { hover: false });
+					},
+					defaultDrawNodeHover: (context, data, settings) => {
+						// Disc under cursor + label chip above (not to the right).
+						const size = Number((data as any).size) || 4;
+						const x = Number((data as any).x) || 0;
+						const y = Number((data as any).y) || 0;
+						context.fillStyle = String((data as any).color || '#f8fafc');
+						context.beginPath();
+						context.arc(x, y, size + 2, 0, Math.PI * 2);
+						context.closePath();
+						context.fill();
+						context.fillStyle = 'rgba(15,23,42,0.35)';
+						context.beginPath();
+						context.arc(x, y, Math.max(1.5, size * 0.45), 0, Math.PI * 2);
+						context.closePath();
+						context.fill();
+						drawLabelAbove(context, data as any, settings as any, { hover: true });
+					},
 					defaultEdgeColor: 'rgba(100,116,139,0.03)',
 					defaultNodeColor: '#22d3ee',
 					minCameraRatio: 0.004,
@@ -1080,6 +1249,7 @@ export default function GlobalGraphPage() {
 					const ratio = sigma.getCamera().ratio;
 					const active = Boolean(focusedIdRef.current || hoverIdRef.current);
 					const empty = graph.order === 0;
+					// Labels still LOD by zoom; edges stay drawn (thin) at every level.
 					const mode =
 						empty ? 'overview'
 						: active ? 'focus'
@@ -1098,17 +1268,17 @@ export default function GlobalGraphPage() {
 						sigma.setSetting('renderLabels', true);
 						sigma.setSetting('labelDensity', 0.55);
 						sigma.setSetting('labelRenderedSizeThreshold', 4);
-						if (modeChanged) setLodHint(active ? 'focus · linked edges' : 'detail · edges on');
+						if (modeChanged) setLodHint(active ? 'focus · edges on' : 'detail · edges on');
 					} else if (ratio < 0.55) {
 						sigma.setSetting('renderLabels', true);
 						sigma.setSetting('labelDensity', 0.2);
 						sigma.setSetting('labelRenderedSizeThreshold', 9);
-						if (modeChanged) setLodHint(mode === 'detail' ? 'detail · edges on' : 'mid · sparse edges');
+						if (modeChanged) setLodHint(active ? 'focus · edges on' : 'mid · edges on');
 					} else {
 						sigma.setSetting('renderLabels', active);
 						sigma.setSetting('labelDensity', 0.08);
 						sigma.setSetting('labelRenderedSizeThreshold', 14);
-						if (modeChanged) setLodHint(active ? 'focus · linked edges' : 'overview · edges off');
+						if (modeChanged) setLodHint(active ? 'focus · edges on' : 'overview · edges on');
 					}
 					if (modeChanged) applyHighlightRef.current();
 				};
