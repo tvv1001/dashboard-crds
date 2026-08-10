@@ -310,12 +310,25 @@ export default function Dashboard() {
 	// ── URL sync ──────────────────────────────────────────────────────────────
 	// Pushes a new history entry for each distinct selection (deduped by path)
 	// so the browser back/forward buttons step through previously viewed keys.
+	// Also notifies the top-nav (Node Graph link) so it can deep-link the same CRD.
 	function syncPathForSelection(key: string) {
 		const parsed = parseCrdKey(key);
 		if (!parsed) return;
 		const newPath = `/${parsed.type}/${parsed.crd}`;
-		if (window.location.pathname === newPath) return;
+		if (window.location.pathname === newPath) {
+			window.dispatchEvent(
+				new CustomEvent('crd-selection-change', {
+					detail: { path: newPath, key, type: parsed.type, crd: parsed.crd },
+				}),
+			);
+			return;
+		}
 		history.pushState({ key }, '', newPath);
+		window.dispatchEvent(
+			new CustomEvent('crd-selection-change', {
+				detail: { path: newPath, key, type: parsed.type, crd: parsed.crd },
+			}),
+		);
 	}
 
 	// ── Initialization ────────────────────────────────────────────────────────

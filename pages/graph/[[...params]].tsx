@@ -468,10 +468,28 @@ export default function NodeGraphPage() {
 	const [expansionLinks, setExpansionLinks] = useState<GraphLink[]>([]);
 	const [expandingNodeId, setExpandingNodeId] = useState<string | null>(null);
 	const expandedKeysRef = useRef<Set<string>>(new Set());
+	// Explicit hub key — graph topology is built from this snapshot only.
+	// Clicking relation nodes must NOT replace the hub (only the side panel).
+	const [hubKey, setHubKey] = useState<string | null>(null);
+	// Side-panel payload for the currently selected node (may differ from hub).
+	const [panelSnapshot, setPanelSnapshot] = useState<{
+		key: string;
+		resolvedKey: string;
+		detailJson: string | null;
+		loading: boolean;
+		error: string;
+	} | null>(null);
+	const panelRequestRef = useRef(0);
 
 	const activeSnapshot = useMemo(() => {
+		if (hubKey) {
+			const direct = cache[hubKey];
+			if (direct) return direct;
+			const match = Object.values(cache).find((s) => s.key === hubKey || s.resolvedKey === hubKey);
+			if (match) return match;
+		}
 		return Object.values(cache).sort((a, b) => b.fetchedAt - a.fetchedAt)[0] ?? null;
-	}, [cache]);
+	}, [cache, hubKey]);
 
 	const parsedPayload = useMemo(() => readSnapshotPayload(activeSnapshot?.detailJson ?? null), [activeSnapshot]);
 
@@ -615,7 +633,7 @@ export default function NodeGraphPage() {
 	// empty/orphan placeholder), so callers can decide whether to try an
 	// alternate guess (e.g. individual vs firm) before giving up.
 	const fetchAndApplyKey = useCallback(
-		(key: string, requestKey: string, options?: { force?: boolean }) => {
+		(key: string, requestKey: string, options?: { force?: boolean; asHub?: boolean }) => {
 			return fetch(`/api/key?name=${encodeURIComponent(key)}${options?.force ? `&t=${Date.now()}` : ''}`)
 				.then(async (r) => {
 					const data = await r.json();
@@ -624,26 +642,36 @@ export default function NodeGraphPage() {
 				})
 				.then((data) => {
 					const found = Boolean(data?.bundle?.sources?.finra?.found || data?.bundle?.sources?.sec?.found);
-					if (!found) return { found: false as const, data };
+					if (!found) return { found: false as const, data, resolvedKey: key, detailValue: null as string | null };
 					const resolvedKey = typeof data?.resolvedKey === 'string' ? data.resolvedKey : key;
 					const detailValue = typeof data?.rawPayload === 'string' ? data.rawPayload : JSON.stringify(data?.payload ?? data ?? null, null, 2);
 					const snapshot = { key: requestKey, resolvedKey, detailJson: detailValue, fetchedAt: Date.now(), source: 'shared' as const };
 					setSnapshot(requestKey, snapshot);
 					if (resolvedKey !== requestKey) setSnapshot(resolvedKey, snapshot);
-					return { found: true as const, data };
+					if (options?.asHub !== false) {
+						setHubKey(resolvedKey || requestKey);
+						setPanelSnapshot({
+							key: requestKey,
+							resolvedKey,
+							detailJson: detailValue,
+							loading: false,
+							error: '',
+						});
+					}
+					return { found: true as const, data, resolvedKey, detailValue };
 				});
 		},
 		[setSnapshot],
 	);
 
-	// Loads an explicit, unambiguous key (source:type:crd, or type:crd) — used
-	// for Refresh and for clicking a relation node whose type is already known.
+	// Loads an explicit, unambiguous key (source:type:crd, or type:crd) as the
+	// graph hub — used by search, deep links, refresh, and search-result clicks.
 	const loadKey = useCallback(
 		(key: string, options?: { force?: boolean }) => {
 			if (!key) return;
 			setSearchLoading(true);
 			setSearchError('');
-			fetchAndApplyKey(key, key, options)
+			fetchAndApplyKey(key, key, { ...options, asHub: true })
 				.then((result) => {
 					if (!result.found) setSearchError(`No FINRA/SEC record found for ${key}`);
 				})
@@ -653,6 +681,99 @@ export default function NodeGraphPage() {
 				.finally(() => setSearchLoading(false));
 		},
 		[fetchAndApplyKey],
+	);
+
+	// Loads detail JSON into the side panel for a clicked graph node without
+	// replacing the hub / rebuilding the whole graph.
+	const loadPanelForNode = useCallback(
+		(node: GraphNode) => {
+			const requestId = ++panelRequestRef.current;
+
+			if (node.id === 'primary') {
+				const key = activeSnapshot?.resolvedKey || activeSnapshot?.key || '';
+				setPanelSnapshot({
+					key,
+					resolvedKey: key,
+					detailJson: activeSnapshot?.detailJson ?? null,
+					loading: false,
+					error: '',
+				});
+				return;
+			}
+
+			const requestKey =
+				node.loadKey ||
+				(() => {
+					const canonical = canonicalIdForNode(node);
+					if (!canonical) return '';
+					const [type, crd] = canonical.split(':');
+					return type && crd ? `finra:${type}:${crd}` : '';
+				})();
+
+			if (!requestKey) {
+				setPanelSnapshot({
+					key: node.id,
+					resolvedKey: node.id,
+					detailJson: null,
+					loading: false,
+					error: `No CRD key available for ${node.label}`,
+				});
+				return;
+			}
+
+			const cached = cache[requestKey] || Object.values(cache).find((s) => s.key === requestKey || s.resolvedKey === requestKey) || null;
+			if (cached?.detailJson) {
+				setPanelSnapshot({
+					key: cached.key,
+					resolvedKey: cached.resolvedKey || cached.key,
+					detailJson: cached.detailJson,
+					loading: false,
+					error: '',
+				});
+				return;
+			}
+
+			setPanelSnapshot({
+				key: requestKey,
+				resolvedKey: requestKey,
+				detailJson: null,
+				loading: true,
+				error: '',
+			});
+
+			fetchAndApplyKey(requestKey, requestKey, { asHub: false })
+				.then((result) => {
+					if (panelRequestRef.current !== requestId) return;
+					if (!result.found) {
+						setPanelSnapshot({
+							key: requestKey,
+							resolvedKey: requestKey,
+							detailJson: null,
+							loading: false,
+							error: `No FINRA/SEC record found for ${requestKey}`,
+						});
+						return;
+					}
+					setPanelSnapshot({
+						key: requestKey,
+						resolvedKey: result.resolvedKey || requestKey,
+						detailJson: result.detailValue,
+						loading: false,
+						error: '',
+					});
+				})
+				.catch((err: unknown) => {
+					if (panelRequestRef.current !== requestId) return;
+					setPanelSnapshot({
+						key: requestKey,
+						resolvedKey: requestKey,
+						detailJson: null,
+						loading: false,
+						error: err instanceof Error ? err.message : `Could not load data for ${requestKey}`,
+					});
+				});
+		},
+		[activeSnapshot, cache, canonicalIdForNode, fetchAndApplyKey],
 	);
 
 	// Deep-link support: when this page is reached via /graph/individual/<crd>
@@ -799,6 +920,9 @@ export default function NodeGraphPage() {
 		setExpansionLinks([]);
 		setExpandingNodeId(null);
 		setLabelModeById({});
+		setHubKey(null);
+		setPanelSnapshot(null);
+		panelRequestRef.current += 1;
 		expandedKeysRef.current.clear();
 		lastRouteKeyRef.current = null;
 		router.replace('/graph', undefined, { shallow: true });
@@ -811,10 +935,19 @@ export default function NodeGraphPage() {
 	const [labelModeById, setLabelModeById] = useState<Record<string, LabelMode>>({});
 	// Hide auto labels once zoomed out past ~halfway from default (k=1 → 0.5).
 	const LABEL_HIDE_SCALE = 0.5;
-	// Reset the focused/highlighted node whenever a new entity is loaded so
-	// stale node ids from the previous graph don't linger.
+	// Reset the focused/highlighted node whenever a new hub entity is loaded so
+	// stale node ids from the previous graph don't linger. Panel resets to hub.
 	useEffect(() => {
 		setFocusedNodeId('primary');
+		if (activeSnapshot) {
+			setPanelSnapshot({
+				key: activeSnapshot.key,
+				resolvedKey: activeSnapshot.resolvedKey || activeSnapshot.key,
+				detailJson: activeSnapshot.detailJson,
+				loading: false,
+				error: '',
+			});
+		}
 	}, [activeSnapshot?.resolvedKey]);
 
 	// Auto-expand the primary node the moment its entity loads, so its full
@@ -1507,13 +1640,16 @@ export default function NodeGraphPage() {
 				return;
 			}
 
+			// Side panel always reflects the clicked node (hub or relation).
+			loadPanelForNode(node);
+
 			// Every other node — the primary hub node or any relation node —
 			// reveals its own connections (current + previous employments for
 			// a person; owners/control persons and current+previous employees
 			// for a firm) merged into the existing graph, in place.
 			expandNode(node);
 		},
-		[graphData.nodes, loadKey, expandNode],
+		[graphData.nodes, loadKey, loadPanelForNode, expandNode],
 	);
 
 	// Wraps `selectNode` so that releasing a drag (which fires a trailing
@@ -1526,6 +1662,15 @@ export default function NodeGraphPage() {
 		},
 		[selectNode],
 	);
+
+	// Empty-canvas click closes the side panel (node/label clicks stopPropagation).
+	const handleCanvasClick = useCallback((event: React.MouseEvent<SVGSVGElement>) => {
+		const target = event.target as Element | null;
+		if (!target) return;
+		// Ignore interactions on nodes, labels, or toolbar-adjacent SVG UI.
+		if (target.closest('.graph-node-group')) return;
+		setDrawerOpen(false);
+	}, []);
 
 	// Double-click a label to pin it large → small → auto (zoom-driven).
 	const cycleLabelMode = useCallback((nodeId: string) => {
@@ -1562,6 +1707,55 @@ export default function NodeGraphPage() {
 	);
 
 	const zoomScale = transform.k;
+
+	// Side panel content for the focused node (not necessarily the hub).
+	const panelActiveKey = panelSnapshot?.resolvedKey || panelSnapshot?.key || activeSnapshot?.resolvedKey || activeSnapshot?.key || '';
+	const panelDetailJson = panelSnapshot ? panelSnapshot.detailJson : (activeSnapshot?.detailJson ?? null);
+	const panelLoading = Boolean(panelSnapshot?.loading || (searchLoading && !panelDetailJson));
+	const panelTitle = useMemo(() => {
+		if (focusedNode && focusedNode.id !== 'primary') return focusedNode.label || entityTitle;
+		return entityTitle;
+	}, [focusedNode, entityTitle]);
+	const panelRoleRows = useMemo(() => {
+		if (!panelDetailJson) return focusedNode?.id === 'primary' ? roleRows : [];
+		if (focusedNode?.id === 'primary' || !panelSnapshot || panelSnapshot.resolvedKey === (activeSnapshot?.resolvedKey || activeSnapshot?.key)) {
+			return roleRows;
+		}
+		try {
+			const payload = JSON.parse(panelDetailJson);
+			const parsed = parseCrdKey(panelActiveKey);
+			const type = (parsed?.type as 'individual' | 'firm') || focusedNode?.entityType || 'individual';
+			const finra = getContentBlock(payload, 'finra', type);
+			const sec = getContentBlock(payload, 'sec', type);
+			const rows: string[] = [];
+			if (toArray(finra?.currentEmployments).length > 0) rows.push('Broker Regulated by FINRA');
+			if (toArray(finra?.currentIAEmployments).length > 0 || toArray(sec?.currentIAEmployments).length > 0) rows.push('Investment Adviser');
+			return rows;
+		} catch {
+			return [];
+		}
+	}, [panelDetailJson, focusedNode, roleRows, panelSnapshot, activeSnapshot, panelActiveKey]);
+
+	// Dashboard deep-link for the currently focused node (falls back to hub / home).
+	const dashboardHref = useMemo(() => {
+		const fromCanonical = (canonical: string | null | undefined) => {
+			if (!canonical) return null;
+			const [type, crd] = canonical.split(':');
+			if ((type === 'individual' || type === 'firm') && crd && /^\d+$/.test(crd)) {
+				return `/${type}/${crd}`;
+			}
+			return null;
+		};
+		const focusedHref = fromCanonical(focusedNode ? canonicalIdForNode(focusedNode) : null);
+		if (focusedHref) return focusedHref;
+		if (parsedKeyInfo?.crd && (entityType === 'individual' || entityType === 'firm')) {
+			return `/${entityType}/${parsedKeyInfo.crd}`;
+		}
+		if (routeParams?.type && routeParams?.crd) {
+			return `/${routeParams.type}/${routeParams.crd}`;
+		}
+		return '/';
+	}, [focusedNode, canonicalIdForNode, parsedKeyInfo?.crd, entityType, routeParams]);
 
 	return (
 		<>
@@ -1619,8 +1813,9 @@ export default function NodeGraphPage() {
 						{/* Right controls: Dashboard + panel toggle */}
 						<div className='fg-header-right-controls'>
 							<Link
-								href='/'
-								className='fg-btn'>
+								href={dashboardHref}
+								className='fg-btn'
+								title={dashboardHref === '/' ? 'Open dashboard' : `Open ${dashboardHref.replace(/^\//, '')} on dashboard`}>
 								Dashboard
 							</Link>
 							{activeSnapshot && (
@@ -1669,7 +1864,19 @@ export default function NodeGraphPage() {
 						viewBox={`0 0 ${width} ${height}`}
 						preserveAspectRatio='xMidYMid meet'
 						role='img'
-						aria-label='Relationship graph'>
+						aria-label='Relationship graph'
+						onClick={handleCanvasClick}>
+						{/* Full-canvas hit target so empty space receives clicks even when
+						    the force layer is transformed / sparse. */}
+						<rect
+							className='graph-canvas-bg'
+							x={0}
+							y={0}
+							width={width}
+							height={height}
+							fill='transparent'
+							pointerEvents='all'
+						/>
 						<g transform={transform.toString()}>
 							{visibleLinks.map((link) => {
 								const sourceId = typeof link.source === 'string' ? link.source : String((link as any).source?.id ?? link.source);
@@ -1711,7 +1918,10 @@ export default function NodeGraphPage() {
 										key={node.id}
 										className={`graph-node-group${dimmed ? ' dimmed' : ''}${draggingNodeId === node.id ? ' dragging' : ''}${expandingNodeId === node.id ? ' expanding' : ''}`}
 										transform={`translate(${position.x},${position.y})`}
-										onClick={() => handleNodeClick(node.id)}
+										onClick={(event) => {
+											event.stopPropagation();
+											handleNodeClick(node.id);
+										}}
 										onPointerDown={(event) => handleNodePointerDown(event, node.id)}
 										onPointerMove={handleNodePointerMove}
 										onPointerUp={handleNodePointerUp}
@@ -1823,7 +2033,7 @@ export default function NodeGraphPage() {
 					</div>
 				)}
 
-				{activeSnapshot && (
+				{(activeSnapshot || panelSnapshot) && (
 					<aside className={`node-detail-drawer${drawerOpen ? ' open' : ''}`}>
 						<div className='sidebar-header'>
 							<button
@@ -1833,10 +2043,10 @@ export default function NodeGraphPage() {
 								aria-label='Close details panel'>
 								✕
 							</button>
-							<h1>{entityTitle}</h1>
-							{roleRows.length > 0 && (
+							<h1>{panelTitle}</h1>
+							{panelRoleRows.length > 0 && (
 								<div className='role-rows'>
-									{roleRows.map((row) => (
+									{panelRoleRows.map((row) => (
 										<div
 											key={row}
 											className='role-row'>
@@ -1846,6 +2056,9 @@ export default function NodeGraphPage() {
 									))}
 								</div>
 							)}
+							{panelSnapshot?.error ?
+								<p className='fg-panel-error'>{panelSnapshot.error}</p>
+							:	null}
 						</div>
 
 						<div className='sidebar-content'>
@@ -1854,17 +2067,17 @@ export default function NodeGraphPage() {
 							    badges, profile links, general info, registration,
 							    disclosures, employment, exams, owners, etc.). */}
 							<PanelHeader
-								activeKey={activeSnapshot.resolvedKey || activeSnapshot.key}
+								activeKey={panelActiveKey}
 								payloads={[]}
-								detailJson={activeSnapshot.detailJson}
+								detailJson={panelDetailJson}
 								onSelectKey={loadKey}
 							/>
 							<StatusBox
-								statusMsg=''
+								statusMsg={panelSnapshot?.error || ''}
 								statusHtml=''
-								detailJson={activeSnapshot.detailJson}
-								panelLoading={searchLoading}
-								activeKey={activeSnapshot.resolvedKey || activeSnapshot.key}
+								detailJson={panelDetailJson}
+								panelLoading={panelLoading}
+								activeKey={panelActiveKey}
 								fetchLog={[]}
 								onClearLog={() => {}}
 								onSelectKey={loadKey}
@@ -2515,6 +2728,11 @@ export default function NodeGraphPage() {
 				}
 				.theme-light .sidebar-header h1 {
 					color: #111827;
+				}
+				.fg-panel-error {
+					margin: 8px 0 0;
+					color: #f87171;
+					font-size: 0.8rem;
 				}
 				.role-rows {
 					display: flex;
