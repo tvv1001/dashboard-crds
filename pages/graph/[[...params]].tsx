@@ -1225,9 +1225,7 @@ export default function NodeGraphPage() {
 								entityType,
 							};
 						}
-						const anchor =
-							hubPos ||
-							(loc ? { x: loc.x, y: loc.y } : null) || { x: width / 2, y: height / 2 };
+						const anchor = hubPos || (loc ? { x: loc.x, y: loc.y } : null) || { x: width / 2, y: height / 2 };
 						return {
 							...n,
 							x: anchor.x + (Math.random() - 0.5) * 120,
@@ -1579,37 +1577,52 @@ export default function NodeGraphPage() {
 						<div className='fg-header-brand'>
 							<span className='fg-logo'>FINRA</span>
 						</div>
-						<form
-							className='fg-search-form'
-							onSubmit={handleSearch}>
-							<input
-								className='fg-search-input'
-								type='text'
-								placeholder='firm, person, CRD/SEC#'
-								value={searchInput}
-								onChange={(e) => setSearchInput(e.target.value)}
-							/>
-							<button
-								type='submit'
-								className='fg-search-btn'
-								disabled={searchLoading}>
-								Search
-							</button>
-						</form>
-						<div className='fg-header-actions'>
+
+						{/* Left controls: compact search + send (reference layout) */}
+						<div className='fg-header-controls'>
+							<form
+								className='fg-search fg-search--header'
+								onSubmit={handleSearch}>
+								<input
+									className='fg-search-input'
+									type='search'
+									placeholder='firm, person, CRD/SEC#'
+									value={searchInput}
+									onChange={(e) => setSearchInput(e.target.value)}
+									aria-label='Search firm, person, or CRD'
+								/>
+								<button
+									type='submit'
+									className='fg-send-btn'
+									aria-label='Search'
+									disabled={searchLoading}>
+									➤
+								</button>
+							</form>
+						</div>
+
+						{/* Center focus readout — entity name + CRD when a node is loaded */}
+						<div className={`fg-focus-readout${entityTitle || focusedNode ? ' fg-focus-readout--visible' : ''}`}>
+							{entityTitle || focusedNode?.label ?
+								<>
+									<span className='fg-focus-readout__name'>{entityTitle || focusedNode?.label}</span>
+									{focusedNode &&
+										(() => {
+											const canonical = canonicalIdForNode(focusedNode);
+											const crd = canonical?.split(':')[1];
+											return crd ? <span className='fg-focus-readout__crd'>CRD {crd}</span> : null;
+										})()}
+								</>
+							:	null}
+						</div>
+
+						{/* Right controls: Dashboard + panel toggle */}
+						<div className='fg-header-right-controls'>
 							<Link
 								href='/'
 								className='fg-btn'>
 								Dashboard
 							</Link>
-							<button
-								type='button'
-								onClick={runSearch}
-								className='fg-send-btn'
-								aria-label='Search'
-								disabled={searchLoading}>
-								➤
-							</button>
 							{activeSnapshot && (
 								<button
 									type='button'
@@ -1892,127 +1905,264 @@ export default function NodeGraphPage() {
 					color: #111827;
 				}
 
-				/* Top header bar */
+				/* Top header — visual layout aligned with finra-data-chart-next-02 */
 				.fg-header {
+					position: relative;
+					display: flex;
+					flex-direction: column;
 					flex-shrink: 0;
-					background: #000000;
-					border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+					padding: 0;
+					width: 100%;
+					background: #0b1220;
+					border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+					box-shadow: 0 2px 8px rgba(15, 23, 42, 0.35);
+					z-index: 20;
 				}
 				.theme-light .fg-header {
 					background: #ffffff;
-					border-bottom-color: rgba(0, 0, 0, 0.08);
+					border-bottom-color: rgba(15, 23, 42, 0.1);
+					box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
 				}
 				.fg-header-bar {
 					display: flex;
 					align-items: center;
-					gap: 16px;
-					padding: 10px 16px;
+					gap: 5px;
+					padding: 8px;
+					min-height: 0;
+					width: 100%;
+					min-width: 0;
+					flex-wrap: nowrap;
 				}
 				.fg-header-brand {
-					flex-shrink: 0;
+					display: flex;
+					align-items: center;
+					justify-content: flex-start;
+					gap: 8px;
+					min-width: 0;
+					flex: 0 1 auto;
 				}
 				.fg-logo {
 					font-weight: 800;
-					letter-spacing: 0.05em;
-					font-size: 1rem;
+					letter-spacing: 0.06em;
+					font-size: 0.95rem;
+					line-height: 1;
 					color: #f97316;
+					padding: 0 6px 0 4px;
+					user-select: none;
 				}
-				.fg-search-form {
-					flex: 1;
+				.fg-header-controls {
 					display: flex;
+					width: auto;
+					flex: 0 0 auto;
+					min-width: 0;
+					margin-left: 0;
+					flex-direction: row;
+					align-items: center;
+					justify-content: flex-start;
 					gap: 8px;
-					max-width: 480px;
 				}
-				.fg-search-input {
-					flex: 1;
-					padding: 8px 12px;
-					border-radius: 6px;
-					border: 1px solid rgba(255, 255, 255, 0.15);
-					background: rgba(255, 255, 255, 0.05);
-					color: inherit;
-					font-size: 0.85rem;
-				}
-				.theme-light .fg-search-input {
-					background: #f3f4f6;
-					border-color: rgba(0, 0, 0, 0.15);
-				}
-				.fg-search-btn {
-					padding: 8px 14px;
-					border-radius: 6px;
-					border: 1px solid rgba(255, 255, 255, 0.2);
-					background: transparent;
-					color: inherit;
-					font-weight: 600;
-					font-size: 0.8rem;
-					cursor: pointer;
-				}
-				.fg-header-actions {
+				.fg-search,
+				.fg-search--header {
 					display: flex;
 					align-items: center;
 					gap: 8px;
+					position: relative;
+					min-width: 0;
+				}
+				.fg-search-input {
+					font: 16px var(--font-sans, system-ui, -apple-system, sans-serif);
+					width: min(280px, 100%);
+					flex: 1 1 280px;
+					min-width: 0;
+					max-width: 280px;
+					height: 36px;
+					padding: 0 10px;
+					border-radius: 2px;
+					border: 1px solid rgba(148, 163, 184, 0.28);
+					outline: none;
+					background: rgba(255, 255, 255, 0.04);
+					color: inherit;
+					transition:
+						border-color 0.15s,
+						background 0.15s,
+						box-shadow 0.15s;
+				}
+				.fg-search-input::placeholder {
+					color: #64748b;
+				}
+				.fg-search-input::-webkit-search-cancel-button {
+					-webkit-appearance: none;
+				}
+				.fg-search-input:focus {
+					border-color: rgba(37, 99, 235, 0.55);
+					background: rgba(255, 255, 255, 0.08);
+					box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.14);
+				}
+				.theme-light .fg-search-input {
+					background: #ffffff;
+					border-color: rgba(15, 23, 42, 0.16);
+					color: #0f172a;
+				}
+				.theme-light .fg-search-input:focus {
+					background: #ffffff;
+					border-color: rgba(37, 99, 235, 0.45);
+					box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
+				}
+				.fg-focus-readout {
+					flex: 1 1 auto;
+					display: flex;
+					align-items: center;
+					justify-content: flex-end;
+					font-size: 14px;
+					font-weight: 500;
+					color: #94a3b8;
+					padding: 0 16px;
+					min-width: 0;
+					text-align: right;
+					white-space: nowrap;
+					overflow: hidden;
+					text-overflow: ellipsis;
+					pointer-events: none;
+					opacity: 0;
+					transition: opacity 0.2s ease-in-out;
+				}
+				.fg-focus-readout--visible {
+					opacity: 1;
+				}
+				.fg-focus-readout__name {
+					color: #e2e8f0;
+					margin-right: 8px;
+					font-weight: 600;
+					overflow: hidden;
+					text-overflow: ellipsis;
+				}
+				.theme-light .fg-focus-readout {
+					color: #64748b;
+				}
+				.theme-light .fg-focus-readout__name {
+					color: #0f172a;
+				}
+				.fg-focus-readout__crd {
+					font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+					font-size: 12px;
+					opacity: 0.8;
 					flex-shrink: 0;
 				}
+				.fg-header-right-controls {
+					display: flex;
+					align-items: center;
+					justify-content: flex-end;
+					gap: 8px;
+					flex: 0 0 auto;
+				}
 				.fg-btn {
-					padding: 8px 14px;
-					border-radius: 6px;
-					border: 1px solid rgba(255, 255, 255, 0.2);
-					background: transparent;
+					font: 600 13px/1 var(--font-sans, system-ui, -apple-system, sans-serif);
+					padding: 6px 14px;
+					min-height: 34px;
+					display: inline-flex;
+					align-items: center;
+					justify-content: center;
+					border-radius: 5px;
+					border: 1px solid rgba(148, 163, 184, 0.28);
+					background: rgba(255, 255, 255, 0.03);
 					color: inherit;
-					font-weight: 600;
-					font-size: 0.8rem;
 					text-decoration: none;
 					cursor: pointer;
+					transition:
+						background 0.15s,
+						box-shadow 0.15s;
+					-webkit-tap-highlight-color: transparent;
+				}
+				.fg-btn:hover {
+					background: rgba(255, 255, 255, 0.08);
+					box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+				}
+				.theme-light .fg-btn {
+					border-color: rgba(15, 23, 42, 0.14);
+					background: #ffffff;
+					color: #0f172a;
+				}
+				.theme-light .fg-btn:hover {
+					background: #f8fafc;
+					box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
 				}
 				.fg-send-btn {
-					width: 34px;
-					height: 34px;
-					border-radius: 6px;
+					width: 36px;
+					height: 36px;
+					min-width: 36px;
+					border-radius: 5px;
 					border: none;
 					background: #2563eb;
 					color: white;
 					cursor: pointer;
+					display: inline-flex;
+					align-items: center;
+					justify-content: center;
+					font-size: 0.95rem;
+					flex-shrink: 0;
+					transition: background 0.15s;
+				}
+				.fg-send-btn:hover:not(:disabled) {
+					background: #1d4ed8;
+				}
+				.fg-send-btn:disabled {
+					opacity: 0.55;
+					cursor: not-allowed;
 				}
 				.fg-hamburger-btn {
-					width: 34px;
-					height: 34px;
-					border-radius: 6px;
-					border: 1px solid rgba(255, 255, 255, 0.2);
-					background: transparent;
+					width: 36px;
+					height: 36px;
+					min-width: 36px;
+					border-radius: 5px;
+					border: 1px solid rgba(148, 163, 184, 0.28);
+					background: rgba(255, 255, 255, 0.03);
 					color: inherit;
 					font-size: 1rem;
 					cursor: pointer;
+					display: inline-flex;
+					align-items: center;
+					justify-content: center;
+					transition:
+						background 0.15s,
+						border-color 0.15s;
+				}
+				.fg-hamburger-btn:hover {
+					background: rgba(255, 255, 255, 0.08);
 				}
 				.fg-hamburger-btn.active {
 					background: #2563eb;
 					border-color: #2563eb;
 					color: #ffffff;
+					box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.18);
 				}
 				.theme-light .fg-hamburger-btn {
-					border-color: rgba(0, 0, 0, 0.2);
+					border-color: rgba(15, 23, 42, 0.14);
+					background: #ffffff;
 				}
 				.fg-search-error {
-					padding: 4px 16px 8px;
+					padding: 0 12px 8px;
 					color: #f87171;
 					font-size: 0.8rem;
 				}
 				.fg-search-banner {
 					position: absolute;
-					top: 66px;
-					left: 16px;
-					z-index: 11;
+					top: calc(100% + 8px);
+					left: 12px;
+					z-index: 21;
 					display: flex;
 					align-items: center;
 					gap: 10px;
 					padding: 8px 12px;
-					border-radius: 6px;
+					border-radius: 8px;
 					border: 1px solid rgba(96, 165, 250, 0.4);
-					background: rgba(30, 58, 138, 0.35);
+					background: rgba(30, 58, 138, 0.9);
 					color: #bfdbfe;
 					font-size: 0.8rem;
+					box-shadow: 0 8px 20px rgba(0, 0, 0, 0.25);
 				}
 				.theme-light .fg-search-banner {
 					border-color: rgba(37, 99, 235, 0.3);
-					background: rgba(219, 234, 254, 0.9);
+					background: rgba(219, 234, 254, 0.98);
 					color: #1e3a8a;
 				}
 				.fg-search-banner-close {
@@ -2022,6 +2172,16 @@ export default function NodeGraphPage() {
 					cursor: pointer;
 					font-size: 0.75rem;
 					line-height: 1;
+				}
+				@media (max-width: 720px) {
+					.fg-focus-readout {
+						display: none;
+					}
+					.fg-search-input {
+						width: min(180px, 42vw);
+						max-width: 180px;
+						flex-basis: 180px;
+					}
 				}
 
 				.graph-main-canvas {
@@ -2218,11 +2378,10 @@ export default function NodeGraphPage() {
 					box-shadow: none;
 				}
 
-				/* Detail panel drawer — hidden off-screen by default, slides in from
-				   the right when opened via the hamburger button or by selecting a
-				   node in the graph. */
+				/* Detail panel drawer — same app style, 70px wider for panel column. */
 				.node-detail-drawer {
-					width: 340px;
+					width: 410px; /* was 340px; +70px for side panel column */
+					max-width: min(410px, 100vw);
 					background: #0d131f;
 					border-left: 1px solid rgba(255, 255, 255, 0.08);
 					display: flex;
@@ -2234,6 +2393,7 @@ export default function NodeGraphPage() {
 					top: 0;
 					bottom: 0;
 					overflow-y: auto;
+					overflow-x: hidden;
 					transform: translateX(100%);
 					transition: transform 220ms ease;
 					visibility: hidden;
@@ -2246,6 +2406,18 @@ export default function NodeGraphPage() {
 					background: #ffffff;
 					border-left-color: rgba(0, 0, 0, 0.08);
 					box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+				}
+				/* Keep reused dashboard panel components readable in the wider column */
+				.node-detail-drawer .sidebar-content {
+					padding: 16px 18px 20px;
+				}
+				.node-detail-drawer .sidebar-header {
+					padding: 16px 18px;
+				}
+				.node-detail-drawer .current-crd-banner,
+				.node-detail-drawer .status-box,
+				.node-detail-drawer .record-detail-section {
+					max-width: 100%;
 				}
 
 				.fg-toolbar-minimize-btn,
