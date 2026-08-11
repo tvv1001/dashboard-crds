@@ -381,10 +381,10 @@ function graphOrbitRadiusForHub(opts: { hubIsFirm: boolean; childCount: number; 
 
 	const perRing = Math.max(1, Math.ceil(childCount / ringCount));
 	const fromArc = (perRing * arcPad) / (Math.PI * 2);
-	const base = Math.max(minClear, fromArc, opts.hubIsFirm ? 220 : 280);
+	const base = Math.max(minClear, fromArc, opts.hubIsFirm ? 360 : 440);
 	const ring = Math.max(0, opts.ringIndex ?? 0);
-	const ringStep = Math.max(childSize * 2.4 + 40, 100 + Math.min(80, Math.sqrt(childCount) * 9));
-	return { radius: base + ring * ringStep, ringCount };
+	const ringStep = Math.max(childSize * 3 + 48, 160 + Math.min(100, Math.sqrt(childCount) * 11));
+	return { radius: (base + ring * ringStep) * 5, ringCount };
 }
 
 function entityTypeFromLoadKey(loadKey?: string): GraphEntityType | undefined {
@@ -1685,20 +1685,22 @@ export default function NodeGraphPage() {
 			dense ? 0.0008
 			: mid ? 0.0014
 			: 0.0035;
-		const baseCharge =
+		const baseCharge = (
 			dense ? -2200
 			: mid ? -1750
-			: -1200;
+			: -1200
+		) * 5;
 		const linkStrengthBase =
 			dense ? 0.16
 			: mid ? 0.22
 			: 0.32;
-		const linkDistBase =
+		const linkDistBase = (
 			nCount > 1000 ? 560
 			: nCount > 300 ? 480
 			: nCount > 150 ? 420
 			: nCount > 80 ? 460
-			: 560;
+			: 560
+		) * 5;
 		const collidePad =
 			nCount > 1000 ? 36
 			: nCount > 600 ? 44
@@ -2462,18 +2464,13 @@ export default function NodeGraphPage() {
 												/>
 											</>
 										)}
-										{nodeEntityType === 'firm' ?
-											<polygon
-												className={`graph-node firm${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
-												points={`0,${-radius} ${radius * 0.866},${-radius / 2} ${radius * 0.866},${radius / 2} 0,${radius} ${-radius * 0.866},${radius / 2} ${-radius * 0.866},${-radius / 2}`}
-											/>
-										:	<circle
-												className={`graph-node individual${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
-												cx={0}
-												cy={0}
-												r={radius}
-											/>
-										}
+										{/* Always render circle */}
+										<circle
+											className={`graph-node ${nodeEntityType === 'firm' ? 'firm' : 'individual'}${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
+											cx={0}
+											cy={0}
+											r={radius}
+										/>
 										{isPrimary && !isInactive && roleRows.includes('Investment Adviser') && (
 											<circle
 												className='graph-node-adviser-badge'

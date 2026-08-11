@@ -118,15 +118,17 @@ const INACTIVE_NODE_COLOR_DIM = '#4b5563';
 const INACTIVE_NODE_STROKE = '#9ca3af';
 /** People: sky-blue circles. Firms: /graph MS hex — dark fill + cyan stroke in shader. */
 const INDIVIDUAL_NODE_COLOR = '#0ea5e9';
-const FIRM_NODE_COLOR = '#0f172a';
+const FIRM_NODE_COLOR = '#22d3ee';
 
-function nodeDisplayColor(type: string, inactive?: boolean): string {
+function nodeDisplayColor(type: string, inactive?: boolean, degree?: number): string {
 	if (inactive) return INACTIVE_NODE_COLOR;
-	return type === 'firm' ? FIRM_NODE_COLOR : INDIVIDUAL_NODE_COLOR;
+	if (type === 'firm') return FIRM_NODE_COLOR;
+	if (degree && degree > 20) return '#d97706'; // Orange hubs
+	return INDIVIDUAL_NODE_COLOR;
 }
 
 function nodeRenderType(type: string): 'circle' | 'hexagon' {
-	return type === 'firm' ? 'hexagon' : 'circle';
+	return 'circle';
 }
 
 type LayoutEdge = {
@@ -823,12 +825,13 @@ const STATIC_NODE_SIZE = 46;
 /** Collision / separation radius in graph units — independent of on-screen disk px. */
 const COLLISION_GRAPH_RADIUS = 14;
 
-/** On-screen px: match /graph firm hex + person circles. */
-const FIRM_NODE_SIZE = 33;
-const INDIVIDUAL_NODE_SIZE = 20;
+/** On-screen px: match finra-data-chart-next-02 reference (large hubs, tiny leaves) */
+const FIRM_NODE_SIZE = 14;
+const INDIVIDUAL_NODE_SIZE = 4;
 
 function dynamicNodeSize(degree: number, type: string): number {
-	return type === 'firm' ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
+	// Large if it is a firm or a high-degree individual (hub), otherwise tiny leaf
+	return type === 'firm' || degree > 20 ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
 }
 
 /**
@@ -870,6 +873,8 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	const base = Math.max(minClear, fromArc, hubIsFirm ? 280 : 360);
 	const ring = Math.max(0, opts.ringIndex ?? 0);
 	const ringStep = Math.max(childSize * 3.1 + 56, 130 + Math.min(110, Math.sqrt(childCount) * 12));
+	
+	// Revert to original dense layout from finra-data-chart-next-02
 	return { radius: base + ring * ringStep, ringCount };
 }
 
@@ -990,15 +995,15 @@ function edgeBaseSize(weight?: number, grayDashed = false): number {
 /**
  * Line colors from finra-data-chart-next-02 reference:
  * - current employment (both ends active): blue employed line
- * - previous employment OR either endpoint inactive: full gray dashed (never half-blue)
+ * - previous employment OR either endpoint inactive: full red line
  */
-const CURRENT_EDGE_COLOR = '#1e88ff'; // solid hex — floatColor-safe
-const GRAY_DASHED_EDGE_COLOR = '#879bb7';
+const CURRENT_EDGE_COLOR = '#3b82f6'; // solid hex — floatColor-safe
+const GRAY_DASHED_EDGE_COLOR = '#ef4444'; // Red for previous
 
 function edgeColor(opts: { previous?: boolean; inactiveEndpoint?: boolean; isDimmed?: boolean }): string {
 	const gray = Boolean(opts.previous || opts.inactiveEndpoint);
-	if (gray) return opts.isDimmed ? '#4b5563' : GRAY_DASHED_EDGE_COLOR;
-	return opts.isDimmed ? '#1e3a8a' : CURRENT_EDGE_COLOR;
+	if (gray) return opts.isDimmed ? 'rgba(239, 68, 68, 0.15)' : GRAY_DASHED_EDGE_COLOR;
+	return opts.isDimmed ? 'rgba(59, 130, 246, 0.15)' : CURRENT_EDGE_COLOR;
 }
 
 /** Selected hub spoke — brighter blue (current) / stronger gray (previous). */
@@ -2683,7 +2688,7 @@ export default function GlobalGraphPage() {
 					zoomToSizeRatioFunction: (ratio: number) => ratio,
 					nodeReducer: (_id: string, attrs: Record<string, any>) => ({
 						...attrs,
-						type: attrs.type === 'hexagon' || attrs.nodeType === 'firm' ? 'hexagon' : 'circle',
+						type: 'circle',
 						zIndex: Math.max(2, Number(attrs.zIndex) || 0),
 					}),
 					// Labels use fixed CSS px via drawLabelAbove; keep threshold low so they stay on.
@@ -2761,11 +2766,9 @@ export default function GlobalGraphPage() {
 				// Must keep firm → hexagon mapping here: the post-construct reducer
 				// replaces the constructor one and previously dropped `type: hexagon`.
 				const firmHexNodeReducer = (_id: string, attrs: Record<string, unknown>) => {
-					const nodeType = String(attrs.nodeType || '');
-					const isFirm = nodeType === 'firm' || attrs.type === 'hexagon';
 					return {
 						...attrs,
-						type: isFirm ? 'hexagon' : 'circle',
+						type: 'circle',
 						// Keep every node above every edge in the zIndex-enabled programs.
 						zIndex: Math.max(2, Number(attrs.zIndex) || 0),
 					};

@@ -245,24 +245,18 @@ function regionGroupFor(state?: string, country?: string): string {
 
 function nodeColor(type: string, _degree: number, regionGroup?: string): string {
 	if (type === 'firm') {
-		return REGION_GROUP_COLOR[regionGroup || 'Unknown'] || REGION_GROUP_COLOR.Unknown;
+		return '#22d3ee'; // Cyan for firms
 	}
 	if (type === 'individual') {
-		if (_degree > 40) return '#fde68a';
-		if (_degree > 10) return '#fbbf24';
-		return '#d97706';
+		return '#0ea5e9'; // Blue for individuals
 	}
 	return '#94a3b8';
 }
 
 /** Size from composite weight (firms) or career weight (brokers). */
 function nodeSize(degree: number, type: string, weight?: number): number {
-	const w = weight != null && Number.isFinite(weight) ? weight : degree;
-	// Individuals get a slightly steeper curve so multi-registration careers read larger.
-	const leaf = type === 'firm' ? 3.0 : 3.2;
-	const scale = type === 'firm' ? 0.52 : 0.62;
-	const cap = type === 'firm' ? 21 : 26;
-	return Math.min(cap, leaf + Math.sqrt(Math.max(0, w)) * scale);
+	// Fixed node size to match standard graph
+	return 22;
 }
 
 function rawDataRoots(): string[] {
@@ -1315,7 +1309,8 @@ async function main() {
 	}
 
 	// Mild global expand so Sigma pan/zoom has air (d3 already spreads; keep modest).
-	const BAKE_EXPAND = 1.85;
+	// Increased to 9.25 to match 500% spread requested by user
+	const BAKE_EXPAND = 9.25;
 	{
 		let sx = 0;
 		let sy = 0;
