@@ -4,9 +4,37 @@ import { useRouter } from 'next/router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type Graph from 'graphology';
 import type Sigma from 'sigma';
+import { forceSimulation, forceLink, forceManyBody, forceCollide, forceX, forceY } from 'd3-force';
 import { useSharedGraphState } from '../../src/hooks/useSharedGraphState';
+import { useLocalNameSearch } from '../../src/hooks/useLocalNameSearch';
 import { PanelHeader } from '../../src/components/panel/PanelHeader';
 import { StatusBox, type SelectionLogEntry } from '../../src/components/panel/StatusBox';
+import { extractNamesFromPayload, getContentBlock, resolveEntityDisplayName } from '../../src/lib/extractNames';
+import { toProperCaseName } from '../../src/lib/format';
+import { parseCrdKey } from '../../src/lib/parseKey';
+import type { LocalNameSearchResult } from '../../src/types';
+
+function toArray(value: unknown): any[] {
+	return Array.isArray(value) ? value : [];
+}
+
+/** Same unwrap as /graph so StatusBox/PanelHeader receive identical payload shapes. */
+function readSnapshotPayload(detailJson: string | null) {
+	if (!detailJson) return null;
+	try {
+		const parsed = JSON.parse(detailJson);
+		if (parsed && typeof parsed === 'object' && typeof (parsed as Record<string, unknown>).rawPayload === 'string') {
+			try {
+				return JSON.parse((parsed as Record<string, unknown>).rawPayload as string);
+			} catch {
+				return parsed;
+			}
+		}
+		return parsed;
+	} catch {
+		return null;
+	}
+}
 
 function pickSecNumberFromDetailJson(detailJson: string | null | undefined): string | null {
 	if (!detailJson) return null;
@@ -69,7 +97,24 @@ type LayoutNode = {
 	brokerCount?: number;
 	firmLinkCount?: number;
 	weight?: number;
+	/** True when FINRA/SEC show inactive/terminated (still expandable). */
+	inactive?: boolean;
 };
+
+const INACTIVE_NODE_COLOR = '#64748b';
+const INACTIVE_NODE_COLOR_DIM = '#475569';
+/** People: sky-blue circles. Firms: bright cyan vector hexagons. */
+const INDIVIDUAL_NODE_COLOR = '#0ea5e9';
+const FIRM_NODE_COLOR = '#22d3ee';
+
+function nodeDisplayColor(type: string, inactive?: boolean): string {
+	if (inactive) return INACTIVE_NODE_COLOR;
+	return type === 'firm' ? FIRM_NODE_COLOR : INDIVIDUAL_NODE_COLOR;
+}
+
+function nodeRenderType(type: string): 'circle' | 'hexagon' {
+	return type === 'firm' ? 'hexagon' : 'circle';
+}
 
 type LayoutEdge = {
 	id: string;
@@ -77,7 +122,66 @@ type LayoutEdge = {
 	target: string;
 	type: string;
 	weight: number;
+	/** false = previous/former employment (from expand); undefined = unknown/catalog. */
+	isCurrent?: boolean;
 };
+
+/** True when an edge index row is known previous/former. */
+function layoutEdgeIsPrevious(e: Pick<LayoutEdge, 'type' | 'isCurrent'>): boolean {
+	if (e.isCurrent === false) return true;
+	if (e.isCurrent === true) return false;
+	return /previous|former|prior/i.test(String(e.type || ''));
+}
+
+/** Normalize expand/catalog link into a layout edge (current vs previous). */
+function makeEmploymentEdge(source: string, target: string, relRaw: string, isCurrentRaw: unknown, weight = 1): LayoutEdge {
+	const rel = String(relRaw || 'employment');
+	const isCurrent = isCurrentRaw !== false && isCurrentRaw !== 0 && isCurrentRaw !== 'false' && !/previous|former|prior/i.test(rel);
+	const type =
+		isCurrent ?
+			rel.includes('previous') ?
+				'employment'
+			:	rel || 'employment'
+		: /previous|former|prior/i.test(rel) ? rel
+		: `previous_${rel || 'employment'}`;
+	return {
+		id: `${source}:${target}:${type}`,
+		source,
+		target,
+		type,
+		weight: Number(weight) || 1,
+		isCurrent,
+	};
+}
+
+/** Insert/upgrade a spoke in edgesByNode (previous wins over unknown/current catalog stubs). */
+function upsertIndexedEdge(map: Map<string, LayoutEdge[]>, edge: LayoutEdge) {
+	const samePair = (x: LayoutEdge) => (x.source === edge.source && x.target === edge.target) || (x.source === edge.target && x.target === edge.source);
+
+	for (const end of [edge.source, edge.target]) {
+		const list = map.get(end) || [];
+		const idx = list.findIndex(samePair);
+		if (idx < 0) {
+			list.push(edge);
+			map.set(end, list);
+			continue;
+		}
+		const existing = list[idx];
+		const nextPrev = layoutEdgeIsPrevious(edge);
+		const curPrev = layoutEdgeIsPrevious(existing);
+		// Prefer explicit previous; otherwise keep richer type / higher weight.
+		if (nextPrev && !curPrev) {
+			list[idx] = { ...existing, ...edge, isCurrent: false, type: edge.type };
+		} else if (!nextPrev && curPrev) {
+			// keep previous
+		} else if (edge.isCurrent !== undefined && existing.isCurrent === undefined) {
+			list[idx] = { ...existing, ...edge };
+		} else if ((edge.weight || 0) > (existing.weight || 0)) {
+			list[idx] = { ...existing, weight: edge.weight };
+		}
+		map.set(end, list);
+	}
+}
 
 type LayoutPayload = {
 	version?: number;
@@ -114,16 +218,21 @@ type FocusInfo = HoverInfo & { neighborCount: number };
 type EdgeTypeKey = 'employment' | 'firm_link' | 'ownership' | 'location' | 'succession' | 'other';
 
 const EDGE_TYPE_META: { key: EdgeTypeKey; label: string; match: (t: string) => boolean }[] = [
-	{ key: 'employment', label: 'Employment', match: (t) => t === 'employment' || !t },
+	// Include previous/former employment under the Employment filter (left /graph parity).
+	{
+		key: 'employment',
+		label: 'Employment',
+		match: (t) => !t || t === 'employment' || /previous|former|prior/.test(t) || t.includes('employ'),
+	},
 	{ key: 'firm_link', label: 'Firm links', match: (t) => t === 'firm_link' },
-	{ key: 'ownership', label: 'Ownership', match: (t) => t === 'ownership' },
+	{ key: 'ownership', label: 'Ownership', match: (t) => t === 'ownership' || t.includes('owner') || t.includes('control') },
 	{ key: 'location', label: 'Location', match: (t) => t === 'location' },
 	{ key: 'succession', label: 'Succession', match: (t) => t === 'succession' },
 	{ key: 'other', label: 'Other', match: (t) => !['employment', 'firm_link', 'ownership', 'location', 'succession', ''].includes(t) },
 ];
 
 function normalizeEdgeType(raw: string | undefined): EdgeTypeKey {
-	const t = String(raw || 'employment');
+	const t = String(raw || 'employment').toLowerCase();
 	for (const meta of EDGE_TYPE_META) {
 		if (meta.key === 'other') continue;
 		if (meta.match(t)) return meta.key;
@@ -132,7 +241,16 @@ function normalizeEdgeType(raw: string | undefined): EdgeTypeKey {
 }
 
 /** d3-force bake is already wide; client scale opens dense firm clusters more. */
-const LAYOUT_SPREAD = 1.7;
+const LAYOUT_SPREAD = 2.6;
+
+function hashString(input: string): number {
+	let h = 2166136261;
+	for (let i = 0; i < input.length; i++) {
+		h ^= input.charCodeAt(i);
+		h = Math.imul(h, 16777619);
+	}
+	return h >>> 0;
+}
 
 type LabelHitBox = { nodeId: string; x: number; y: number; w: number; h: number };
 
@@ -220,215 +338,373 @@ function hitTestLabel(clientX: number, clientY: number, container: HTMLElement |
 	return null;
 }
 
+let globalLayoutAnimId: any = null;
+
 /**
- * Extra open-up for dense on-canvas neighborhoods (e.g. firm-link clumps).
- * Expands each node away from the centroid of its on-canvas neighbors.
+ * Animated force-directed layout that smoothly settles expanded nodes in WebGL.
+ * Default: ego `/graph`-style spread (flat, multi-ring).
+ * Person→firms focus (ref: finra-data-chart-next-02 /individual/…): single circular
+ * star — hub center, firm leaves on one long ring, bright radial spokes.
  */
-function loosenDenseClusters(graph: Graph, opts?: { iterations?: number; strength?: number; minDegree?: number }) {
-	const iterations = opts?.iterations ?? 10;
-	const strength = opts?.strength ?? 0.22;
-	const minDegree = opts?.minDegree ?? 3;
-	if (graph.order < 4) return;
-
-	for (let iter = 0; iter < iterations; iter++) {
-		const deltas = new Map<string, { dx: number; dy: number }>();
-		graph.forEachNode((id) => {
-			const deg = graph.degree(id);
-			if (deg < minDegree) return;
-			let cx = 0;
-			let cy = 0;
-			let n = 0;
-			graph.forEachNeighbor(id, (nb) => {
-				cx += Number(graph.getNodeAttribute(nb, 'x')) || 0;
-				cy += Number(graph.getNodeAttribute(nb, 'y')) || 0;
-				n++;
-			});
-			if (n < minDegree) return;
-			cx /= n;
-			cy /= n;
-			const x = Number(graph.getNodeAttribute(id, 'x')) || 0;
-			const y = Number(graph.getNodeAttribute(id, 'y')) || 0;
-			let dx = x - cx;
-			let dy = y - cy;
-			let dist = Math.hypot(dx, dy);
-			if (dist < 1e-6) {
-				const ang = (Number(id.replace(/\D/g, '').slice(-4) || '1') % 360) * (Math.PI / 180);
-				dx = Math.cos(ang);
-				dy = Math.sin(ang);
-				dist = 1;
-			}
-			// Push outward from local neighborhood centroid; denser hubs get more air.
-			const boost = strength * (0.65 + Math.min(1.8, Math.sqrt(deg) * 0.18));
-			const scale = boost * (8 + Math.min(40, 120 / Math.max(dist, 1)));
-			const prev = deltas.get(id) || { dx: 0, dy: 0 };
-			prev.dx += (dx / dist) * scale;
-			prev.dy += (dy / dist) * scale;
-			deltas.set(id, prev);
-		});
-
-		// Also gently separate high-degree pairs that sit too close.
-		const hubs: string[] = [];
-		graph.forEachNode((id) => {
-			if (graph.degree(id) >= minDegree) hubs.push(id);
-		});
-		for (let i = 0; i < hubs.length; i++) {
-			const a = hubs[i];
-			const ax = Number(graph.getNodeAttribute(a, 'x')) || 0;
-			const ay = Number(graph.getNodeAttribute(a, 'y')) || 0;
-			const ar = (Number(graph.getNodeAttribute(a, 'size')) || 4) * LAYOUT_SPREAD * 0.9;
-			for (let j = i + 1; j < hubs.length; j++) {
-				const b = hubs[j];
-				const bx = Number(graph.getNodeAttribute(b, 'x')) || 0;
-				const by = Number(graph.getNodeAttribute(b, 'y')) || 0;
-				const br = (Number(graph.getNodeAttribute(b, 'size')) || 4) * LAYOUT_SPREAD * 0.9;
-				let dx = bx - ax;
-				let dy = by - ay;
-				let dist = Math.hypot(dx, dy);
-				const minD = ar + br + 18;
-				if (dist >= minD) continue;
-				if (dist < 1e-6) {
-					dx = 1;
-					dy = 0;
-					dist = 1;
-				}
-				const push = ((minD - dist) * 0.35) / dist;
-				const da = deltas.get(a) || { dx: 0, dy: 0 };
-				const db = deltas.get(b) || { dx: 0, dy: 0 };
-				da.dx -= dx * push;
-				da.dy -= dy * push;
-				db.dx += dx * push;
-				db.dy += dy * push;
-				deltas.set(a, da);
-				deltas.set(b, db);
-			}
-		}
-
-		if (!deltas.size) break;
-		for (const [id, d] of deltas) {
-			graph.setNodeAttribute(id, 'x', (Number(graph.getNodeAttribute(id, 'x')) || 0) + d.dx);
-			graph.setNodeAttribute(id, 'y', (Number(graph.getNodeAttribute(id, 'y')) || 0) + d.dy);
-		}
+function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string | null }) {
+	if (globalLayoutAnimId !== null) {
+		globalLayoutAnimId.stop();
+		globalLayoutAnimId = null;
 	}
-}
+	if (graph.order < 2) return;
 
-/**
- * Hard non-overlap: treat each node as a disk of radius ~display size in graph units
- * and fully separate every colliding pair until none remain (or max rounds).
- * Must run after final sizes are set and coordinates are spread — before Sigma mounts.
- */
-function resolveNodeOverlaps(graph: Graph, opts?: { maxIterations?: number; padding?: number; sizeToGraph?: number }): { iterations: number; remaining: number } {
-	const maxIterations = opts?.maxIterations ?? 400;
-	const padding = opts?.padding ?? 4;
-	// Map Sigma-ish display size into current graph coordinates (already × LAYOUT_SPREAD).
-	const sizeToGraph = opts?.sizeToGraph ?? LAYOUT_SPREAD * 0.55;
+	const nCount = graph.order;
+	const dense = nCount > 300;
+	const mid = nCount > 120 && !dense;
 
-	const pts: { id: string; x: number; y: number; r: number; mass: number }[] = [];
+	const pts: any[] = [];
+	const nodeById = new Map<string, any>();
+
 	graph.forEachNode((id, attrs) => {
-		const size = Number(attrs.size) || 2;
-		const deg = Number(attrs.degree) || 0;
-		pts.push({
+		const degree = Number(attrs.degree) || graph.degree(id) || 1;
+		const nodeType = String(attrs.nodeType || attrs.type || 'unknown');
+		const firm = nodeType === 'firm';
+		const p = {
 			id,
 			x: Number(attrs.x) || 0,
 			y: Number(attrs.y) || 0,
-			// Disk radius in graph units + small air gap so edges don't kiss.
-			r: size * sizeToGraph + padding,
-			mass: 1 + Math.sqrt(Math.max(0, deg)) * 0.4,
-		});
+			degree,
+			nodeType,
+			firm,
+			pinned: Boolean(attrs.pinned),
+		};
+		pts.push(p);
+		nodeById.set(id, p);
 	});
-	const n = pts.length;
-	if (n < 2) return { iterations: 0, remaining: 0 };
 
-	const sortedR = [...pts.map((p) => p.r)].sort((a, b) => a - b);
-	let cell = Math.max(8, sortedR[Math.floor(sortedR.length * 0.5)] * 2.1);
-	const key = (ix: number, iy: number) => `${ix},${iy}`;
-
-	let iter = 0;
-	let remaining = 0;
-	for (; iter < maxIterations; iter++) {
-		// Rebuild cell if radii are stable (they are) — still refresh grid each pass.
-		if (iter % 40 === 0 && iter > 0) {
-			const med = sortedR[Math.floor(sortedR.length * 0.5)];
-			cell = Math.max(8, med * 2.1);
+	const edges: any[] = [];
+	graph.forEachEdge((_e, _attrs, source, target) => {
+		if (nodeById.has(source) && nodeById.has(target)) {
+			edges.push({ source, target });
 		}
-		const grid = new Map<string, number[]>();
-		for (let i = 0; i < n; i++) {
-			const p = pts[i];
-			const k = key(Math.floor(p.x / cell), Math.floor(p.y / cell));
-			const bucket = grid.get(k);
-			if (bucket) bucket.push(i);
-			else grid.set(k, [i]);
+	});
+
+	// Ego star (left /graph parity): focused person→firms or firm→direct neighbors.
+	// Auto-detect only for individual hubs with many firm leaves so progressive
+	// multi-hub maps (thousands of nodes) stay wide/flat instead of collapsing.
+	let egoHubId = opts?.egoHubId || null;
+	if (!egoHubId) {
+		let best: { id: string; deg: number } | null = null;
+		for (const p of pts) {
+			if (p.nodeType !== 'individual' && p.nodeType !== 'person') continue;
+			const deg = graph.degree(p.id);
+			if (!best || deg > best.deg) best = { id: p.id, deg };
 		}
+		if (best && best.deg >= 4) {
+			const spokeCount = edges.filter((e) => e.source === best!.id || e.target === best!.id).length;
+			// Only auto-star when the canvas is mostly this ego (not a full map dump).
+			if (spokeCount >= 4 && nCount <= Math.max(40, spokeCount + 12)) egoHubId = best.id;
+		}
+	}
+	const starEgo = Boolean(egoHubId && nodeById.has(egoHubId));
+	const egoHubNode = egoHubId ? nodeById.get(egoHubId) : null;
+	const egoIsPerson = Boolean(egoHubNode && !egoHubNode.firm);
 
-		remaining = 0;
-		// Full correction (1.0): move pairs completely out of overlap each hit.
-		// Slight overshoot early helps break jams; settle later.
-		const overshoot =
-			iter < 20 ? 1.08
-			: iter < 80 ? 1.02
-			: 1.0;
+	// Prefer high-degree endpoint as hub for ring assignment (same as /graph).
+	// Star ego: force the focused person as sole hub for all their firm spokes.
+	const childrenByHub = new Map<string, string[]>();
+	for (const l of edges) {
+		const s = nodeById.get(l.source);
+		const t = nodeById.get(l.target);
+		if (!s || !t) continue;
+		let hubId: string;
+		let childId: string;
+		if (starEgo && (s.id === egoHubId || t.id === egoHubId)) {
+			hubId = egoHubId!;
+			childId = s.id === egoHubId ? t.id : s.id;
+		} else {
+			hubId = s.degree >= t.degree ? s.id : t.id;
+			childId = s.degree >= t.degree ? t.id : s.id;
+		}
+		const list = childrenByHub.get(hubId) || [];
+		list.push(childId);
+		childrenByHub.set(hubId, list);
+	}
+	const childRingIndex = new Map<string, number>();
+	const childSlotIndex = new Map<string, number>();
+	for (const [hub, kids] of childrenByHub) {
+		const unique = Array.from(new Set(kids)).sort((a, b) => a.localeCompare(b));
+		// Star ego: one ring (screenshot). Multi-hub maps keep staggered rings.
+		const ringCount =
+			// Person ego: single ring. Firm ego with many leaves: a few rings for readability.
+			starEgo && hub === egoHubId ?
+				egoIsPerson || unique.length <= 24 ? 1
+				: unique.length > 120 ? 5
+				: 3
+			: unique.length > 400 ? 8
+			: unique.length > 200 ? 7
+			: unique.length > 80 ? 6
+			: unique.length > 30 ? 5
+			: 4;
+		unique.forEach((child, i) => {
+			childRingIndex.set(`${hub}|${child}`, i % ringCount);
+			childSlotIndex.set(`${hub}|${child}`, i);
+		});
+	}
 
-		for (let i = 0; i < n; i++) {
-			const a = pts[i];
-			const ax = Math.floor(a.x / cell);
-			const ay = Math.floor(a.y / cell);
-			for (let ox = -1; ox <= 1; ox++) {
-				for (let oy = -1; oy <= 1; oy++) {
-					const bucket = grid.get(key(ax + ox, ay + oy));
-					if (!bucket) continue;
-					for (const j of bucket) {
-						if (j <= i) continue;
-						const b = pts[j];
-						let dx = b.x - a.x;
-						let dy = b.y - a.y;
-						let dist = Math.hypot(dx, dy);
-						const minD = a.r + b.r;
-						if (dist >= minD - 1e-9) continue;
-						remaining++;
-						if (dist < 1e-9) {
-							const ang = ((i + 1) * 12.9898 + (j + 1) * 78.233) % (Math.PI * 2);
-							dx = Math.cos(ang);
-							dy = Math.sin(ang);
-							dist = 1e-9;
-						}
-						// Separate along the line between centers by the full shortfall.
-						const push = ((minD - dist) * overshoot) / dist;
-						const inv = 1 / (a.mass + b.mass);
-						const mx = dx * push;
-						const my = dy * push;
-						a.x -= mx * b.mass * inv;
-						a.y -= my * b.mass * inv;
-						b.x += mx * a.mass * inv;
-						b.y += my * a.mass * inv;
+	const staggeredChildDistance = (hubId: string, childId: string, hubDeg: number) => {
+		const ring = childRingIndex.get(`${hubId}|${childId}`) ?? hashString(childId) % 6;
+		if (starEgo && hubId === egoHubId) {
+			// Person ego: long even ring (left /graph). Firm ego: slightly tighter + multi-ring ok.
+			const orbitBase = egoIsPerson ? 320 + Math.min(480, Math.sqrt(Math.max(hubDeg, 1)) * 56) : 240 + Math.min(400, Math.sqrt(Math.max(hubDeg, 1)) * 44);
+			const jitter = ((hashString(`${hubId}:${childId}`) % 1000) / 999 - 0.5) * (egoIsPerson ? 18 : 32);
+			if (egoIsPerson) return orbitBase + jitter;
+			const ringStep = 70 + Math.min(60, hubDeg * 0.35);
+			return orbitBase + ring * ringStep + jitter;
+		}
+		const orbitBase = 180 + Math.min(360, Math.sqrt(Math.max(hubDeg, 1)) * 42);
+		const ringStep = 78 + Math.min(72, hubDeg * 0.45);
+		const jitter = ((hashString(`${hubId}:${childId}`) % 1000) / 999 - 0.5) * 44;
+		return orbitBase + ring * ringStep + jitter;
+	};
+
+	const baseCharge =
+		starEgo ?
+			egoIsPerson ? -720
+			:	-980
+		: dense ? -1800
+		: mid ? -1400
+		: -1100;
+	const linkStrengthBase =
+		starEgo ?
+			egoIsPerson ? 0.55
+			:	0.38
+		: dense ? 0.14
+		: mid ? 0.2
+		: 0.28;
+	const linkDistBase =
+		starEgo ?
+			egoIsPerson ? 380
+			:	320
+		: nCount > 300 ? 420
+		: nCount > 150 ? 380
+		: nCount > 80 ? 400
+		: 460;
+	const collidePad =
+		starEgo ?
+			egoIsPerson ? 28
+			:	20
+		: nCount > 300 ? 28
+		: nCount > 120 ? 36
+		: nCount > 60 ? 44
+		: 52;
+	const centerStrength =
+		starEgo ? 0.02
+		: dense ? 0.0006
+		: mid ? 0.001
+		: 0.0022;
+	// Star ego stays circular (left /graph). Progressive multi-hub maps flatten Y.
+	const yFlatten = starEgo ? 1 : 0.55;
+
+	let cx = 0;
+	let cy = 0;
+	pts.forEach((p) => {
+		cx += p.x;
+		cy += p.y;
+	});
+	cx /= pts.length;
+	cy /= pts.length;
+
+	const firmHubIds = pts.filter((p) => p.firm && p.degree >= 4).map((p) => p.id);
+	const firmHubSeparation = (alpha: number) => {
+		if (firmHubIds.length < 2) return;
+		const minDistBase =
+			dense ? 620
+			: mid ? 540
+			: 480;
+		for (let i = 0; i < firmHubIds.length; i++) {
+			const a = nodeById.get(firmHubIds[i]);
+			if (!a) continue;
+			for (let j = i + 1; j < firmHubIds.length; j++) {
+				const b = nodeById.get(firmHubIds[j]);
+				if (!b) continue;
+				let dx = (b.x ?? 0) - (a.x ?? 0);
+				let dy = (b.y ?? 0) - (a.y ?? 0);
+				let dist = Math.hypot(dx, dy);
+				const need = minDistBase + Math.sqrt(Math.max(a.degree, 1)) * 24 + Math.sqrt(Math.max(b.degree, 1)) * 24;
+				if (dist >= need) continue;
+				if (dist < 1e-6) {
+					const ang = ((hashString(`${a.id}|${b.id}`) % 1000) / 999) * Math.PI * 2;
+					dx = Math.cos(ang);
+					dy = Math.sin(ang);
+					dist = 1;
+				}
+				const push = ((need - dist) / need) * alpha * 0.85;
+				const ux = (dx / dist) * push;
+				const uy = (dy / dist) * push;
+				a.vx = (a.vx ?? 0) - ux;
+				a.vy = (a.vy ?? 0) - uy;
+				b.vx = (b.vx ?? 0) + ux;
+				b.vy = (b.vy ?? 0) + uy;
+			}
+		}
+	};
+
+	const ringOrbitForce = (alpha: number) => {
+		for (const [key, ring] of childRingIndex) {
+			const sep = key.indexOf('|');
+			if (sep < 0) continue;
+			const hubId = key.slice(0, sep);
+			const childId = key.slice(sep + 1);
+			const hub = nodeById.get(hubId);
+			const child = nodeById.get(childId);
+			if (!hub || !child) continue;
+			// Star ego: pin every spoke leaf to the circle even if degree is high.
+			if (!starEgo && (hub.degree < 4 || child.degree > 4)) continue;
+			if (starEgo && hubId !== egoHubId) continue;
+			const targetDist = staggeredChildDistance(hubId, childId, Math.max(hub.degree, childrenByHub.get(hubId)?.length || 1));
+			const slot = childSlotIndex.get(key) ?? 0;
+			const kids = childrenByHub.get(hubId)?.length || 1;
+			const angle = (slot / Math.max(kids, 1)) * Math.PI * 2 + (starEgo ? 0 : ring * 0.17);
+			const tx = (hub.x ?? 0) + Math.cos(angle) * targetDist;
+			const ty = (hub.y ?? 0) + Math.sin(angle) * targetDist * yFlatten;
+			const strength =
+				(starEgo ?
+					egoIsPerson ? 0.72
+					:	0.48
+				: dense ? 0.1
+				: mid ? 0.14
+				: 0.18) * alpha;
+			child.vx = (child.vx ?? 0) + (tx - (child.x ?? 0)) * strength;
+			child.vy = (child.vy ?? 0) + (ty - (child.y ?? 0)) * strength;
+		}
+	};
+
+	// Keep the ego person fixed at the star center (reference screenshot).
+	const pinEgoHub = () => {
+		if (!starEgo || !egoHubId) return;
+		const hub = nodeById.get(egoHubId);
+		if (!hub) return;
+		hub.fx = hub.x;
+		hub.fy = hub.y;
+		hub.vx = 0;
+		hub.vy = 0;
+	};
+	pinEgoHub();
+
+	let tickCount = 0;
+	const sim = forceSimulation(pts)
+		.alpha(dense ? 0.22 : 0.28)
+		.alphaMin(0.001)
+		.alphaDecay(
+			dense ? 0.022
+			: mid ? 0.016
+			: 0.012,
+		)
+		.velocityDecay(dense || mid ? 0.52 : 0.48)
+		.force(
+			'charge',
+			forceManyBody()
+				.strength((d: any) => {
+					const deg = d.degree || 1;
+					if (d.firm) {
+						const hubMul =
+							deg > 80 ? 3.2
+							: deg > 20 ? 2.5
+							: 2.0;
+						return baseCharge * hubMul;
 					}
+					const leaf =
+						deg <= 2 ? 1.4
+						: deg <= 4 ? 1.15
+						: 1;
+					return (deg > 20 ? 1.8 * baseCharge : baseCharge) * leaf;
+				})
+				.distanceMax(
+					dense ? 1400
+					: mid ? 1200
+					: 1000,
+				)
+				.theta(dense || mid ? 0.86 : 0.78),
+		)
+		.force(
+			'link',
+			forceLink(edges)
+				.id((d: any) => d.id)
+				.distance((d: any) => {
+					const s = typeof d.source === 'object' ? d.source : nodeById.get(d.source);
+					const t = typeof d.target === 'object' ? d.target : nodeById.get(d.target);
+					if (!s || !t) return linkDistBase;
+					const sDeg = s.degree || 1;
+					const tDeg = t.degree || 1;
+					const hubDeg = Math.max(sDeg, tDeg);
+					const hubId = sDeg >= tDeg ? s.id : t.id;
+					const childId = sDeg >= tDeg ? t.id : s.id;
+
+					if (s.firm && t.firm) {
+						return linkDistBase * 2.4 + Math.sqrt(sDeg) * 32 + Math.sqrt(tDeg) * 32;
+					}
+
+					const childIsLeaf = Math.min(sDeg, tDeg) <= 3;
+					const stagger = childIsLeaf && hubDeg >= 4 ? staggeredChildDistance(hubId, childId, hubDeg) : 0;
+					const degScale =
+						hubDeg > 100 ? 1.7
+						: hubDeg > 50 ? 1.45
+						: hubDeg > 20 ? 1.25
+						: 1.1;
+					return stagger > 0 ? stagger : linkDistBase * degScale;
+				})
+				.strength((d: any) => {
+					const s = typeof d.source === 'object' ? d.source : nodeById.get(d.source);
+					const t = typeof d.target === 'object' ? d.target : nodeById.get(d.target);
+					if (s?.firm && t?.firm) return linkStrengthBase * 0.32;
+					const deg = Math.max(s?.degree || 1, t?.degree || 1);
+					if (deg > 80) return linkStrengthBase * 0.4;
+					if (deg > 20) return linkStrengthBase * 0.6;
+					return linkStrengthBase;
+				}),
+		)
+		.force(
+			'collide',
+			forceCollide()
+				.radius((d: any) => {
+					const deg = d.degree || 1;
+					const hubHalo = d.firm ? Math.min(180, 48 + Math.sqrt(deg) * 12) : 0;
+					const leafBoost =
+						deg <= 2 ? 18
+						: deg <= 4 ? 10
+						: 0;
+					return collidePad + leafBoost + hubHalo + Math.min(28, Math.sqrt(deg) * 3);
+				})
+				.strength(1)
+				.iterations(dense || mid ? 3 : 2),
+		)
+		.force('x', forceX(starEgo && egoHubId ? (nodeById.get(egoHubId)?.x ?? cx) : cx).strength(centerStrength))
+		// Stronger Y pull + weaker Y motion keeps multi-hub maps flatter; star stays circular.
+		.force('y', forceY(starEgo && egoHubId ? (nodeById.get(egoHubId)?.y ?? cy) : cy).strength(starEgo ? centerStrength : centerStrength * 2.4))
+		.force('firm-separate', (starEgo ? () => undefined : firmHubSeparation) as any)
+		.force('ring-orbit', ringOrbitForce as any)
+		.on('tick', () => {
+			tickCount += 1;
+			pinEgoHub();
+			// Flatten residual vertical motion so multi-hub layouts settle wide.
+			if (!starEgo) {
+				for (const p of pts) {
+					if (typeof p.vy === 'number') p.vy *= yFlatten;
 				}
 			}
-		}
-
-		if (remaining === 0) break;
-
-		// If still jammed after many passes, uniform expand about centroid then continue.
-		if (remaining > 0 && iter > 0 && iter % 60 === 0) {
-			let cx = 0;
-			let cy = 0;
+			// While hot, skip every other paint (same cadence as /graph).
+			if (sim.alpha() > 0.15 && tickCount % 2 !== 0) return;
 			for (const p of pts) {
-				cx += p.x;
-				cy += p.y;
+				graph.setNodeAttribute(p.id, 'x', p.x);
+				graph.setNodeAttribute(p.id, 'y', p.y);
 			}
-			cx /= n;
-			cy /= n;
-			const factor = 1.12;
-			for (const p of pts) {
-				p.x = cx + (p.x - cx) * factor;
-				p.y = cy + (p.y - cy) * factor;
+			try {
+				sigma.refresh();
+			} catch {
+				sim.stop(); // Canvas unmounted
 			}
-		}
-	}
+		})
+		.on('end', () => {
+			globalLayoutAnimId = null;
+		});
 
-	for (const p of pts) {
-		graph.setNodeAttribute(p.id, 'x', p.x);
-		graph.setNodeAttribute(p.id, 'y', p.y);
-	}
-	return { iterations: iter + (remaining === 0 ? 0 : 0), remaining };
+	globalLayoutAnimId = sim;
 }
 
 /**
@@ -442,58 +718,57 @@ function resolveNodeOverlaps(graph: Graph, opts?: { maxIterations?: number; padd
  * size equals the attribute. We still force the attribute every indexation via
  * nodeReducer so weight/degree/layout size can never leak into the WebGL buffer.
  */
-const STATIC_NODE_SIZE = 22;
+const STATIC_NODE_SIZE = 46;
 
 /** Collision / separation radius in graph units — independent of on-screen disk px. */
 const COLLISION_GRAPH_RADIUS = 14;
 
-function staticNodeSize(): number {
-	return STATIC_NODE_SIZE;
+function dynamicNodeSize(degree: number, type: string): number {
+	return 22;
 }
 
-/** Stamp fixed sizes onto layout nodes once (display only; collision uses COLLISION_GRAPH_RADIUS). */
+/** Stamp display sizes onto layout nodes once (collision uses node size). */
 function bakeDisplaySizes(payload: LayoutPayload): LayoutPayload {
-	const size = staticNodeSize();
 	for (const n of payload.nodes) {
-		n.size = size;
+		n.size = dynamicNodeSize(Number(n.degree) || 1, String(n.type || 'unknown'));
 	}
 	return payload;
 }
 
-/** Thin progressive-map edges — always drawn; alpha stays low so stacks stay readable. */
-function edgeBaseSize(weight?: number): number {
-	// ~half of prior stroke so lines stay hairline even when many stack.
-	return Math.min(0.055, 0.012 + (Number(weight) || 1) * 0.0025);
+/** Base edge thickness in screen px (itemSizesReference: screen) — matches /graph hairlines. */
+function edgeBaseSize(weight?: number, previous = false): number {
+	const w = Number(weight) || 1;
+	if (previous) return Math.min(1.35, 1.05 + w * 0.02);
+	return Math.min(1.9, 1.45 + w * 0.03);
 }
 
-function edgeColor(type: string, dimmed: boolean): string {
-	const base =
-		type === 'firm_link' || type === 'ownership' ? '167,139,250'
-		: type === 'location' ? '52,211,153'
-		: type === 'succession' ? '251,146,60'
-		: '148,163,184';
-	// Slightly clearer than before so thin lines remain visible; dimmed stays ghosted.
-	const a =
-		type === 'firm_link' ? 0.22
-		: type === 'ownership' ? 0.26
-		: type === 'location' ? 0.18
-		: type === 'succession' ? 0.2
-		: 0.14;
-	return dimmed ? `rgba(${base},0.05)` : `rgba(${base},${a})`;
+/** /graph link colors: current blue, previous red, other slate. */
+function edgeColor(edgeType: string, isDimmed: boolean) {
+	const previous = /previous|former|prior/i.test(String(edgeType || ''));
+	if (previous) {
+		return isDimmed ? 'rgba(239, 68, 68, 0.18)' : 'rgba(239, 68, 68, 0.85)'; // #ef4444
+	}
+	if (edgeType === 'employment' || edgeType === 'firm_link' || !edgeType) {
+		return isDimmed ? 'rgba(59, 130, 246, 0.2)' : 'rgba(59, 130, 246, 0.75)'; // #3b82f6
+	}
+	return isDimmed ? 'rgba(100, 116, 139, 0.12)' : 'rgba(100, 116, 139, 0.4)';
 }
 
-/** Solid blue stroke for edges incident to the current selection (no dashes). */
-const SELECTED_EDGE_COLOR = 'rgba(56,189,248,1)';
-/** Screen-pixel thickness for selected hub→child spokes (itemSizesReference: screen). */
-const SELECTED_EDGE_SIZE = 2.8;
-const SELECTED_EDGE_SIZE_MAX = 4.2;
+/** Selected current spoke — /graph `.graph-link-glow.current.selected` (#60a5fa). */
+const SELECTED_EDGE_COLOR = '#60a5fa';
+/** Previous spokes when selected: gray dashed (not selection-blue), /graph selection-muted. */
+const SELECTED_PREVIOUS_EDGE_COLOR = 'rgba(148,163,184,0.72)';
+/** Screen-pixel thickness for selected hub→child spokes. */
+const SELECTED_EDGE_SIZE = 2.6;
+const SELECTED_EDGE_SIZE_MAX = 3.4;
+const SELECTED_PREVIOUS_EDGE_SIZE = 1.15;
 
 /**
  * Global network map: WebGL via Sigma + graphology, positions precomputed offline.
  * Routes mirror ego graph / dashboard:
- *   /global-graph
- *   /global-graph/individual/<crd>
- *   /global-graph/firm/<crd>
+ *   /chart
+ *   /chart/individual/<crd>
+ *   /chart/firm/<crd>
  */
 export default function GlobalGraphPage() {
 	const router = useRouter();
@@ -504,6 +779,8 @@ export default function GlobalGraphPage() {
 	const pinnedIdRef = useRef<string | null>(null);
 	/** Multi-select set — previous selections stay until Clear Highlight. */
 	const selectedIdsRef = useRef<Set<string>>(new Set());
+	/** Visited/Revealed set — persists until the session is fully reset. */
+	const visitedIdsRef = useRef<Set<string>>(new Set());
 	const hoverIdRef = useRef<string | null>(null);
 	const cameraPinUnlockRef = useRef<(() => void) | null>(null);
 	/** Last URL entity we applied or wrote — avoids replace loops. */
@@ -512,7 +789,7 @@ export default function GlobalGraphPage() {
 	const appliedRouteKeyRef = useRef<string | null>(null);
 	const routeBootstrapDoneRef = useRef(false);
 
-	// /global-graph/individual/5567605  (same shape as /graph/... and /individual/...)
+	// /chart/individual/5567605  (same shape as /graph/... and /individual/...)
 	// Prefer query.params; fall back to asPath so hard-refresh deep links work before
 	// Next finishes hydrating dynamic route segments.
 	const routeParams = useMemo(() => {
@@ -534,7 +811,7 @@ export default function GlobalGraphPage() {
 		const path = String(router.asPath || '')
 			.split('?')[0]
 			.split('#')[0];
-		const m = path.match(/^\/global-graph\/(individual|firm)\/(\d+)\/?$/i);
+		const m = path.match(/^\/chart\/(individual|firm)\/(\d+)\/?$/i);
 		if (m) return { type: m[1].toLowerCase() as 'individual' | 'firm', crd: m[2] };
 		return null;
 	}, [router.query, router.asPath]);
@@ -547,16 +824,16 @@ export default function GlobalGraphPage() {
 	const [focus, setFocus] = useState<FocusInfo | null>(null);
 	/** Drives Clear Highlight enablement for multi-select (ref alone doesn't re-render). */
 	const [selectionCount, setSelectionCount] = useState(0);
-	const [filter, setFilter] = useState<'all' | 'firm' | 'individual'>('all');
 	const [query, setQuery] = useState('');
 	const [lodHint, setLodHint] = useState('blank · search to add');
 	const [visibleCount, setVisibleCount] = useState(0);
-	const [searchHits, setSearchHits] = useState<LayoutNode[]>([]);
 	const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 	const [toolbarMinimized, setToolbarMinimized] = useState(false);
 	const [drawerOpen, setDrawerOpen] = useState(false);
 	const [searchLoading, setSearchLoading] = useState(false);
 	const [searchBanner, setSearchBanner] = useState<{ query: string; count: number } | null>(null);
+	/** Same Redis name-search path as dashboard bottom panel (`useLocalNameSearch` → `/api/redis-search`). */
+	const { search: searchRedisNames, setQuery: setNameSearchQuery } = useLocalNameSearch();
 	const [panelSnapshot, setPanelSnapshot] = useState<{
 		key: string;
 		resolvedKey: string;
@@ -568,7 +845,8 @@ export default function GlobalGraphPage() {
 	const panelRequestRef = useRef(0);
 	const lastLoggedFocusIdRef = useRef<string | null>(null);
 	const { cache, setSnapshot, clear: clearSharedCache } = useSharedGraphState();
-	const [edgeTypesEnabled, setEdgeTypesEnabled] = useState<Record<EdgeTypeKey, boolean>>({
+	/** All edge types stay on — UI edge filters removed. */
+	const edgeTypesEnabledRef = useRef<Record<EdgeTypeKey, boolean>>({
 		employment: true,
 		firm_link: true,
 		ownership: true,
@@ -580,12 +858,22 @@ export default function GlobalGraphPage() {
 	const nodeIndexRef = useRef<Map<string, LayoutNode>>(new Map());
 	const edgesByNodeRef = useRef<Map<string, LayoutEdge[]>>(new Map());
 	const visibleIdsRef = useRef<Set<string>>(new Set());
-	const addNodeToCanvasRef = useRef<(nodeId: string, opts?: { withNeighbors?: boolean; neighborLimit?: number }) => boolean>(() => false);
-	const focusNodeRef = useRef<(nodeId: string, opts?: { openEgo?: boolean; animate?: boolean; addIfMissing?: boolean; syncUrl?: boolean }) => boolean>(() => false);
+	/**
+	 * Ego focus mode (parity with /graph individual view):
+	 * - person-firms: only person↔firm employment spokes (no employer clique / firm_link mesh)
+	 * - firm-star: only firm↔direct-neighbor spokes when firm is expanded alone
+	 * null: progressive global map — any edge between visible nodes may paint
+	 */
+	const egoModeRef = useRef<null | { hubId: string; kind: 'person-firms' | 'firm-star' }>(null);
+	const addNodeToCanvasRef = useRef<(nodeId: string, opts?: { withNeighbors?: boolean | 'firms' | 'all' | 'none'; neighborLimit?: number }) => boolean>(() => false);
+	const focusNodeRef = useRef<
+		(
+			nodeId: string,
+			opts?: { openEgo?: boolean; animate?: boolean; addIfMissing?: boolean; syncUrl?: boolean; withNeighbors?: boolean | 'firms' | 'all' | 'none'; fetchExpand?: boolean },
+		) => boolean
+	>(() => false);
 	const clearFocusRef = useRef<() => void>(() => undefined);
 	const applyHighlightRef = useRef<() => void>(() => undefined);
-	const edgeTypesEnabledRef = useRef(edgeTypesEnabled);
-	edgeTypesEnabledRef.current = edgeTypesEnabled;
 
 	const syncGlobalRoute = useCallback(
 		(type: 'individual' | 'firm' | null, crd: string | null) => {
@@ -594,13 +882,13 @@ export default function GlobalGraphPage() {
 				const key = `${type}:${crd}`;
 				if (lastRouteKeyRef.current === key) return;
 				lastRouteKeyRef.current = key;
-				const as = `/global-graph/${type}/${crd}`;
-				void router.replace({ pathname: '/global-graph/[[...params]]', query: { params: [type, crd] } }, as, { shallow: true });
+				const as = `/chart/${type}/${crd}`;
+				void router.replace({ pathname: '/chart/[[...params]]', query: { params: [type, crd] } }, as, { shallow: true });
 				return;
 			}
 			if (lastRouteKeyRef.current === null || lastRouteKeyRef.current === '') return;
 			lastRouteKeyRef.current = null;
-			void router.replace({ pathname: '/global-graph/[[...params]]', query: {} }, '/global-graph', {
+			void router.replace({ pathname: '/chart/[[...params]]', query: {} }, '/chart', {
 				shallow: true,
 			});
 		},
@@ -610,17 +898,13 @@ export default function GlobalGraphPage() {
 	const edgeLodModeRef = useRef<'overview' | 'mid' | 'detail' | 'focus'>('detail');
 	const edgeLodIndexRef = useRef(0);
 
-	const availableEdgeTypes = useMemo(() => {
-		const counts = stats?.edgeTypes;
-		if (counts && Object.keys(counts).length) {
-			return EDGE_TYPE_META.filter((m) => (counts[m.key] || 0) > 0);
-		}
-		return EDGE_TYPE_META.filter((m) => m.key === 'employment' || m.key === 'ownership');
-	}, [stats]);
-
 	const labelPointerCleanupRef = useRef<(() => void) | null>(null);
 
 	const destroySigma = useCallback(() => {
+		if (globalLayoutAnimId !== null) {
+			globalLayoutAnimId.stop();
+			globalLayoutAnimId = null;
+		}
 		if (cameraPinUnlockRef.current) {
 			try {
 				cameraPinUnlockRef.current();
@@ -659,6 +943,7 @@ export default function GlobalGraphPage() {
 		const focusId = focusedIdRef.current;
 		const hoverId = hoverIdRef.current;
 		const selected = selectedIdsRef.current;
+		const visited = visitedIdsRef.current;
 
 		// Stable selection hubs (multi-select + primary focus). Hover is separate so
 		// mousing a firm doesn't light every employee while a child is selected.
@@ -674,39 +959,61 @@ export default function GlobalGraphPage() {
 			if (t !== 'firm') selectedIndividuals.add(id);
 		}
 
-		/** Gray / inactive / previous edges stay unlit under selection. */
-		const isDisabledEdge = (attrs: Record<string, unknown>, source: string, target: string): boolean => {
-			if (attrs.isCurrent === false || attrs.inactive === true || attrs.disabled === true) return true;
+		/** Previous/former edge (still drawn; firm-alone focus lights them too). */
+		const isPreviousEdge = (attrs: Record<string, unknown>): boolean => {
+			if (attrs.isCurrent === false || attrs.inactive === true) return true;
+			const edgeType = String(attrs.edgeType || attrs.type || '');
+			if (/previous|former|prior/i.test(edgeType)) return true;
 			const detail = String(attrs.detail || attrs.label || attrs.edgeLabel || attrs.relationship || '');
-			if (/previous|former|prior|inactive|terminated|disabled/i.test(detail)) return true;
-			// Endpoint marked inactive (layout/expand) — keep its incident spokes from lighting blue.
-			for (const id of [source, target]) {
-				if (!graph.hasNode(id)) continue;
-				if (graph.getNodeAttribute(id, 'inactive') === true) return true;
-			}
-			return false;
+			return /previous|former|prior|terminated/i.test(detail) && !/current/i.test(detail);
 		};
 
 		/**
+		 * Fully disabled edges (never emphasize). Previous edges are *not* disabled —
+		 * firm deep-links / firm-alone selection reveal current + previous spokes.
+		 */
+		const isDisabledEdge = (attrs: Record<string, unknown>, _source: string, _target: string): boolean => {
+			if (attrs.disabled === true) return true;
+			// previous edges: allowed (styled separately when emphasized)
+			if (isPreviousEdge(attrs)) return false;
+			const detail = String(attrs.detail || attrs.label || attrs.edgeLabel || attrs.relationship || '');
+			if (/disabled/i.test(detail) && !/current/i.test(detail)) return true;
+			return false;
+		};
+
+		/** Firm-only selection (no selected individuals) → full direct star including previous. */
+		const firmAloneSelection =
+			selectedHubIds.size > 0 && selectedIndividuals.size === 0 && [...selectedHubIds].every((id) => String(graph.getNodeAttribute(id, 'nodeType') || '') === 'firm');
+
+		/**
 		 * Child (individual) selected → only that node + edges to its parent(s).
-		 * Firm selected alone → all firm→child spokes.
+		 * Firm selected alone → all firm→child spokes (current + previous).
 		 * Firm + some children selected → only spokes to those selected children
 		 * (never light sibling employees off the parent).
-		 * Never emphasize gray/disabled/previous lines.
 		 */
 		const isEmphasizedEdge = (source: string, target: string, attrs?: Record<string, unknown>): boolean => {
 			if (attrs && isDisabledEdge(attrs, source, target)) return false;
 			const srcSel = selectedHubIds.has(source);
 			const tgtSel = selectedHubIds.has(target);
+			const previous = Boolean(attrs && isPreviousEdge(attrs));
+
 			if (!srcSel && !tgtSel) {
-				// Hover preview: only edges incident to the hovered node itself.
-				if (hoverId && (source === hoverId || target === hoverId)) {
-					if (attrs && isDisabledEdge(attrs, source, target)) return false;
-					return true;
-				}
+				// Hover preview: edges incident to the hovered node (incl. previous).
+				if (hoverId && (source === hoverId || target === hoverId)) return true;
 				return false;
 			}
-			// Edge between two selected hubs always counts (unless disabled above).
+
+			// Previous edges: only emphasize for firm-alone selection, both ends
+			// selected, or hover (handled above). Avoid red-lighting them when a
+			// person is the hub unless that edge is the person's own link.
+			if (previous && !firmAloneSelection && !(srcSel && tgtSel)) {
+				const hub = srcSel ? source : target;
+				const hubType = String(graph.getNodeAttribute(hub, 'nodeType') || '');
+				// Person hub may still show previous employers (direct).
+				if (hubType === 'firm' && selectedIndividuals.size > 0) return false;
+			}
+
+			// Edge between two selected hubs always counts.
 			if (srcSel && tgtSel) return true;
 
 			const hub = srcSel ? source : target;
@@ -720,81 +1027,53 @@ export default function GlobalGraphPage() {
 			// selected children — do not fan out to every employee on the firm.
 			if (selectedIndividuals.size > 0) return selectedIndividuals.has(other);
 
-			// Firm-only selection (no selected children): full star of active spokes.
+			// Firm-only selection: full star of direct spokes (current + previous).
 			return true;
 		};
 
-		const litNodeIds = new Set<string>();
-		for (const id of selectedHubIds) litNodeIds.add(id);
-		if (hoverId && graph.hasNode(hoverId)) litNodeIds.add(hoverId);
-
 		const hasSelectionOrHover = selectedHubIds.size > 0 || Boolean(hoverId && graph.hasNode(hoverId));
-
-		// Collect endpoints of emphasized edges so parent firm stays lit for a child pick.
-		if (hasSelectionOrHover) {
-			graph.forEachEdge((edge, attrs, source, target) => {
-				const et = normalizeEdgeType(String(attrs.edgeType || ''));
-				const typeOn = edgeTypesEnabledRef.current[et] !== false && !attrs.filterHidden && !attrs.typeHidden;
-				if (!typeOn) return;
-				if (isEmphasizedEdge(source, target, attrs as Record<string, unknown>)) {
-					litNodeIds.add(source);
-					litNodeIds.add(target);
-				}
-			});
-		}
-
 		const enabled = edgeTypesEnabledRef.current;
 
-		// Nodes always sit above edges (edge zIndex stays < 0; nodes >= 2).
-		// Size is always STATIC_NODE_SIZE — never grow/shrink on select/hover.
-		const fixedSize = staticNodeSize();
+		const darkenHex = (c: string) => {
+			if (!c.startsWith('#') || (c.length !== 7 && c.length !== 4)) return '#334155';
+			const hex = c.length === 4 ? '#' + c[1] + c[1] + c[2] + c[2] + c[3] + c[3] : c;
+			const r = Math.floor(parseInt(hex.slice(1, 3), 16) * 0.45);
+			const g = Math.floor(parseInt(hex.slice(3, 5), 16) * 0.45);
+			const b = Math.floor(parseInt(hex.slice(5, 7), 16) * 0.45);
+			return `rgb(${r},${g},${b})`;
+		};
+
+		// Nodes: never gray out non-selected disks (/graph does not dim on select).
+		// Selection = ring via hover-layer style + forceLabel; colors stay type-true.
+		// Inactive hubs stay slate-gray (still selectable / expandable).
 		graph.forEachNode((node, attrs) => {
-			const baseColor = String(attrs.baseColor || attrs.color || '#94a3b8');
-			if (!hasSelectionOrHover) {
-				graph.setNodeAttribute(node, 'color', baseColor);
-				graph.setNodeAttribute(node, 'size', fixedSize);
-				graph.setNodeAttribute(node, 'baseSize', fixedSize);
-				graph.setNodeAttribute(node, 'zIndex', 2);
-				graph.setNodeAttribute(node, 'forceLabel', false);
-				graph.setNodeAttribute(node, 'pinned', false);
-				return;
-			}
-			const on = litNodeIds.has(node);
-			if (on) {
-				const isSelected = selected.has(node) || node === focusId;
-				const isHoverCenter = node === hoverId;
-				const highlight = isSelected || isHoverCenter;
-				graph.setNodeAttribute(
-					node,
-					'color',
-					isSelected ? '#ffffff'
-					: isHoverCenter ? '#f8fafc'
-					: baseColor,
-				);
-				graph.setNodeAttribute(node, 'size', fixedSize);
-				graph.setNodeAttribute(node, 'baseSize', fixedSize);
-				graph.setNodeAttribute(
-					node,
-					'zIndex',
-					isSelected ? 5
-					: isHoverCenter ? 4
-					: 3,
-				);
-				graph.setNodeAttribute(node, 'forceLabel', highlight || graph.degree(node) > 8);
-				graph.setNodeAttribute(node, 'pinned', isSelected);
-			} else {
-				// Dim color only — keep full opacity so edge lines cannot show through disks.
-				graph.setNodeAttribute(node, 'color', '#475569');
-				graph.setNodeAttribute(node, 'size', fixedSize);
-				graph.setNodeAttribute(node, 'baseSize', fixedSize);
-				graph.setNodeAttribute(node, 'zIndex', 2);
-				graph.setNodeAttribute(node, 'forceLabel', false);
-				graph.setNodeAttribute(node, 'pinned', false);
-			}
+			const inactive = attrs.inactive === true;
+			const nodeType = String(attrs.nodeType || 'unknown');
+			const baseColor = inactive ? INACTIVE_NODE_COLOR : String(attrs.baseColor || nodeDisplayColor(nodeType, false));
+			// Do not darken visited nodes — /graph keeps full color for every node on the canvas.
+			void visited;
+
+			const isSelected = selected.has(node) || node === focusId;
+			const isHoverCenter = node === hoverId;
+			const highlight = isSelected || isHoverCenter;
+
+			graph.setNodeAttribute(node, 'type', nodeRenderType(nodeType));
+			graph.setNodeAttribute(node, 'color', baseColor);
+			graph.setNodeAttribute(node, 'baseColor', baseColor);
+			graph.setNodeAttribute(node, 'highlighted', isSelected);
+			graph.setNodeAttribute(
+				node,
+				'zIndex',
+				isSelected ? 5
+				: isHoverCenter ? 4
+				: 2,
+			);
+			graph.setNodeAttribute(node, 'forceLabel', highlight || graph.degree(node) > 8);
+			graph.setNodeAttribute(node, 'pinned', isSelected);
 		});
 
-		// No selection: all type-enabled edges stay thin/visible.
-		// With selection(s)/hover: emphasize only the allowed spokes; fade the rest.
+		// Edges: base blue/red like /graph; selection only thickens CURRENT spokes.
+		// Previous edges stay red (or muted gray dashed when they touch selection) — never selection-blue.
 		graph.forEachEdge((edge, attrs, source, target) => {
 			const et = normalizeEdgeType(String(attrs.edgeType || ''));
 			const typeOn = enabled[et] !== false && !attrs.filterHidden && !attrs.typeHidden;
@@ -803,57 +1082,56 @@ export default function GlobalGraphPage() {
 				return;
 			}
 
-			const baseSize = Number(attrs.baseSize) > 0 ? Number(attrs.baseSize) : edgeBaseSize(Number(attrs.weight));
-			const disabled = isDisabledEdge(attrs as Record<string, unknown>, source, target);
-			const emphasize = hasSelectionOrHover && !disabled && isEmphasizedEdge(source, target, attrs as Record<string, unknown>);
+			const attrsRec = attrs as Record<string, unknown>;
+			const previous = isPreviousEdge(attrsRec);
+			const baseSize = Number(attrs.baseSize) > 0 ? Number(attrs.baseSize) : edgeBaseSize(Number(attrs.weight), previous);
+			const disabled = isDisabledEdge(attrsRec, source, target);
+			const touchesSelection = hasSelectionOrHover && (selectedHubIds.has(source) || selectedHubIds.has(target) || source === hoverId || target === hoverId);
+			// /graph: only CURRENT spokes get `.selected`; previous get `.selection-muted` when they touch focus.
+			const emphasizeCurrent = hasSelectionOrHover && !disabled && !previous && isEmphasizedEdge(source, target, attrsRec);
+			const previousTouches = hasSelectionOrHover && !disabled && previous && touchesSelection && isEmphasizedEdge(source, target, attrsRec);
 
 			graph.setEdgeAttribute(edge, 'hidden', false);
 
-			if (hasSelectionOrHover) {
-				if (emphasize) {
-					// Bright solid blue spokes — child→parent only when child is selected.
-					// zIndex stays negative so edges never climb above node disks.
-					const weightBoost = Math.min(1.4, 1 + (Number(attrs.weight) || 1) * 0.04);
-					const spokeSize = Math.min(SELECTED_EDGE_SIZE_MAX, SELECTED_EDGE_SIZE * weightBoost);
-					graph.setEdgeAttribute(edge, 'type', 'line');
-					graph.setEdgeAttribute(edge, 'color', SELECTED_EDGE_COLOR);
-					graph.setEdgeAttribute(edge, 'zIndex', -1);
-					graph.setEdgeAttribute(edge, 'size', spokeSize);
-				} else {
-					// Fade other lines hard so selected spokes read clearly.
-					// Gray/disabled edges stay ghosted (never blue-highlighted).
-					graph.setEdgeAttribute(edge, 'type', 'line');
-					graph.setEdgeAttribute(edge, 'color', disabled ? 'rgba(100,116,139,0.06)' : 'rgba(100,116,139,0.04)');
-					graph.setEdgeAttribute(edge, 'zIndex', -3);
-					graph.setEdgeAttribute(edge, 'size', Math.max(0.4, Math.min(1.1, baseSize > 1 ? baseSize * 0.35 : 0.55)));
-				}
+			if (emphasizeCurrent) {
+				const weightBoost = Math.min(1.25, 1 + (Number(attrs.weight) || 1) * 0.03);
+				const spokeSize = Math.min(SELECTED_EDGE_SIZE_MAX, SELECTED_EDGE_SIZE * weightBoost);
+				graph.setEdgeAttribute(edge, 'type', 'line');
+				graph.setEdgeAttribute(edge, 'color', SELECTED_EDGE_COLOR);
+				graph.setEdgeAttribute(edge, 'zIndex', -1);
+				graph.setEdgeAttribute(edge, 'size', spokeSize);
 				return;
 			}
 
-			graph.setEdgeAttribute(edge, 'type', 'line');
-			graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || 'employment'), false));
-			graph.setEdgeAttribute(edge, 'zIndex', -2);
+			if (previousTouches) {
+				// Gray dashed previous on the selected hub (user request + /graph muted previous).
+				graph.setEdgeAttribute(edge, 'type', 'dashed');
+				graph.setEdgeAttribute(edge, 'color', SELECTED_PREVIOUS_EDGE_COLOR);
+				graph.setEdgeAttribute(edge, 'zIndex', -2);
+				graph.setEdgeAttribute(edge, 'size', SELECTED_PREVIOUS_EDGE_SIZE);
+				return;
+			}
+
+			const ego = egoModeRef.current;
+			// Person/firm ego: hide non-spoke edges entirely (no firm↔firm mesh).
+			if (hasSelectionOrHover && ego && (ego.kind === 'person-firms' || ego.kind === 'firm-star')) {
+				const touchesHub = source === ego.hubId || target === ego.hubId;
+				if (!touchesHub) {
+					graph.setEdgeAttribute(edge, 'hidden', true);
+					graph.setEdgeAttribute(edge, 'size', 0);
+					return;
+				}
+			}
+
+			// Base /graph edge style (current blue / previous red).
+			graph.setEdgeAttribute(edge, 'type', previous ? 'dashed' : 'line');
+			graph.setEdgeAttribute(edge, 'color', edgeColor(String(attrs.edgeType || (previous ? 'previous_employment' : 'employment')), false));
+			graph.setEdgeAttribute(edge, 'zIndex', previous ? -3 : -2);
 			graph.setEdgeAttribute(edge, 'size', baseSize);
 		});
 
 		sigma.refresh();
 	}, []);
-
-	const applyEdgeTypeFilter = useCallback(() => {
-		const graph = graphRef.current;
-		if (!graph) return;
-		const enabled = edgeTypesEnabledRef.current;
-		graph.forEachEdge((edge, attrs) => {
-			const et = normalizeEdgeType(String(attrs.edgeType || ''));
-			const typeOn = enabled[et] !== false;
-			graph.setEdgeAttribute(edge, 'typeHidden', !typeOn);
-			// Don't force visibility here — LOD + highlight own `hidden`.
-			if (!typeOn || attrs.filterHidden) {
-				graph.setEdgeAttribute(edge, 'hidden', true);
-			}
-		});
-		applyHighlight();
-	}, [applyHighlight]);
 
 	const unlockPinnedNode = useCallback((nodeId: string | null) => {
 		const graph = graphRef.current;
@@ -868,11 +1146,8 @@ export default function GlobalGraphPage() {
 			// Restore base geometry if highlight isn't about to repaint.
 			const attrs = graph.getNodeAttributes(nodeId);
 			const baseColor = String(attrs.baseColor || attrs.color || '#94a3b8');
-			const fixedSize = staticNodeSize();
 			if (focusedIdRef.current !== nodeId && hoverIdRef.current !== nodeId && !selectedIdsRef.current.has(nodeId)) {
 				graph.setNodeAttribute(nodeId, 'color', baseColor);
-				graph.setNodeAttribute(nodeId, 'size', fixedSize);
-				graph.setNodeAttribute(nodeId, 'baseSize', fixedSize);
 				graph.setNodeAttribute(nodeId, 'zIndex', 2);
 				graph.setNodeAttribute(nodeId, 'forceLabel', false);
 			}
@@ -1066,19 +1341,43 @@ export default function GlobalGraphPage() {
 		};
 	}, []);
 
-	const ensureNodeOnGraph = useCallback((n: LayoutNode): boolean => {
+	const ensureNodeOnGraph = useCallback((n: LayoutNode, pos?: { x: number; y: number }): boolean => {
 		const graph = graphRef.current;
-		if (!graph || graph.hasNode(n.id)) return false;
-		// Hard-coded screen px — never derive from degree/weight/layout size.
-		const size = staticNodeSize();
+		if (!graph) return false;
+
+		const inactive = Boolean(n.inactive);
+		const finalColor = nodeDisplayColor(n.type, inactive);
+		const size = dynamicNodeSize(Number(n.degree) || 1, n.type);
+
+		if (graph.hasNode(n.id)) {
+			// Refresh label/inactive/type when expand or deep-link hydrates metadata.
+			if (n.label) graph.setNodeAttribute(n.id, 'label', n.label);
+			graph.setNodeAttribute(n.id, 'type', nodeRenderType(n.type));
+			graph.setNodeAttribute(n.id, 'nodeType', n.type);
+			if (inactive) {
+				graph.setNodeAttribute(n.id, 'inactive', true);
+				graph.setNodeAttribute(n.id, 'color', finalColor);
+				graph.setNodeAttribute(n.id, 'baseColor', finalColor);
+			} else if (graph.getNodeAttribute(n.id, 'inactive') !== true) {
+				graph.setNodeAttribute(n.id, 'inactive', false);
+				graph.setNodeAttribute(n.id, 'color', finalColor);
+				graph.setNodeAttribute(n.id, 'baseColor', finalColor);
+			}
+			if (typeof n.degree === 'number') graph.setNodeAttribute(n.id, 'degree', n.degree);
+			visibleIdsRef.current.add(n.id);
+			return false;
+		}
+
 		graph.addNode(n.id, {
 			label: n.label,
-			x: n.x * LAYOUT_SPREAD,
-			y: n.y * LAYOUT_SPREAD,
+			x: pos ? pos.x : n.x * LAYOUT_SPREAD,
+			// Slight vertical compress on baked coords so the map opens wider than tall.
+			y: pos ? pos.y : n.y * LAYOUT_SPREAD * 0.72,
 			size,
 			baseSize: size,
-			color: n.color,
-			baseColor: n.color,
+			type: nodeRenderType(n.type),
+			color: finalColor,
+			baseColor: finalColor,
 			nodeType: n.type,
 			degree: n.degree,
 			weight: n.weight ?? n.degree,
@@ -1087,108 +1386,316 @@ export default function GlobalGraphPage() {
 			brokerCount: n.brokerCount || 0,
 			firmLinkCount: n.firmLinkCount || 0,
 			cluster: n.cluster,
+			inactive,
 			zIndex: 2,
 			forceLabel: false,
 			pinned: false,
+			highlighted: false,
 		});
 		visibleIdsRef.current.add(n.id);
 		return true;
 	}, []);
 
-	const ensureEdgeOnGraph = useCallback((e: LayoutEdge): boolean => {
-		const graph = graphRef.current;
-		if (!graph) return false;
-		if (!graph.hasNode(e.source) || !graph.hasNode(e.target)) return false;
-		if (graph.hasEdge(e.source, e.target)) return false;
-		const enabled = edgeTypesEnabledRef.current;
-		const et = normalizeEdgeType(e.type);
-		const size = edgeBaseSize(e.weight);
-		try {
-			graph.addEdgeWithKey(e.id || `${e.source}:${e.target}`, e.source, e.target, {
-				weight: e.weight,
-				size,
-				baseSize: size,
-				// Sigma render type: solid straight segment (not dashed/dotted).
-				type: 'line',
-				color: edgeColor(e.type || 'employment', false),
-				edgeType: e.type || 'employment',
-				filterHidden: false,
-				hidden: false,
-				typeHidden: enabled[et] === false,
-				zIndex: -2,
-			});
+	/**
+	 * Whether an edge may be drawn under the current ego / progressive policy.
+	 * Person ego matches /graph: only hub employment spokes — never firm↔firm mesh.
+	 */
+	const edgeAllowedInEgo = useCallback((e: LayoutEdge, ego: { hubId: string; kind: 'person-firms' | 'firm-star' } | null): boolean => {
+		if (!ego) return true;
+		const touchesHub = e.source === ego.hubId || e.target === ego.hubId;
+		if (!touchesHub) return false;
+		const raw = String(e.type || 'employment').toLowerCase();
+		if (ego.kind === 'person-firms') {
+			// Employment / ownership / previous only — skip catalog firm_link / location chords.
+			if (raw === 'firm_link' || raw === 'location' || raw === 'succession') return false;
 			return true;
-		} catch {
-			return false;
 		}
+		// firm-star: any direct spoke type (employees, owners, previous).
+		return true;
 	}, []);
 
-	/** Add a layout node (and optional 1-hop neighbors + edges between visible nodes). */
+	/** Drop non-spoke edges so a person focus can't keep a leftover firm clique. */
+	const pruneEdgesToEgoSpokes = useCallback(
+		(hubId: string, kind: 'person-firms' | 'firm-star') => {
+			const graph = graphRef.current;
+			if (!graph || !graph.hasNode(hubId)) return;
+			const drop: string[] = [];
+			graph.forEachEdge((edge, attrs, source, target) => {
+				const fake: LayoutEdge = {
+					id: edge,
+					source,
+					target,
+					type: String(attrs.edgeType || attrs.type || 'employment'),
+					weight: Number(attrs.weight) || 1,
+				};
+				if (!edgeAllowedInEgo(fake, { hubId, kind })) drop.push(edge);
+			});
+			for (const edge of drop) {
+				try {
+					graph.dropEdge(edge);
+				} catch {
+					// ignore
+				}
+			}
+		},
+		[edgeAllowedInEgo],
+	);
+
+	const ensureEdgeOnGraph = useCallback(
+		(e: LayoutEdge): boolean => {
+			const graph = graphRef.current;
+			if (!graph) return false;
+			if (!graph.hasNode(e.source) || !graph.hasNode(e.target)) return false;
+			if (!edgeAllowedInEgo(e, egoModeRef.current)) return false;
+			const isPrevious = layoutEdgeIsPrevious(e);
+			const edgeType = isPrevious ? e.type || 'previous_employment' : e.type || 'employment';
+			const size = edgeBaseSize(e.weight, isPrevious);
+			const applyAttrs = (edgeKey: string) => {
+				graph.setEdgeAttribute(edgeKey, 'weight', e.weight);
+				graph.setEdgeAttribute(edgeKey, 'edgeType', edgeType);
+				graph.setEdgeAttribute(edgeKey, 'isCurrent', !isPrevious);
+				graph.setEdgeAttribute(edgeKey, 'inactive', isPrevious);
+				graph.setEdgeAttribute(edgeKey, 'type', isPrevious ? 'dashed' : 'line');
+				graph.setEdgeAttribute(edgeKey, 'color', edgeColor(edgeType, false));
+				graph.setEdgeAttribute(edgeKey, 'size', size);
+				graph.setEdgeAttribute(edgeKey, 'baseSize', size);
+			};
+			// Single undirected edge per pair (layout + expand merges).
+			if (graph.hasEdge(e.source, e.target) || graph.hasEdge(e.target, e.source)) {
+				try {
+					const existing = graph.hasEdge(e.source, e.target) ? graph.edge(e.source, e.target) : graph.edge(e.target, e.source);
+					if (!existing) return false;
+					const wasCurrent = graph.getEdgeAttribute(existing, 'isCurrent');
+					// Expand previous must overwrite catalog "employment" stubs.
+					if (isPrevious || wasCurrent === undefined) {
+						applyAttrs(existing);
+					}
+				} catch {
+					// ignore
+				}
+				return false;
+			}
+			const enabled = edgeTypesEnabledRef.current;
+			const et = normalizeEdgeType(edgeType);
+			const edgeKey = e.id || `${e.source}:${e.target}:${edgeType}`;
+			try {
+				graph.addEdgeWithKey(edgeKey, e.source, e.target, {
+					weight: e.weight,
+					size,
+					baseSize: size,
+					// Previous = dashed gray/red program; current = solid line.
+					type: isPrevious ? 'dashed' : 'line',
+					color: edgeColor(edgeType, false),
+					edgeType,
+					isCurrent: !isPrevious,
+					inactive: isPrevious,
+					filterHidden: false,
+					hidden: false,
+					typeHidden: enabled[et] === false,
+					zIndex: isPrevious ? -3 : -2,
+				});
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		[edgeAllowedInEgo],
+	);
+
+	/**
+	 * Neighbor policy (/graph expand-in-place):
+	 * - person/individual → attached firm nodes (current + previous)
+	 * - firm → full direct star (employees/owners + previous) unless caller forces 'none'
+	 */
+	const resolveNeighborMode = useCallback((seedType: string, withNeighbors?: boolean | 'firms' | 'all' | 'none'): 'none' | 'firms' | 'all' => {
+		if (withNeighbors === 'none' || withNeighbors === false) return 'none';
+		if (withNeighbors === 'firms') return 'firms';
+		if (withNeighbors === 'all' || withNeighbors === true) return 'all';
+		// Default by entity type when option omitted.
+		return seedType === 'firm' ? 'all' : 'firms';
+	}, []);
+
+	/** Add a layout node (and optional 1-hop neighbors). Ego modes only draw hub spokes. */
 	const addNodeToCanvas = useCallback(
-		(nodeId: string, opts?: { withNeighbors?: boolean; neighborLimit?: number }) => {
+		(nodeId: string, opts?: { withNeighbors?: boolean | 'firms' | 'all' | 'none'; neighborLimit?: number }) => {
 			const graph = graphRef.current;
 			const sigma = sigmaRef.current;
 			const payload = layoutRef.current;
 			if (!graph || !sigma || !payload) return false;
 			const seed = nodeIndexRef.current.get(nodeId);
 			if (!seed) return false;
-			if (filter !== 'all' && seed.type !== filter) return false;
 
-			const withNeighbors = opts?.withNeighbors !== false;
-			const neighborLimit = opts?.neighborLimit ?? 48;
+			const neighborMode = resolveNeighborMode(seed.type, opts?.withNeighbors);
+			// Person→firms star (left /graph): large firm ring. Firm-all: employee star.
+			const neighborLimit =
+				opts?.neighborLimit ??
+				(neighborMode === 'firms' ? 160
+				: neighborMode === 'all' ? 280
+				: 48);
 			let added = 0;
+			const starEgoSeed = neighborMode === 'firms' && seed.type !== 'firm';
+			const firmStarSeed = neighborMode === 'all' && seed.type === 'firm';
+
+			// Ego policy for this paint (matches /graph individual: spokes only).
+			if (starEgoSeed) egoModeRef.current = { hubId: nodeId, kind: 'person-firms' };
+			else if (firmStarSeed) egoModeRef.current = { hubId: nodeId, kind: 'firm-star' };
+			// Keep prior ego if adding unrelated progressive nodes while a hub is focused.
+			else if (neighborMode === 'none' && egoModeRef.current?.hubId === nodeId) {
+				// firm alone — still ego hub with no leaves yet
+				egoModeRef.current = { hubId: nodeId, kind: 'firm-star' };
+			}
 
 			if (ensureNodeOnGraph(seed)) added++;
 
-			if (withNeighbors) {
+			if (neighborMode !== 'none') {
 				const incident = edgesByNodeRef.current.get(nodeId) || [];
-				const candidates: { id: string; weight: number }[] = [];
+				const candidates: { id: string; weight: number; edge: LayoutEdge }[] = [];
 				for (const e of incident) {
 					const other = e.source === nodeId ? e.target : e.source;
 					if (other === nodeId) continue;
+					if (!edgeAllowedInEgo(e, egoModeRef.current)) continue;
 					const meta = nodeIndexRef.current.get(other);
 					if (!meta) continue;
-					if (filter !== 'all' && meta.type !== filter) continue;
-					candidates.push({ id: other, weight: e.weight || 1 });
+					// Person fetch: only attach firm nodes. Firm+all: any neighbor type.
+					if (neighborMode === 'firms' && meta.type !== 'firm') continue;
+					candidates.push({ id: other, weight: e.weight || 1, edge: e });
 				}
-				candidates.sort((a, b) => b.weight - a.weight || a.id.localeCompare(b.id));
+				// Prefer current employment over previous when ranking; stable by id.
+				// Deduplicate by neighbor id, keeping the best (current > previous) edge row.
+				const bestByNeighbor = new Map<string, { id: string; weight: number; edge: LayoutEdge }>();
+				for (const c of candidates) {
+					const prev = bestByNeighbor.get(c.id);
+					if (!prev) {
+						bestByNeighbor.set(c.id, c);
+						continue;
+					}
+					const aPrev = layoutEdgeIsPrevious(c.edge);
+					const bPrev = layoutEdgeIsPrevious(prev.edge);
+					if (bPrev && !aPrev) bestByNeighbor.set(c.id, c);
+					else if (aPrev === bPrev && (c.weight || 0) > (prev.weight || 0)) bestByNeighbor.set(c.id, c);
+				}
+				const ranked = Array.from(bestByNeighbor.values()).sort((a, b) => {
+					const aPrev = layoutEdgeIsPrevious(a.edge) ? 0 : 1;
+					const bPrev = layoutEdgeIsPrevious(b.edge) ? 0 : 1;
+					return bPrev - aPrev || b.weight - a.weight || a.id.localeCompare(b.id);
+				});
+				candidates.length = 0;
+				candidates.push(...ranked);
 				const seen = new Set<string>();
+				const hubDeg = Math.max(1, Number(seed.degree) || candidates.length || 1);
+				// Star ego: single circular ring (left app). Firm-all uses staggered rings for large staff.
+				const ringCount =
+					starEgoSeed ? 1
+					: candidates.length > 200 ? 7
+					: candidates.length > 80 ? 6
+					: candidates.length > 30 ? 5
+					: 4;
+				const orbitBase =
+					starEgoSeed ? 340 + Math.min(420, Math.sqrt(hubDeg) * 52)
+					: firmStarSeed ? 220 + Math.min(360, Math.sqrt(hubDeg) * 42)
+					: 160 + Math.min(320, Math.sqrt(hubDeg) * 40);
+				const ringStep = 72 + Math.min(64, hubDeg * 0.4);
+				const yScale =
+					starEgoSeed ? 1
+					: firmStarSeed ? 1
+					: 0.55;
+				let hubX = seed.x * LAYOUT_SPREAD;
+				let hubY = seed.y * LAYOUT_SPREAD * (starEgoSeed || firmStarSeed ? 1 : 0.72);
+				if (graph.hasNode(nodeId)) {
+					hubX = Number(graph.getNodeAttribute(nodeId, 'x')) || hubX;
+					hubY = Number(graph.getNodeAttribute(nodeId, 'y')) || hubY;
+				}
+				const placeCap = Math.min(candidates.length, neighborLimit);
+				let slot = 0;
 				for (const c of candidates) {
 					if (seen.has(c.id)) continue;
 					seen.add(c.id);
 					if (seen.size > neighborLimit) break;
 					const meta = nodeIndexRef.current.get(c.id);
 					if (!meta) continue;
-					if (ensureNodeOnGraph(meta)) added++;
+					const ring = slot % ringCount;
+					const angle = (slot / Math.max(placeCap, 1)) * Math.PI * 2 + (starEgoSeed ? 0 : ring * 0.17);
+					const dist =
+						starEgoSeed ?
+							orbitBase + ((hashString(`${nodeId}:${c.id}`) % 1000) / 999 - 0.5) * 20
+						:	orbitBase + ring * ringStep + ((hashString(`${nodeId}:${c.id}`) % 1000) / 999 - 0.5) * 36;
+					const pos = {
+						x: hubX + Math.cos(angle) * dist,
+						y: hubY + Math.sin(angle) * dist * yScale,
+					};
+					// Star: re-seat leaves onto the ring even if already on canvas.
+					if (starEgoSeed || firmStarSeed || !graph.hasNode(c.id)) {
+						if (ensureNodeOnGraph(meta, pos)) added++;
+						else if (graph.hasNode(c.id)) {
+							try {
+								graph.setNodeAttribute(c.id, 'x', pos.x);
+								graph.setNodeAttribute(c.id, 'y', pos.y);
+							} catch {
+								// ignore
+							}
+						}
+					} else if (ensureNodeOnGraph(meta)) {
+						added++;
+					}
+					// Draw spoke immediately (ego-safe).
+					ensureEdgeOnGraph(c.edge);
+					slot++;
 				}
 			}
 
-			// Materialize every layout edge whose endpoints are both on canvas.
-			for (const id of visibleIdsRef.current) {
-				const list = edgesByNodeRef.current.get(id) || [];
+			// Materialize edges:
+			// - ego modes: only spokes involving the hub (already mostly done above)
+			// - progressive map: edges between any pair of visible nodes
+			const ego = egoModeRef.current;
+			if (ego && (ego.kind === 'person-firms' || ego.kind === 'firm-star')) {
+				const list = edgesByNodeRef.current.get(ego.hubId) || [];
 				for (const e of list) {
 					if (visibleIdsRef.current.has(e.source) && visibleIdsRef.current.has(e.target)) {
 						ensureEdgeOnGraph(e);
 					}
 				}
+				pruneEdgesToEgoSpokes(ego.hubId, ego.kind);
+			} else {
+				for (const id of visibleIdsRef.current) {
+					const list = edgesByNodeRef.current.get(id) || [];
+					for (const e of list) {
+						if (visibleIdsRef.current.has(e.source) && visibleIdsRef.current.has(e.target)) {
+							ensureEdgeOnGraph(e);
+						}
+					}
+				}
 			}
 
-			// Open dense firm-link clumps then separate using a fixed graph-space radius
-			// (not the screen-pixel STATIC_NODE_SIZE — those units must stay independent).
-			if (added > 0 && graph.order >= 4) {
-				loosenDenseClusters(graph, { iterations: 12, strength: 0.28, minDegree: 3 });
-				resolveNodeOverlaps(graph, {
-					maxIterations: 220,
-					padding: 4,
-					// Force every disk to COLLISION_GRAPH_RADIUS regardless of attrs.size.
-					sizeToGraph: COLLISION_GRAPH_RADIUS / Math.max(1e-6, staticNodeSize()),
+			// Automatically mark visited if all catalog neighbors are already visible
+			for (const id of visibleIdsRef.current) {
+				const list = edgesByNodeRef.current.get(id) || [];
+				const hasUnrevealed = list.some((e) => {
+					const other = e.source === id ? e.target : e.source;
+					return !visibleIdsRef.current.has(other);
 				});
+				if (!hasUnrevealed) {
+					visitedIdsRef.current.add(id);
+				}
+			}
+
+			// Open dense clumps and resolve overlaps smoothly with an animation loop.
+			// Person→firms: pass hub id so layout settles as a circular star (left /graph).
+			const layoutEgoId =
+				starEgoSeed ? nodeId
+				: firmStarSeed ? nodeId
+				: undefined;
+			if ((added > 0 || starEgoSeed || firmStarSeed) && graph.order >= 2) {
+				runFluidLayout(graph, sigma, layoutEgoId ? { egoHubId: layoutEgoId } : undefined);
 			}
 
 			setVisibleCount(visibleIdsRef.current.size);
 			if (added > 0 || graph.hasNode(nodeId)) {
 				edgeLodModeRef.current = 'detail';
-				setLodHint('edges on');
+				setLodHint(
+					starEgoSeed ? 'ego · person→firms'
+					: firmStarSeed ? 'ego · firm star'
+					: 'edges on',
+				);
 				applyHighlight();
 				try {
 					// Positions changed — reindex so labels/hit-tests track new coords.
@@ -1199,7 +1706,7 @@ export default function GlobalGraphPage() {
 			}
 			return graph.hasNode(nodeId);
 		},
-		[applyHighlight, ensureEdgeOnGraph, ensureNodeOnGraph, filter],
+		[applyHighlight, edgeAllowedInEgo, ensureEdgeOnGraph, ensureNodeOnGraph, pruneEdgesToEgoSpokes, resolveNeighborMode],
 	);
 
 	const clearCanvas = useCallback(() => {
@@ -1227,11 +1734,12 @@ export default function GlobalGraphPage() {
 		pinnedIdRef.current = null;
 		focusedIdRef.current = null;
 		selectedIdsRef.current.clear();
+		visitedIdsRef.current.clear();
+		egoModeRef.current = null;
 		setSelectionCount(0);
 		hoverIdRef.current = null;
 		appliedRouteKeyRef.current = null;
 		setFocus(null);
-		setHover(null);
 		setErrorMessage(null);
 		setLodHint('blank · search to add');
 		edgeLodModeRef.current = 'overview';
@@ -1245,15 +1753,39 @@ export default function GlobalGraphPage() {
 	}, [syncGlobalRoute]);
 
 	const focusNode = useCallback(
-		(nodeId: string, opts?: { openEgo?: boolean; animate?: boolean; addIfMissing?: boolean; syncUrl?: boolean }) => {
+		(
+			nodeId: string,
+			opts?: {
+				openEgo?: boolean;
+				animate?: boolean;
+				addIfMissing?: boolean;
+				syncUrl?: boolean;
+				/** Override default neighbor policy (person→firms, firm→alone). */
+				withNeighbors?: boolean | 'firms' | 'all' | 'none';
+				/** When false, skip /api/finra/expand (already-fetched focus only). */
+				fetchExpand?: boolean;
+			},
+		) => {
 			const graph = graphRef.current;
 			const sigma = sigmaRef.current;
 			const payload = layoutRef.current;
 			if (!graph || !sigma || !payload) return false;
 
+			const catalogMeta = nodeIndexRef.current.get(nodeId);
+			const seedTypeHint =
+				catalogMeta?.type === 'firm' ? 'firm'
+				: catalogMeta?.type === 'individual' ? 'individual'
+				: graph.hasNode(nodeId) ? String(graph.getNodeAttribute(nodeId, 'nodeType') || 'unknown')
+				: 'unknown';
+			// Match /graph expand-in-place: person → firms; firm → full direct star (employees + previous).
+			const neighborOpt =
+				opts?.withNeighbors !== undefined ? opts.withNeighbors
+				: seedTypeHint === 'firm' ? 'all'
+				: 'firms';
+
 			if (!graph.hasNode(nodeId)) {
 				if (opts?.addIfMissing !== false) {
-					const ok = addNodeToCanvas(nodeId, { withNeighbors: true });
+					const ok = addNodeToCanvas(nodeId, { withNeighbors: neighborOpt });
 					if (!ok) {
 						const meta = nodeIndexRef.current.get(nodeId);
 						if (meta && opts?.openEgo) {
@@ -1272,14 +1804,19 @@ export default function GlobalGraphPage() {
 					}
 					return false;
 				}
+			} else {
+				// Already on canvas: still reveal type-appropriate neighbors from local index.
+				addNodeToCanvas(nodeId, { withNeighbors: neighborOpt });
 			}
 
-			// Multi-select: keep previous hubs; only unlock camera pin when leaving a node
-			// that is no longer in the selection set (should not happen for prior picks).
+			// Single focus like /graph: new click replaces selection; prior nodes stay on canvas.
 			const prevPinned = pinnedIdRef.current;
-			if (prevPinned && prevPinned !== nodeId && !selectedIdsRef.current.has(prevPinned)) {
-				unlockPinnedNode(prevPinned);
+			const prevSelected = [...selectedIdsRef.current];
+			selectedIdsRef.current.clear();
+			for (const id of prevSelected) {
+				if (id !== nodeId) unlockPinnedNode(id);
 			}
+			if (prevPinned && prevPinned !== nodeId) unlockPinnedNode(prevPinned);
 
 			const attrs = graph.getNodeAttributes(nodeId);
 			const neighborCount = graph.degree(nodeId);
@@ -1290,11 +1827,9 @@ export default function GlobalGraphPage() {
 			focusedIdRef.current = nodeId;
 			pinnedIdRef.current = nodeId;
 			selectedIdsRef.current.add(nodeId);
-			setSelectionCount(selectedIdsRef.current.size);
-			// Ensure every selected hub stays marked pinned for camera/render.
-			for (const id of selectedIdsRef.current) {
-				if (graph.hasNode(id)) graph.setNodeAttribute(id, 'pinned', true);
-			}
+			visitedIdsRef.current.add(nodeId);
+			setSelectionCount(1);
+			if (graph.hasNode(nodeId)) graph.setNodeAttribute(nodeId, 'pinned', true);
 			setFocus({
 				id: nodeId,
 				label: String(attrs.label || nodeId),
@@ -1328,9 +1863,213 @@ export default function GlobalGraphPage() {
 				const t = attrs.nodeType === 'firm' ? 'firm' : 'individual';
 				void router.push(`/graph/${t}/${nodeId}`);
 			}
+
+			if (opts?.fetchExpand === false) return true;
+
+			// Fetch connections and merge onto the existing canvas (never replace the graph).
+			// Person → firm spokes (current + previous). Firm → full direct star.
+			const fetchId = attrs.nodeType === 'firm' ? `firm:${nodeId}` : `individual:${nodeId}`;
+			const expandNeighborMode = resolveNeighborMode(
+				String(attrs.nodeType || seedTypeHint),
+				neighborOpt === 'none' && String(attrs.nodeType || seedTypeHint) === 'firm' ? 'all' : neighborOpt,
+			);
+			fetch(`/api/finra/expand/${encodeURIComponent(fetchId)}?hops=1`)
+				.then((r) => (r.ok ? r.json() : null))
+				.then((data) => {
+					if (!data || !data.nodes || !data.links) return;
+					if (focusedIdRef.current !== nodeId && !selectedIdsRef.current.has(nodeId)) return;
+					let changed = false;
+					const g = graphRef.current;
+					const basex = g?.hasNode(nodeId) ? Number(g.getNodeAttribute(nodeId, 'x')) || 0 : 0;
+					const basey = g?.hasNode(nodeId) ? Number(g.getNodeAttribute(nodeId, 'y')) || 0 : 0;
+
+					for (const n of data.nodes) {
+						const crd = String(
+							n.crd ||
+								String(n.id || '')
+									.split(':')
+									.pop() ||
+								'',
+						).trim();
+						if (!crd) continue;
+						const type: 'firm' | 'individual' = n.group === 'firm' || n.type === 'firm' ? 'firm' : 'individual';
+						const inactive = Boolean(n.inactive);
+						const existing = nodeIndexRef.current.get(crd);
+						if (!existing) {
+							nodeIndexRef.current.set(crd, {
+								id: crd,
+								type,
+								label: n.label || crd,
+								degree: Number(n.degree) || 1,
+								weight: Number(n.weight) || 1,
+								size: dynamicNodeSize(Number(n.degree) || 1, type),
+								x: basex / LAYOUT_SPREAD + (Math.random() - 0.5) * 10,
+								y: basey / LAYOUT_SPREAD + (Math.random() - 0.5) * 10,
+								color: nodeDisplayColor(type, inactive),
+								inactive,
+							});
+							changed = true;
+						} else {
+							if (n.label && (!existing.label || existing.label === crd)) existing.label = n.label;
+							if (inactive) {
+								existing.inactive = true;
+								existing.color = INACTIVE_NODE_COLOR;
+							}
+							if (typeof n.degree === 'number') existing.degree = n.degree;
+						}
+
+						// Mark seed itself inactive when expand reports it.
+						if (crd === nodeId && g?.hasNode(nodeId) && inactive) {
+							g.setNodeAttribute(nodeId, 'inactive', true);
+							g.setNodeAttribute(nodeId, 'baseColor', INACTIVE_NODE_COLOR);
+							g.setNodeAttribute(nodeId, 'color', INACTIVE_NODE_COLOR);
+							if (n.label) g.setNodeAttribute(nodeId, 'label', n.label);
+							changed = true;
+						}
+					}
+
+					for (const e of data.links) {
+						const sCrd = String(e.source).split(':').pop() || '';
+						const tCrd = String(e.target).split(':').pop() || '';
+						if (!sCrd || !tCrd) continue;
+						// Person focus: only index spokes that touch the focused person
+						// (avoid unrelated firm mesh). Firm focus: direct spokes only.
+						if (sCrd !== nodeId && tCrd !== nodeId) continue;
+						const edgeObj = makeEmploymentEdge(sCrd, tCrd, String(e.relationship || e.edgeType || 'employment'), e.isCurrent, Number(e.weight) || 1);
+						const before = (edgesByNodeRef.current.get(sCrd) || []).find((x) => (x.source === sCrd && x.target === tCrd) || (x.source === tCrd && x.target === sCrd));
+						upsertIndexedEdge(edgesByNodeRef.current, edgeObj);
+						const after = (edgesByNodeRef.current.get(sCrd) || []).find((x) => (x.source === sCrd && x.target === tCrd) || (x.source === tCrd && x.target === sCrd));
+						if (!before || before.type !== after?.type || before.isCurrent !== after?.isCurrent) changed = true;
+					}
+					// Always re-materialize with policy: person paints firms (current+previous);
+					// firm stays alone unless expandNeighborMode is 'all'.
+					addNodeToCanvasRef.current(nodeId, {
+						withNeighbors: expandNeighborMode,
+						neighborLimit:
+							expandNeighborMode === 'firms' ? 200
+							: expandNeighborMode === 'all' ? 280
+							: 64,
+					});
+					if (changed || expandNeighborMode !== 'none') {
+						applyHighlightRef.current();
+						try {
+							sigmaRef.current?.refresh();
+						} catch {
+							// ignore
+						}
+					}
+				})
+				.catch(() => {});
+
 			return true;
 		},
-		[addNodeToCanvas, applyHighlight, attachCameraPin, router, syncGlobalRoute, unlockPinnedNode],
+		[addNodeToCanvas, applyHighlight, attachCameraPin, resolveNeighborMode, router, syncGlobalRoute, unlockPinnedNode],
+	);
+
+	/**
+	 * Panel connection / owner / selection-log rows → focus on the map.
+	 * Person: fetch + attach firm nodes. Firm: fetch alone (no employee dump).
+	 * Seeds out-of-catalog CRDs so clicks work even when layout index lacks them.
+	 */
+	const activateKeyOnMap = useCallback(
+		async (rawKey: string, typeHint?: 'firm' | 'individual') => {
+			const key = String(rawKey || '').trim();
+			if (!key) return false;
+
+			let type: 'firm' | 'individual' | undefined = typeHint;
+			let crd = '';
+
+			const finraMatch = key.match(/^(?:finra:)?(firm|individual):(\d+)$/i);
+			if (finraMatch) {
+				type = finraMatch[1].toLowerCase() as 'firm' | 'individual';
+				crd = finraMatch[2];
+			} else if (/^\d+$/.test(key)) {
+				crd = key;
+			} else {
+				const parts = key.split(':');
+				const last = parts[parts.length - 1];
+				if (/^\d+$/.test(last)) {
+					crd = last;
+					const maybeType = parts.find((p) => /^(firm|individual)$/i.test(p));
+					if (maybeType) type = maybeType.toLowerCase() as 'firm' | 'individual';
+				}
+			}
+			if (!crd) return false;
+
+			const existing = nodeIndexRef.current.get(crd);
+			if (!type) {
+				if (existing?.type === 'firm' || existing?.type === 'individual') type = existing.type;
+				else if (graphRef.current?.hasNode(crd)) {
+					const nt = String(graphRef.current.getNodeAttribute(crd, 'nodeType') || '');
+					type = nt === 'firm' ? 'firm' : 'individual';
+				} else {
+					type = 'individual';
+				}
+			}
+
+			// Seed layout index when connection target is not in the global catalog.
+			if (!existing) {
+				const basex = focusedIdRef.current && graphRef.current?.hasNode(focusedIdRef.current) ? Number(graphRef.current.getNodeAttribute(focusedIdRef.current, 'x')) || 0 : 0;
+				const basey = focusedIdRef.current && graphRef.current?.hasNode(focusedIdRef.current) ? Number(graphRef.current.getNodeAttribute(focusedIdRef.current, 'y')) || 0 : 0;
+				nodeIndexRef.current.set(crd, {
+					id: crd,
+					type,
+					label: crd,
+					degree: 1,
+					weight: 1,
+					size: dynamicNodeSize(1, type),
+					x: basex / LAYOUT_SPREAD + (Math.random() - 0.5) * 8,
+					y: basey / LAYOUT_SPREAD + (Math.random() - 0.5) * 8,
+					color: nodeDisplayColor(type, false),
+					inactive: false,
+				});
+			} else if (type && existing.type !== type) {
+				// Prefer explicit key type when catalog was wrong/unknown.
+				existing.type = type;
+			}
+
+			// Same expand policy as node click: firm star / person firms, merge in place.
+			const withNeighbors = type === 'firm' ? 'all' : 'firms';
+			const ok = focusNode(crd, {
+				animate: true,
+				addIfMissing: true,
+				withNeighbors,
+				fetchExpand: true,
+			});
+			if (ok) return true;
+
+			// Last resort: pull /api/key for label + type, then retry focus.
+			try {
+				const requestKey = `finra:${type}:${crd}`;
+				const r = await fetch(`/api/key?name=${encodeURIComponent(requestKey)}`);
+				if (r.ok) {
+					const data = await r.json();
+					const bundle = data?.bundle && typeof data.bundle === 'object' ? data.bundle : null;
+					const finra = bundle?.sources?.finra;
+					const sec = bundle?.sources?.sec;
+					const label =
+						String(
+							finra?.basicInformation?.firmName || finra?.basicInformation?.name || finra?.content?.basicInformation?.firmName || sec?.FirmName || sec?.firmName || crd,
+						).trim() || crd;
+					const stub = nodeIndexRef.current.get(crd);
+					if (stub) {
+						stub.label = label;
+						stub.type = type;
+						stub.color = nodeDisplayColor(type, Boolean(stub.inactive));
+					}
+				}
+			} catch {
+				// ignore
+			}
+
+			return focusNode(crd, {
+				animate: true,
+				addIfMissing: true,
+				withNeighbors,
+				fetchExpand: true,
+			});
+		},
+		[focusNode],
 	);
 
 	const clearFocus = useCallback(() => {
@@ -1346,6 +2085,7 @@ export default function GlobalGraphPage() {
 		}
 		selectedIdsRef.current.clear();
 		setSelectionCount(0);
+		// Leaving multi-highlight keeps nodes; drop ego edge filter only when canvas cleared.
 		for (const id of selected) unlockPinnedNode(id);
 		const prev = pinnedIdRef.current || focusedIdRef.current;
 		if (prev && !selected.includes(prev)) unlockPinnedNode(prev);
@@ -1353,7 +2093,7 @@ export default function GlobalGraphPage() {
 		focusedIdRef.current = null;
 		appliedRouteKeyRef.current = null;
 		setFocus(null);
-		// Keep nodes on canvas; bare /global-graph while map stays populated.
+		// Keep nodes on canvas; bare /chart while map stays populated.
 		syncGlobalRoute(null, null);
 		applyHighlight();
 		// Do not reset camera on clear-highlight — only drop selection styling.
@@ -1424,27 +2164,31 @@ export default function GlobalGraphPage() {
 				visibleIdsRef.current.clear();
 				setVisibleCount(0);
 
-				const [{ default: GraphCtor }, { default: SigmaCtor }] = await Promise.all([import('graphology'), import('sigma')]);
+				const [{ default: GraphCtor }, { default: SigmaCtor }, { default: EdgeDashedProgram }, { default: NodeHexagonProgram }] = await Promise.all([
+					import('graphology'),
+					import('sigma'),
+					import('../../src/lib/sigmaEdgeDashed'),
+					import('../../src/lib/sigmaNodeHexagon'),
+				]);
 				if (cancelled || !containerRef.current) return;
 
-				// Blank graph — search adds nodes onto the canvas.
+				// Blank graph — search / expand merge nodes onto the canvas (never replace).
 				const graph = new GraphCtor({ type: 'undirected', multi: false, allowSelfLoops: false });
 				// Reset label hit targets each paint cycle (before labels layer draws).
 				labelHitBoxesRef.current = [];
-				const fixedSize = staticNodeSize();
 				const sigma = new SigmaCtor(graph, containerRef.current, {
 					allowInvalidContainer: true,
 					renderLabels: true,
+					// Required for clickEdge / enterEdge (connection lines are pickable).
+					enableEdgeEvents: true,
 					// Screen-pixel sizes: scaleSize(s) = s / zoomFn(ratio) [* positions term].
 					// Linear zoomFn + 'screen' => rendered radius scales exactly with zoom.
 					itemSizesReference: 'screen',
 					zoomToSizeRatioFunction: (ratio) => ratio,
-					// Clamp every node to STATIC_NODE_SIZE on each indexation (overrides any
-					// stale size/baseSize and ignores degree/weight in the data path).
 					nodeReducer: (_id, attrs) => ({
 						...attrs,
-						size: fixedSize,
-						baseSize: fixedSize,
+						type: attrs.type === 'hexagon' || attrs.nodeType === 'firm' ? 'hexagon' : 'circle',
+						zIndex: Math.max(2, Number(attrs.zIndex) || 0),
 					}),
 					// Labels use fixed CSS px via drawLabelAbove; keep threshold low so they stay on.
 					labelRenderedSizeThreshold: 0,
@@ -1458,25 +2202,48 @@ export default function GlobalGraphPage() {
 						drawLabelAbove(context, data as any, settings as any, { hover: false, recordHit: true });
 					},
 					defaultDrawNodeHover: (context, data, settings) => {
-						// Hover disc uses the same fixed radius (ignore any reducer-stale attr).
-						const size = fixedSize;
+						// /graph selection: outer halo + cyan ring (does not change fill).
+						const size = Number((data as any).size) || 11;
 						const x = Number((data as any).x) || 0;
 						const y = Number((data as any).y) || 0;
-						context.fillStyle = String((data as any).color || '#f8fafc');
-						context.beginPath();
-						context.arc(x, y, size + 2, 0, Math.PI * 2);
-						context.closePath();
-						context.fill();
-						context.fillStyle = 'rgba(15,23,42,0.35)';
-						context.beginPath();
-						context.arc(x, y, Math.max(1.5, size * 0.45), 0, Math.PI * 2);
-						context.closePath();
-						context.fill();
+						const selected = Boolean((data as any).highlighted);
+
+						if (selected) {
+							context.beginPath();
+							context.arc(x, y, size + 10, 0, Math.PI * 2);
+							context.closePath();
+							context.fillStyle = 'rgba(34, 211, 238, 0.16)';
+							context.fill();
+
+							context.beginPath();
+							context.arc(x, y, size + 5, 0, Math.PI * 2);
+							context.closePath();
+							context.lineWidth = 2.75;
+							context.strokeStyle = '#22d3ee';
+							context.stroke();
+						} else {
+							// Hover-only: thin ring
+							context.beginPath();
+							context.arc(x, y, size + 3.5, 0, Math.PI * 2);
+							context.closePath();
+							context.lineWidth = 2;
+							context.strokeStyle = 'rgba(34, 211, 238, 0.85)';
+							context.stroke();
+						}
+
 						drawLabelAbove(context, data as any, settings as any, { hover: true, recordHit: true });
 					},
-					defaultEdgeColor: 'rgba(100,116,139,0.03)',
+					defaultEdgeColor: 'rgba(59,130,246,0.55)',
 					defaultEdgeType: 'line',
-					defaultNodeColor: '#22d3ee',
+					defaultNodeType: 'circle',
+					// Firms = hexagon, people = circle; previous edges = dashed program.
+					nodeProgramClasses: {
+						hexagon: NodeHexagonProgram,
+					},
+					edgeProgramClasses: {
+						dashed: EdgeDashedProgram,
+					},
+					defaultNodeColor: INDIVIDUAL_NODE_COLOR,
 					minCameraRatio: 0.004,
 					maxCameraRatio: 40,
 					zIndex: true,
@@ -1484,16 +2251,17 @@ export default function GlobalGraphPage() {
 				// Re-assert after construct — some Sigma paths re-merge defaults once.
 				sigma.setSetting('itemSizesReference', 'screen');
 				sigma.setSetting('zoomToSizeRatioFunction', (ratio) => ratio);
+				sigma.setSetting('enableEdgeEvents', true);
 				sigma.setSetting('nodeReducer', (_id, attrs) => ({
 					...attrs,
-					size: fixedSize,
-					baseSize: fixedSize,
 					// Keep every node above every edge in the zIndex-enabled programs.
 					zIndex: Math.max(2, Number(attrs.zIndex) || 0),
 				}));
 				sigma.setSetting('edgeReducer', (_id, attrs) => ({
 					...attrs,
 					// Edges always stay under the node layer (never compete with disks).
+					// Keep authored size; only floor slightly for picking when visible.
+					size: attrs.hidden ? 0 : Math.max(Number(attrs.size) || 0.5, 0.9),
 					zIndex: Math.min(-1, Number(attrs.zIndex) || -1),
 				}));
 
@@ -1528,6 +2296,49 @@ export default function GlobalGraphPage() {
 					labelHitBoxesRef.current = [];
 				};
 				sigma.on('beforeRender', clearLabelHits);
+
+				// Selection rings when node is not under the hover layer (/graph halo + cyan ring).
+				sigma.on('afterRender', () => {
+					const host = containerRef.current;
+					if (!host) return;
+					const canvas = host.querySelector('canvas.sigma-hovers') as HTMLCanvasElement | null;
+					if (!canvas) return;
+					const ctx = canvas.getContext('2d');
+					if (!ctx) return;
+
+					const selected = selectedIdsRef.current;
+					const focusId = focusedIdRef.current;
+					const hoverId = hoverIdRef.current;
+
+					const toDraw = new Set<string>();
+					for (const id of selected) toDraw.add(id);
+					if (focusId) toDraw.add(focusId);
+					// Hover path already draws the full selection treatment in defaultDrawNodeHover.
+					if (hoverId) toDraw.delete(hoverId);
+
+					for (const id of toDraw) {
+						if (!graph.hasNode(id)) continue;
+						const display = sigma.getNodeDisplayData(id);
+						if (!display) continue;
+
+						const size = Number(display.size) || 11;
+						const x = Number(display.x) || 0;
+						const y = Number(display.y) || 0;
+
+						ctx.beginPath();
+						ctx.arc(x, y, size + 10, 0, Math.PI * 2);
+						ctx.closePath();
+						ctx.fillStyle = 'rgba(34, 211, 238, 0.16)';
+						ctx.fill();
+
+						ctx.beginPath();
+						ctx.arc(x, y, size + 5, 0, Math.PI * 2);
+						ctx.closePath();
+						ctx.lineWidth = 2.75;
+						ctx.strokeStyle = '#22d3ee';
+						ctx.stroke();
+					}
+				});
 
 				let lastLodMode: string | null = null;
 				const updateLod = () => {
@@ -1593,12 +2404,23 @@ export default function GlobalGraphPage() {
 					applyHighlightRef.current();
 					updateLod();
 				});
+				// Click any visible person/firm (or its label) to focus + expand in place (/graph parity).
+				// Person → firm spokes; firm → employees/owners + previous. Never replaces existing nodes.
 				const activateNode = (node: string, original?: MouseEvent | TouchEvent | null, openEgo = false) => {
-					addNodeToCanvasRef.current(node, { withNeighbors: true });
+					void original;
+					const meta = nodeIndexRef.current.get(node);
+					const t = meta?.type || (graph.hasNode(node) ? String(graph.getNodeAttribute(node, 'nodeType') || '') : '');
+					const withNeighbors = t === 'firm' ? 'all' : 'firms';
+					// Ensure node is on canvas (out-of-catalog neighbors get addIfMissing via focus).
+					if (!graph.hasNode(node) && meta) {
+						addNodeToCanvasRef.current(node, { withNeighbors });
+					}
 					focusNodeRef.current(node, {
 						openEgo,
 						animate: true,
-						addIfMissing: false,
+						addIfMissing: true,
+						withNeighbors,
+						fetchExpand: true,
 					});
 				};
 
@@ -1606,23 +2428,45 @@ export default function GlobalGraphPage() {
 					event.original.preventDefault();
 					event.original.stopPropagation();
 					const oe = event.original as MouseEvent;
-					activateNode(node, oe, Boolean(oe.altKey || oe.metaKey));
+					activateNode(node, oe, Boolean(oe.metaKey));
 				});
 				sigma.on('doubleClickNode', ({ node, event }) => {
 					event.preventSigmaDefault();
-					focusNodeRef.current(node, { openEgo: true, addIfMissing: false });
+					focusNodeRef.current(node, { openEgo: true, addIfMissing: true, fetchExpand: true });
+				});
+				// Click a connection line → focus the other endpoint (or the non-focused end).
+				sigma.on('clickEdge', ({ edge, event }) => {
+					event.original.preventDefault();
+					event.original.stopPropagation();
+					const oe = event.original as MouseEvent;
+					const ends = graph.extremities(edge);
+					if (!ends || ends.length < 2) return;
+					const [a, b] = ends;
+					const focusId = focusedIdRef.current;
+					const target =
+						focusId && (a === focusId || b === focusId) ?
+							a === focusId ?
+								b
+							:	a
+						: hoverIdRef.current === a ? b
+						: hoverIdRef.current === b ? a
+						: a;
+					activateNode(target, oe, Boolean(oe.metaKey));
 				});
 				// Label chips sit on the labels canvas (not the WebGL node picker).
 				// clickStage fires when the node pick buffer misses — still select via label hit-test.
+				// Blank stage click: collapse the detail drawer (parity with /graph canvas bg click).
 				sigma.on('clickStage', ({ event }) => {
 					const oe = event.original as MouseEvent;
 					const labelNode = hitTestLabel(oe.clientX, oe.clientY, containerRef.current);
 					if (labelNode && graph.hasNode(labelNode)) {
 						oe.preventDefault();
 						oe.stopPropagation();
-						activateNode(labelNode, oe, Boolean(oe.altKey || oe.metaKey));
+						activateNode(labelNode, oe, Boolean(oe.metaKey));
+						return;
 					}
-					// else: keep multi-select — Clear Highlight only
+					// Empty map space → close side panel; keep nodes/selection on canvas.
+					setDrawerOpen(false);
 				});
 
 				// Pointer over a label chip (above the disk) — cursor + hover parity.
@@ -1680,75 +2524,13 @@ export default function GlobalGraphPage() {
 		};
 	}, [destroySigma]);
 
-	// Type filter only affects what search may add; wipe canvas when filter changes
-	// so hidden-type nodes don't linger.
-	useEffect(() => {
-		if (status !== 'ready') return;
-		const graph = graphRef.current;
-		if (!graph || filter === 'all') return;
-		const drop: string[] = [];
-		graph.forEachNode((id, attrs) => {
-			if (String(attrs.nodeType) !== filter) drop.push(id);
-		});
-		if (!drop.length) return;
-		for (const id of drop) {
-			try {
-				graph.dropNode(id);
-			} catch {
-				// ignore
-			}
-			visibleIdsRef.current.delete(id);
-		}
-		for (const id of drop) selectedIdsRef.current.delete(id);
-		setSelectionCount(selectedIdsRef.current.size);
-		if (focusedIdRef.current && drop.includes(focusedIdRef.current)) {
-			pinnedIdRef.current = null;
-			focusedIdRef.current = null;
-			const remaining = [...selectedIdsRef.current];
-			const next = remaining.length ? remaining[remaining.length - 1] : null;
-			if (next && graph.hasNode(next)) {
-				const attrs = graph.getNodeAttributes(next);
-				focusedIdRef.current = next;
-				pinnedIdRef.current = next;
-				setFocus({
-					id: next,
-					label: String(attrs.label || next),
-					type: String(attrs.nodeType || 'unknown'),
-					degree: Number(attrs.degree) || 0,
-					cluster: typeof attrs.cluster === 'number' ? attrs.cluster : undefined,
-					region: attrs.region ? String(attrs.region) : undefined,
-					regionGroup: attrs.regionGroup ? String(attrs.regionGroup) : undefined,
-					brokerCount: Number(attrs.brokerCount) || 0,
-					firmLinkCount: Number(attrs.firmLinkCount) || 0,
-					weight: Number(attrs.weight) || Number(attrs.degree) || 0,
-					neighborCount: graph.degree(next),
-				});
-				const t =
-					attrs.nodeType === 'firm' ? 'firm'
-					: attrs.nodeType === 'individual' ? 'individual'
-					: null;
-				if (t && /^\d+$/.test(next)) syncGlobalRoute(t, next);
-				else syncGlobalRoute(null, null);
-			} else {
-				setFocus(null);
-				syncGlobalRoute(null, null);
-			}
-		}
-		setVisibleCount(visibleIdsRef.current.size);
-		applyHighlight();
-		sigmaRef.current?.refresh();
-	}, [filter, status, applyHighlight, syncGlobalRoute]);
-
-	useEffect(() => {
-		if (status !== 'ready') return;
-		applyEdgeTypeFilter();
-	}, [edgeTypesEnabled, status, applyEdgeTypeFilter]);
-
-	// Deep-link: /global-graph/{type}/{crd} → add + focus when catalog is ready.
+	// Deep-link: /chart/{type}/{crd} → add + focus when catalog is ready.
+	// CRDs missing from the precomputed layout (inactive / out-of-sample) are
+	// seeded on demand via /api/key + /api/finra/expand — same data as dashboard.
 	useEffect(() => {
 		if (status !== 'ready') return;
 		if (!routeParams) {
-			// Bare /global-graph — do not force-clear an in-session focus unless URL was cleared intentionally.
+			// Bare /chart — do not force-clear an in-session focus unless URL was cleared intentionally.
 			routeBootstrapDoneRef.current = true;
 			return;
 		}
@@ -1759,13 +2541,136 @@ export default function GlobalGraphPage() {
 			return;
 		}
 
-		const tryApply = (attempt: number): void => {
+		let cancelled = false;
+
+		const seedMissingFromApis = async (type: 'firm' | 'individual', crd: string): Promise<LayoutNode | null> => {
+			const size = dynamicNodeSize(1, type);
+			const stub: LayoutNode = {
+				id: crd,
+				type,
+				label: crd,
+				degree: 1,
+				weight: 1,
+				size,
+				color: nodeDisplayColor(type, false),
+				x: (Math.random() - 0.5) * 8,
+				y: (Math.random() - 0.5) * 8,
+			};
+			nodeIndexRef.current.set(crd, stub);
+
+			// Hydrate label + inactive from the same key endpoint dashboard uses.
+			try {
+				const requestKey = `finra:${type}:${crd}`;
+				const res = await fetch(`/api/key?name=${encodeURIComponent(requestKey)}`);
+				if (res.ok) {
+					const data = await res.json();
+					const bundle = data?.bundle && typeof data.bundle === 'object' ? data.bundle : null;
+					const orphan =
+						bundle?.orphan && typeof bundle.orphan === 'object' ? bundle.orphan
+						: data?.orphan && typeof data.orphan === 'object' ? data.orphan
+						: null;
+					const found = Boolean(bundle?.sources?.finra?.found || bundle?.sources?.sec?.found || orphan);
+					if (found) {
+						const detailJson =
+							typeof data?.rawPayload === 'string' ? data.rawPayload
+							: bundle ? JSON.stringify(bundle)
+							: '';
+						let label = stub.label;
+						try {
+							const root = detailJson ? JSON.parse(detailJson) : bundle;
+							const bi =
+								root?.sources?.finra?.payload?.basicInformation || root?.sources?.sec?.payload?.basicInformation || root?.basicInformation || orphan?.basicInformation || {};
+							const firmName = typeof bi.firmName === 'string' ? bi.firmName.trim() : '';
+							const person = [bi.firstName, bi.middleName, bi.lastName].filter((p) => typeof p === 'string' && p.trim()).join(' ');
+							if (firmName) label = firmName;
+							else if (person) label = person;
+							else if (typeof orphan?.name === 'string' && orphan.name.trim()) label = orphan.name.trim();
+						} catch {
+							// keep stub label
+						}
+						// Soft inactive heuristic from raw text (expand will refine).
+						const blob = `${detailJson}`.toLowerCase();
+						const inactive = Boolean(orphan) || (/inactive|terminated|not in scope|notinscope/.test(blob) && !/\bactive\b/.test(blob.replace(/inactive/g, '')));
+						stub.label = label || crd;
+						stub.inactive = inactive;
+						stub.color = nodeDisplayColor(type, inactive);
+						nodeIndexRef.current.set(crd, stub);
+					}
+				}
+			} catch {
+				// keep stub; expand may still work
+			}
+
+			// Prefetch direct neighbors (hops=1) into the runtime edge index so
+			// firm deep-links can paint current + previous spokes on first focus.
+			try {
+				const fetchId = `${type}:${crd}`;
+				const exp = await fetch(`/api/finra/expand/${encodeURIComponent(fetchId)}?hops=1`);
+				if (exp.ok) {
+					const data = await exp.json();
+					for (const n of data?.nodes || []) {
+						const nCrd = String(
+							n.crd ||
+								String(n.id || '')
+									.split(':')
+									.pop() ||
+								'',
+						).trim();
+						if (!nCrd) continue;
+						const nType: 'firm' | 'individual' = n.group === 'firm' || n.type === 'firm' ? 'firm' : 'individual';
+						const inactive = Boolean(n.inactive);
+						if (nCrd === crd) {
+							if (n.label) stub.label = n.label;
+							if (inactive) {
+								stub.inactive = true;
+								stub.color = INACTIVE_NODE_COLOR;
+							}
+							if (typeof n.degree === 'number') stub.degree = n.degree;
+							nodeIndexRef.current.set(crd, stub);
+							continue;
+						}
+						if (!nodeIndexRef.current.has(nCrd)) {
+							nodeIndexRef.current.set(nCrd, {
+								id: nCrd,
+								type: nType,
+								label: n.label || nCrd,
+								degree: Number(n.degree) || 1,
+								weight: 1,
+								size: dynamicNodeSize(1, nType),
+								color: nodeDisplayColor(nType, inactive),
+								inactive,
+								x: stub.x + (Math.random() - 0.5) * 12,
+								y: stub.y + (Math.random() - 0.5) * 12,
+							});
+						}
+					}
+					for (const e of data?.links || []) {
+						const sCrd = String(e.source).split(':').pop() || '';
+						const tCrd = String(e.target).split(':').pop() || '';
+						if (!sCrd || !tCrd) continue;
+						// Only index direct spokes involving the deep-linked CRD.
+						if (sCrd !== crd && tCrd !== crd) continue;
+						const edgeObj = makeEmploymentEdge(sCrd, tCrd, String(e.relationship || e.edgeType || 'employment'), e.isCurrent, Number(e.weight) || 1);
+						upsertIndexedEdge(edgesByNodeRef.current, edgeObj);
+					}
+				}
+			} catch {
+				// focusNode will retry expand
+			}
+
+			return stub;
+		};
+
+		const tryApply = async (attempt: number): Promise<void> => {
+			if (cancelled) return;
 			const graph = graphRef.current;
 			const sigma = sigmaRef.current;
 			const payload = layoutRef.current;
 			if (!graph || !sigma || !payload) {
 				if (attempt < 20) {
-					window.setTimeout(() => tryApply(attempt + 1), 50);
+					window.setTimeout(() => {
+						void tryApply(attempt + 1);
+					}, 50);
 				} else {
 					setErrorMessage(`Map not ready for CRD ${routeParams.crd}`);
 					routeBootstrapDoneRef.current = true;
@@ -1773,13 +2678,64 @@ export default function GlobalGraphPage() {
 				return;
 			}
 
-			const meta = nodeIndexRef.current.get(routeParams.crd);
+			let meta = nodeIndexRef.current.get(routeParams.crd);
 			if (!meta) {
-				// Layout is a sampled catalog (smoke/full). Fall back: still try id, else show error.
-				setErrorMessage(`CRD ${routeParams.crd} is not in the global layout catalog`);
-				routeBootstrapDoneRef.current = true;
-				return;
+				// Not in precomputed catalog — seed from dashboard APIs (inactive OK).
+				meta = (await seedMissingFromApis(routeParams.type, routeParams.crd)) || undefined;
+				if (cancelled) return;
+				if (!meta) {
+					setErrorMessage(`CRD ${routeParams.crd} could not be loaded`);
+					routeBootstrapDoneRef.current = true;
+					return;
+				}
+			} else {
+				// In catalog: still hydrate expand so previous employers get isCurrent=false
+				// (layout only stores generic "employment" spokes).
+				try {
+					const fetchId = `${routeParams.type}:${routeParams.crd}`;
+					const exp = await fetch(`/api/finra/expand/${encodeURIComponent(fetchId)}?hops=1`);
+					if (exp.ok) {
+						const data = await exp.json();
+						const crd = routeParams.crd;
+						for (const n of data?.nodes || []) {
+							const nCrd = String(
+								n.crd ||
+									String(n.id || '')
+										.split(':')
+										.pop() ||
+									'',
+							).trim();
+							if (!nCrd || nCrd === crd) continue;
+							const nType: 'firm' | 'individual' = n.group === 'firm' || n.type === 'firm' ? 'firm' : 'individual';
+							const inactive = Boolean(n.inactive);
+							if (!nodeIndexRef.current.has(nCrd)) {
+								nodeIndexRef.current.set(nCrd, {
+									id: nCrd,
+									type: nType,
+									label: n.label || nCrd,
+									degree: Number(n.degree) || 1,
+									weight: 1,
+									size: dynamicNodeSize(1, nType),
+									color: nodeDisplayColor(nType, inactive),
+									inactive,
+									x: (meta.x || 0) + (Math.random() - 0.5) * 12,
+									y: (meta.y || 0) + (Math.random() - 0.5) * 12,
+								});
+							}
+						}
+						for (const e of data?.links || []) {
+							const sCrd = String(e.source).split(':').pop() || '';
+							const tCrd = String(e.target).split(':').pop() || '';
+							if (!sCrd || !tCrd) continue;
+							if (sCrd !== crd && tCrd !== crd) continue;
+							upsertIndexedEdge(edgesByNodeRef.current, makeEmploymentEdge(sCrd, tCrd, String(e.relationship || e.edgeType || 'employment'), e.isCurrent, Number(e.weight) || 1));
+						}
+					}
+				} catch {
+					// focusNode expand still runs
+				}
 			}
+			if (cancelled) return;
 
 			const canonicalType =
 				meta.type === 'firm' ? 'firm'
@@ -1789,15 +2745,22 @@ export default function GlobalGraphPage() {
 			// Seed URL bookkeeping before focus so shallow replace does not re-enter as "new".
 			lastRouteKeyRef.current = `${canonicalType}:${meta.id}`;
 
+			// Direct URL: firm → reveal all direct connections (current + previous);
+			// individual → attached firms (existing person policy).
+			const deepLinkNeighbors = canonicalType === 'firm' ? 'all' : 'firms';
 			const ok = focusNodeRef.current(meta.id, {
 				animate: attempt === 0 && !routeBootstrapDoneRef.current,
 				addIfMissing: true,
 				syncUrl: false,
+				withNeighbors: deepLinkNeighbors,
+				fetchExpand: true,
 			});
 
 			if (!ok) {
 				if (attempt < 12) {
-					window.setTimeout(() => tryApply(attempt + 1), 80);
+					window.setTimeout(() => {
+						void tryApply(attempt + 1);
+					}, 80);
 					return;
 				}
 				setErrorMessage(`Could not open ${routeParams.type} ${routeParams.crd} on the map`);
@@ -1817,35 +2780,33 @@ export default function GlobalGraphPage() {
 			routeBootstrapDoneRef.current = true;
 		};
 
-		tryApply(0);
+		void tryApply(0);
+		return () => {
+			cancelled = true;
+		};
 	}, [status, routeParams, syncGlobalRoute]);
 
-	const findHits = useCallback(
-		(qRaw: string, limit = 12): LayoutNode[] => {
-			const payload = layoutRef.current;
-			const q = qRaw.trim().toLowerCase();
-			if (!payload || !q) return [];
-			const allow = (t: string) => filter === 'all' || t === filter;
-			const scored: { n: LayoutNode; s: number }[] = [];
-			for (const n of payload.nodes) {
-				if (!allow(n.type)) continue;
-				const id = n.id.toLowerCase();
-				const label = (n.label || '').toLowerCase();
-				let s = -1;
-				if (id === q) s = 1000;
-				else if (id.startsWith(q)) s = 800;
-				else if (label.startsWith(q)) s = 700;
-				else if (id.includes(q)) s = 500;
-				else if (label.includes(q)) s = 400;
-				if (s < 0) continue;
-				s += Math.min(50, Math.log2(1 + (n.weight || n.degree || 0)) * 4);
-				scored.push({ n, s });
-			}
-			scored.sort((a, b) => b.s - a.s || (b.n.weight || 0) - (a.n.weight || 0));
-			return scored.slice(0, limit).map((x) => x.n);
-		},
-		[filter],
-	);
+	const findHits = useCallback((qRaw: string, limit = 12): LayoutNode[] => {
+		const payload = layoutRef.current;
+		const q = qRaw.trim().toLowerCase();
+		if (!payload || !q) return [];
+		const scored: { n: LayoutNode; s: number }[] = [];
+		for (const n of payload.nodes) {
+			const id = n.id.toLowerCase();
+			const label = (n.label || '').toLowerCase();
+			let s = -1;
+			if (id === q) s = 1000;
+			else if (id.startsWith(q)) s = 800;
+			else if (label.startsWith(q)) s = 700;
+			else if (id.includes(q)) s = 500;
+			else if (label.includes(q)) s = 400;
+			if (s < 0) continue;
+			s += Math.min(50, Math.log2(1 + (n.weight || n.degree || 0)) * 4);
+			scored.push({ n, s });
+		}
+		scored.sort((a, b) => b.s - a.s || (b.n.weight || 0) - (a.n.weight || 0));
+		return scored.slice(0, limit).map((x) => x.n);
+	}, []);
 
 	const findHit = useCallback(
 		(qRaw: string) => {
@@ -1855,40 +2816,103 @@ export default function GlobalGraphPage() {
 		[findHits],
 	);
 
-	useEffect(() => {
-		const q = query.trim();
-		if (q.length < 2) {
-			setSearchHits([]);
-			return;
-		}
-		const t = window.setTimeout(() => setSearchHits(findHits(q, 10)), 120);
-		return () => window.clearTimeout(t);
-	}, [query, findHits]);
+	const upsertSearchHit = useCallback((hit: LocalNameSearchResult): string | null => {
+		const crd = String(hit.crd || '').trim();
+		if (!crd) return null;
+		const type: 'firm' | 'individual' = hit.type === 'firm' ? 'firm' : 'individual';
 
-	const runFocusSearch = useCallback(() => {
-		const hit = findHit(query);
-		if (!hit) {
-			setErrorMessage(`No node matching \u201c${query.trim()}\u201d in layout`);
-			return;
+		if (!nodeIndexRef.current.has(crd)) {
+			const size = dynamicNodeSize(1, type);
+			nodeIndexRef.current.set(crd, {
+				id: crd,
+				type,
+				label: hit.name || crd,
+				degree: 1,
+				weight: 1,
+				size,
+				color: nodeDisplayColor(type, false),
+				x: (Math.random() - 0.5) * 10,
+				y: (Math.random() - 0.5) * 10,
+			});
+		} else {
+			const existing = nodeIndexRef.current.get(crd)!;
+			if (hit.name && (!existing.label || existing.label === crd)) {
+				existing.label = hit.name;
+			}
+			if (existing.type === 'unknown') existing.type = type;
 		}
-		const ok = focusNode(hit.id, { animate: true, addIfMissing: true });
-		if (!ok) {
-			setErrorMessage(`Could not add \u201c${hit.label}\u201d — try Show: All types`);
-			return;
-		}
-		setSearchHits([]);
+		return crd;
+	}, []);
+
+	const runFocusSearch = useCallback(async () => {
+		const q = query.trim();
+		if (!q) return;
+		setSearchLoading(true);
 		setErrorMessage(null);
-	}, [findHit, focusNode, query]);
+		setSearchBanner(null);
+		const before = visibleIdsRef.current.size;
+
+		try {
+			// Same fetch path as dashboard bottom Redis Search (`useLocalNameSearch`).
+			setNameSearchQuery(q);
+			const matches = await searchRedisNames(q);
+
+			if (!matches.length) {
+				setErrorMessage(`No matches found for "${q}"`);
+				setSearchLoading(false);
+				return;
+			}
+
+			// Single hit → focus as hub (dashboard opens one record).
+			if (matches.length === 1) {
+				const hit = matches[0];
+				const crd = upsertSearchHit(hit);
+				if (!crd) {
+					setErrorMessage(`Could not add “${hit.name || q}” to graph`);
+					setSearchLoading(false);
+					return;
+				}
+				const ok = focusNode(crd, { animate: true, addIfMissing: true });
+				if (!ok) setErrorMessage(`Could not add “${hit.name || crd}” to graph`);
+				else {
+					const added = Math.max(0, visibleIdsRef.current.size - before);
+					setSearchBanner({ query: q, count: Math.max(1, added) });
+				}
+				setSearchLoading(false);
+				return;
+			}
+
+			// Multi-match → add every hit like dashboard lists all Redis results
+			// (cap so the canvas stays usable).
+			const capped = matches.slice(0, 100);
+			let focused: string | null = null;
+			let addedCount = 0;
+			for (const hit of capped) {
+				const crd = upsertSearchHit(hit);
+				if (!crd) continue;
+				const wasVisible = visibleIdsRef.current.has(crd);
+				const ok = addNodeToCanvas(crd, { withNeighbors: false });
+				if (ok && !wasVisible) addedCount++;
+				if (!focused) focused = crd;
+			}
+			if (focused) {
+				focusNode(focused, { animate: true, addIfMissing: false });
+				setSearchBanner({ query: q, count: Math.max(addedCount, capped.length) });
+			} else {
+				setErrorMessage(`No graphable matches for "${q}"`);
+			}
+		} catch (err) {
+			setErrorMessage(`Search error: ${err instanceof Error ? err.message : String(err)}`);
+		}
+		setSearchLoading(false);
+	}, [query, focusNode, searchRedisNames, setNameSearchQuery, upsertSearchHit, addNodeToCanvas]);
 
 	const runOpenEgo = useCallback(() => {
-		const hit = findHit(query) || (focus ? layoutRef.current?.nodes.find((n) => n.id === focus.id) : null);
-		if (!hit) {
-			setErrorMessage('Select or search a node first');
-			return;
+		if (focus) {
+			const t = focus.type === 'firm' ? 'firm' : 'individual';
+			void router.push(`/graph/${t}/${focus.id}`);
 		}
-		const t = hit.type === 'firm' ? 'firm' : 'individual';
-		void router.push(`/graph/${t}/${hit.id}`);
-	}, [findHit, focus, query, router]);
+	}, [focus, router]);
 
 	const loadPanelForFocus = useCallback(
 		(nodeId: string, nodeType: string, label: string) => {
@@ -2062,29 +3086,17 @@ export default function GlobalGraphPage() {
 		lastLoggedFocusIdRef.current = null;
 		setDrawerOpen(false);
 		setSearchBanner(null);
+		setSearchBanner(null);
 		setQuery('');
-		setSearchHits([]);
 		setErrorMessage(null);
 	}, [clearCanvas, clearSharedCache]);
 
 	const handleSearchSubmit = useCallback(
-		(e?: { preventDefault?: () => void }) => {
+		async (e?: { preventDefault?: () => void }) => {
 			e?.preventDefault?.();
-			const q = query.trim();
-			if (!q) return;
-			setSearchLoading(true);
-			const before = visibleIdsRef.current.size;
-			runFocusSearch();
-			// Banner after a tick so canvas counts update.
-			window.setTimeout(() => {
-				const added = Math.max(0, visibleIdsRef.current.size - before);
-				if (added > 0 || focusedIdRef.current) {
-					setSearchBanner({ query: q, count: Math.max(1, added) });
-				}
-				setSearchLoading(false);
-			}, 80);
+			await runFocusSearch();
 		},
-		[query, runFocusSearch],
+		[runFocusSearch],
 	);
 
 	const dashboardHref = useMemo(() => {
@@ -2099,11 +3111,53 @@ export default function GlobalGraphPage() {
 	const panelActiveKey = panelSnapshot?.resolvedKey || panelSnapshot?.key || '';
 	const panelDetailJson = panelSnapshot?.detailJson ?? null;
 	const panelLoading = Boolean(panelSnapshot?.loading);
-	const panelTitle = focus?.label || 'Details';
 
-	const toggleEdgeType = (key: EdgeTypeKey) => {
-		setEdgeTypesEnabled((prev) => ({ ...prev, [key]: !prev[key] }));
-	};
+	// Match /graph drawer: title + FINRA/IA role chips from the loaded record payload
+	// (not graphology degree / region metadata).
+	const panelTitle = useMemo(() => {
+		const fallback = focus?.label || 'Details';
+		if (!panelDetailJson) return fallback;
+		try {
+			const payload = readSnapshotPayload(panelDetailJson);
+			const parsed = parseCrdKey(panelActiveKey);
+			const type = (parsed?.type as 'individual' | 'firm') || (focus?.type === 'firm' ? 'firm' : 'individual');
+			const crd = parsed?.crd || (focus && /^\d+$/.test(focus.id) ? focus.id : '') || '';
+			const finra = getContentBlock(payload, 'finra', type);
+			const sec = getContentBlock(payload, 'sec', type);
+			const primaryContent = (finra?.basicInformation ? finra : sec) as Record<string, any> | null;
+			const nameInfo = extractNamesFromPayload(primaryContent ?? payload, type);
+			const resolved = resolveEntityDisplayName({
+				payload,
+				type,
+				crd,
+				candidates: [nameInfo.primary, focus?.label],
+			});
+			const title = resolved || fallback || crd || panelActiveKey;
+			if (type === 'individual' && title && title !== crd) return toProperCaseName(title);
+			return title;
+		} catch {
+			return fallback;
+		}
+	}, [panelDetailJson, panelActiveKey, focus]);
+
+	const panelRoleRows = useMemo(() => {
+		if (!panelDetailJson) return [] as string[];
+		try {
+			const payload = readSnapshotPayload(panelDetailJson);
+			const parsed = parseCrdKey(panelActiveKey);
+			const type = (parsed?.type as 'individual' | 'firm') || (focus?.type === 'firm' ? 'firm' : 'individual');
+			const finra = getContentBlock(payload, 'finra', type);
+			const sec = getContentBlock(payload, 'sec', type);
+			const rows: string[] = [];
+			if (toArray(finra?.currentEmployments).length > 0) rows.push('Broker Regulated by FINRA');
+			if (toArray(finra?.currentIAEmployments).length > 0 || toArray(sec?.currentIAEmployments).length > 0) {
+				rows.push('Investment Adviser');
+			}
+			return rows;
+		} catch {
+			return [];
+		}
+	}, [panelDetailJson, panelActiveKey, focus?.type]);
 
 	return (
 		<>
@@ -2142,36 +3196,6 @@ export default function GlobalGraphPage() {
 									➤
 								</button>
 							</form>
-							{status === 'ready' && searchHits.length > 0 && (
-								<ul className='gg-suggest-dropdown'>
-									{searchHits.map((h) => (
-										<li key={h.id}>
-											<button
-												type='button'
-												className='gg-suggest-item'
-												onClick={() => {
-													setQuery(h.label || h.id);
-													const before = visibleIdsRef.current.size;
-													const ok = focusNode(h.id, { animate: true, addIfMissing: true });
-													if (!ok) {
-														setErrorMessage(`Could not add “${h.label}”`);
-														return;
-													}
-													setSearchHits([]);
-													setErrorMessage(null);
-													const added = Math.max(1, visibleIdsRef.current.size - before);
-													setSearchBanner({ query: h.label || h.id, count: added });
-												}}>
-												<span className='gg-suggest-label'>{h.label}</span>
-												<span className='gg-suggest-meta'>
-													{h.type} · {h.id}
-													{h.regionGroup ? ` · ${h.regionGroup}` : ''}
-												</span>
-											</button>
-										</li>
-									))}
-								</ul>
-							)}
 						</div>
 
 						<div className={`fg-focus-readout${focus || hover ? ' fg-focus-readout--visible' : ''}`}>
@@ -2189,16 +3213,6 @@ export default function GlobalGraphPage() {
 						</div>
 
 						<div className='fg-header-right-controls'>
-							<select
-								className='fg-type-filter'
-								value={filter}
-								onChange={(e) => setFilter(e.target.value as typeof filter)}
-								aria-label='Filter node types'
-								disabled={status !== 'ready' && status !== 'loading'}>
-								<option value='all'>All types</option>
-								<option value='firm'>Firms only</option>
-								<option value='individual'>Individuals only</option>
-							</select>
 							<Link
 								href={dashboardHref}
 								className='fg-btn'
@@ -2260,29 +3274,6 @@ export default function GlobalGraphPage() {
 						className='gg-webgl-host'
 						aria-label='Global network WebGL canvas'
 					/>
-
-					{status === 'ready' && (
-						<div
-							className='gg-edge-strip'
-							aria-label='Edge type filters'>
-							<span className='gg-edge-strip-label'>Edges</span>
-							{availableEdgeTypes.map((meta) => (
-								<label
-									key={meta.key}
-									className={`gg-chip ${edgeTypesEnabled[meta.key] ? 'on' : ''}`}>
-									<input
-										type='checkbox'
-										checked={edgeTypesEnabled[meta.key]}
-										onChange={() => toggleEdgeType(meta.key)}
-									/>
-									{meta.label}
-								</label>
-							))}
-							<span className='gg-lod-chip'>
-								{visibleCount.toLocaleString()} on map · {lodHint}
-							</span>
-						</div>
-					)}
 				</main>
 
 				{(status === 'ready' || visibleCount > 0) && (
@@ -2372,57 +3363,32 @@ export default function GlobalGraphPage() {
 								✕
 							</button>
 							<h1>{panelTitle}</h1>
-							{focus && (
+							{panelRoleRows.length > 0 && (
 								<div className='role-rows'>
-									<div className='role-row'>
-										<span className='role-dot' />
-										{focus.type} · deg {focus.degree} · neighbors {focus.neighborCount}
-									</div>
-									{focus.regionGroup && (
-										<div className='role-row'>
+									{panelRoleRows.map((row) => (
+										<div
+											key={row}
+											className='role-row'>
 											<span className='role-dot' />
-											{focus.regionGroup}
-											{focus.region ? ` · ${focus.region}` : ''}
+											{row}
 										</div>
-									)}
+									))}
 								</div>
 							)}
 							{panelSnapshot?.error ?
 								<p className='fg-panel-error'>{panelSnapshot.error}</p>
 							:	null}
-							<div className='gg-drawer-links'>
-								{focus && (
-									<>
-										<button
-											type='button'
-											className='fg-btn'
-											onClick={() => {
-												const t = focus.type === 'firm' ? 'firm' : 'individual';
-												void router.push(`/graph/${t}/${focus.id}`);
-											}}>
-											Node Graph
-										</button>
-										<Link
-											href={dashboardHref}
-											className='fg-btn'>
-											Dashboard
-										</Link>
-									</>
-								)}
-							</div>
 						</div>
 
 						<div className='sidebar-content'>
+							{/* Same PanelHeader + StatusBox as /graph and the main dashboard. */}
 							<PanelHeader
 								activeKey={panelActiveKey}
 								payloads={[]}
 								detailJson={panelDetailJson}
 								onSelectKey={(key) => {
-									const parts = String(key || '').split(':');
-									const crd = parts[parts.length - 1];
-									if (crd && /^\d+$/.test(crd)) {
-										void focusNode(crd, { animate: true, addIfMissing: true });
-									}
+									// Connection / owner rows → focus+fetch on the map (person brings firms).
+									void activateKeyOnMap(key);
 								}}
 							/>
 							<StatusBox
@@ -2440,14 +3406,14 @@ export default function GlobalGraphPage() {
 								}}
 								onFocusSelectionLogEntry={(entry) => {
 									const crd = entry.crd || entry.id;
-									if (crd) void focusNode(crd, { animate: true, addIfMissing: true });
+									const type =
+										entry.type === 'firm' ? 'firm'
+										: entry.type === 'individual' ? 'individual'
+										: undefined;
+									if (crd) void activateKeyOnMap(entry.key || crd, type);
 								}}
 								onSelectKey={(key) => {
-									const parts = String(key || '').split(':');
-									const crd = parts[parts.length - 1];
-									if (crd && /^\d+$/.test(crd)) {
-										void focusNode(crd, { animate: true, addIfMissing: true });
-									}
+									void activateKeyOnMap(key);
 								}}
 							/>
 						</div>
@@ -2640,21 +3606,6 @@ export default function GlobalGraphPage() {
 					gap: 8px;
 					flex: 0 0 auto;
 				}
-				.fg-type-filter {
-					height: 34px;
-					padding: 0 8px;
-					border-radius: 5px;
-					border: 1px solid rgba(148, 163, 184, 0.28);
-					background: rgba(255, 255, 255, 0.03);
-					color: inherit;
-					font-size: 12px;
-					font-weight: 600;
-				}
-				.theme-light .fg-type-filter {
-					background: #ffffff;
-					border-color: rgba(15, 23, 42, 0.14);
-					color: #0f172a;
-				}
 				.fg-btn {
 					font: 600 13px/1 var(--font-sans, system-ui, -apple-system, sans-serif);
 					padding: 6px 14px;
@@ -2827,9 +3778,6 @@ export default function GlobalGraphPage() {
 						max-width: 180px;
 						flex-basis: 180px;
 					}
-					.fg-type-filter {
-						display: none;
-					}
 				}
 
 				.graph-main-canvas {
@@ -2912,62 +3860,6 @@ export default function GlobalGraphPage() {
 					overflow-x: auto;
 					color: #67e8f9;
 					text-align: left;
-				}
-				.gg-edge-strip {
-					position: absolute;
-					left: 12px;
-					top: 12px;
-					z-index: 6;
-					display: flex;
-					flex-wrap: wrap;
-					gap: 6px;
-					align-items: center;
-					max-width: min(720px, calc(100% - 24px));
-					padding: 6px 8px;
-					border-radius: 8px;
-					background: rgba(13, 19, 31, 0.82);
-					border: 1px solid rgba(255, 255, 255, 0.08);
-					backdrop-filter: blur(6px);
-				}
-				.theme-light .gg-edge-strip {
-					background: rgba(255, 255, 255, 0.9);
-					border-color: rgba(0, 0, 0, 0.08);
-				}
-				.gg-edge-strip-label {
-					font-size: 0.68rem;
-					color: #64748b;
-					text-transform: uppercase;
-					letter-spacing: 0.06em;
-					margin-right: 2px;
-				}
-				.gg-chip {
-					display: inline-flex;
-					align-items: center;
-					gap: 5px;
-					font-size: 0.72rem;
-					color: #94a3b8;
-					border: 1px solid rgba(148, 163, 184, 0.2);
-					border-radius: 999px;
-					padding: 2px 8px;
-					cursor: pointer;
-					user-select: none;
-				}
-				.gg-chip.on {
-					color: #e2e8f0;
-					border-color: rgba(34, 211, 238, 0.45);
-					background: rgba(8, 145, 178, 0.15);
-				}
-				.theme-light .gg-chip.on {
-					color: #0f172a;
-				}
-				.gg-chip input {
-					margin: 0;
-				}
-				.gg-lod-chip {
-					margin-left: 4px;
-					font-size: 0.68rem;
-					color: #64748b;
-					white-space: nowrap;
 				}
 
 				.fg-toolbar-dock {

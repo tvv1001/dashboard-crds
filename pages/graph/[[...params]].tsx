@@ -1001,7 +1001,7 @@ export default function NodeGraphPage() {
 							label,
 							kind: 'relation',
 							entityType: type as GraphEntityType,
-							subLabel: 'Search match',
+							subLabel: type === 'individual' && match.currentFirm ? `${match.currentFirm}${match.currentCity || match.currentState ? ` - ${[match.currentCity, match.currentState].filter(Boolean).join(', ')}` : ''}` : 'Search match',
 							loadKey: match.key || `${type}:${crd}`,
 						};
 					})
@@ -1195,12 +1195,7 @@ export default function NodeGraphPage() {
 
 	const nodeRadius = useCallback(
 		(nodeId: string, kind?: GraphNode['kind']) => {
-			const degree = connectionCountById[nodeId] ?? 0;
-			// Larger baseline so nodes read clearly before click-to-expand
-			// adds more edges; sqrt scale still grows hubs without runaway size.
-			const scaled = 16 + Math.sqrt(degree) * 5.5;
-			const base = kind === 'primary' ? Math.max(scaled, 22) : scaled;
-			return Math.min(48, base);
+			return 22;
 		},
 		[connectionCountById],
 	);
@@ -1826,7 +1821,7 @@ export default function NodeGraphPage() {
 
 						// Firm↔firm edges: stretch far so clouds don't fuse.
 						if (sFirm && tFirm) {
-							return linkDistBase * 1.9 + scatter * 2.1 + Math.sqrt(Math.max(sDeg, 1)) * 36 + Math.sqrt(Math.max(tDeg, 1)) * 36 + (former ? 40 : 0);
+							return (linkDistBase * 1.9 + scatter * 2.1 + Math.sqrt(Math.max(sDeg, 1)) * 36 + Math.sqrt(Math.max(tDeg, 1)) * 36 + (former ? 40 : 0)) * 2;
 						}
 
 						// Stagger leaf spokes off hubs; keep hub–hub edges longer but uniform.
@@ -1839,7 +1834,7 @@ export default function NodeGraphPage() {
 							(controls ? 50
 							: former ? 34
 							: 0)
-						);
+						) * 2;
 					})
 					// Softer springs on high-degree hubs so stagger distances can stick.
 					.strength((d: any) => {
@@ -2311,12 +2306,19 @@ export default function NodeGraphPage() {
 												/>
 											</>
 										)}
-										<circle
-											className={`graph-node ${nodeEntityType}${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
-											cx={0}
-											cy={0}
-											r={radius}
-										/>
+										{nodeEntityType === 'firm' ? (
+											<polygon
+												className={`graph-node firm${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
+												points={`0,${-radius} ${radius * 0.866},${-radius / 2} ${radius * 0.866},${radius / 2} 0,${radius} ${-radius * 0.866},${radius / 2} ${-radius * 0.866},${-radius / 2}`}
+											/>
+										) : (
+											<circle
+												className={`graph-node individual${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
+												cx={0}
+												cy={0}
+												r={radius}
+											/>
+										)}
 										{isPrimary && !isInactive && roleRows.includes('Investment Adviser') && (
 											<circle
 												className='graph-node-adviser-badge'
@@ -2819,21 +2821,21 @@ export default function NodeGraphPage() {
 				}
 				/* Current relationships keep the cyan edge treatment. */
 				.graph-link-glow.current {
-					stroke: rgba(6, 182, 212, 0.55);
+					stroke: #3b82f6;
 					stroke-width: 1.75;
 				}
 				/* Previous / former relationships: thinner light gray (never selection-highlighted). */
 				.graph-link-glow.previous {
-					stroke: rgba(203, 213, 225, 0.42);
-					stroke-width: 0.9;
+					stroke: #ef4444;
+					stroke-width: 1.2;
 					overflow: visible;
 				}
 				.theme-light .graph-link-glow.previous {
-					stroke: rgba(148, 163, 184, 0.55);
+					stroke: #ef4444;
 				}
 				/* Active spoke on selected node only (current edges). */
 				.graph-link-glow.current.selected {
-					stroke: rgba(56, 189, 248, 0.95);
+					stroke: #60a5fa;
 					stroke-width: 2.6;
 				}
 				/* Gray/previous edges that touch the selection stay muted — not blue. */
@@ -2883,26 +2885,27 @@ export default function NodeGraphPage() {
 						stroke-width 150ms ease,
 						filter 150ms ease;
 				}
-				/* People = blue, firms = orange (including the hub/primary node). */
+				/* People = blue, firms = cyan hexagon (including the hub/primary node). */
 				.graph-node.individual {
-					fill: #2563eb;
-					stroke: #93c5fd;
-					filter: drop-shadow(0 0 8px rgba(37, 99, 235, 0.75));
+					fill: #0ea5e9;
+					stroke: #0ea5e9;
+					filter: drop-shadow(0 0 8px rgba(14, 165, 233, 0.75));
 				}
 				.graph-node.firm {
-					fill: #f97316;
-					stroke: #fdba74;
-					filter: drop-shadow(0 0 8px rgba(249, 115, 22, 0.7));
+					fill: #0f172a;
+					stroke: #22d3ee;
+					stroke-width: 2.5px;
+					filter: drop-shadow(0 0 8px rgba(34, 211, 238, 0.7));
 				}
 				.graph-node.primary {
-					stroke-width: 2.25;
-					filter: drop-shadow(0 0 12px rgba(6, 182, 212, 0.55));
+					stroke-width: 3.5px;
+					filter: drop-shadow(0 0 12px rgba(34, 211, 238, 0.85));
 				}
 				.graph-node.individual.primary {
-					filter: drop-shadow(0 0 12px rgba(37, 99, 235, 0.9));
+					filter: drop-shadow(0 0 12px rgba(14, 165, 233, 0.9));
 				}
 				.graph-node.firm.primary {
-					filter: drop-shadow(0 0 12px rgba(249, 115, 22, 0.9));
+					filter: drop-shadow(0 0 14px rgba(34, 211, 238, 0.9));
 				}
 				.graph-node-adviser-badge {
 					fill: #22d3ee;

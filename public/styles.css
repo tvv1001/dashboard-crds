@@ -1998,6 +1998,16 @@ button:disabled {
 	overflow-wrap: anywhere;
 }
 
+/* Individual summary chips (experience / firms / licenses) — ref: next-02 sidebar. */
+.record-detail-hero-stats {
+	grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+	margin-bottom: 8px;
+}
+
+.record-detail-hero-stat-wide {
+	grid-column: 1 / -1;
+}
+
 .record-detail-grid > div {
 	background: #090105;
 	border: 1px solid rgba(146, 34, 70, 0.28);
@@ -2009,6 +2019,10 @@ button:disabled {
 .record-detail-grid > div > strong {
 	color: #cbd5e1;
 	margin-right: 4px;
+}
+
+.record-detail-item--previous {
+	opacity: 0.92;
 }
 
 .raw-field-list {

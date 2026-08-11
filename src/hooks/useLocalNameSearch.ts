@@ -32,9 +32,9 @@ export function useLocalNameSearch() {
 	}, []);
 
 	const search = useCallback(
-		async (q?: string) => {
+		async (q?: string): Promise<LocalNameSearchResult[]> => {
 			const searchQ = q !== undefined ? q : query;
-			if (!searchQ.trim()) return;
+			if (!searchQ.trim()) return [];
 			setLoading(true);
 			setError('');
 			setResults([]);
@@ -57,9 +57,11 @@ export function useLocalNameSearch() {
 				setSourceMode(json?.sourceMode === 'redis' ? 'redis' : 'local');
 				setResults(found);
 				setSearched(true);
+				return found;
 			} catch (err: unknown) {
 				setError(err instanceof Error ? err.message : 'Search failed');
 				setSearched(true);
+				return [];
 			} finally {
 				setLoading(false);
 			}

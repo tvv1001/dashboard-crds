@@ -4,7 +4,7 @@
  * Reads data/derived/network-index.json, keeps a weighted firm/broker subset,
  * runs d3-force offline (weighted links + charge + collide), optionally
  * soft-orbits children around firm parents, and writes the layout artifact
- * for /api/global-graph and /global-graph.
+ * for /api/global-graph and /chart.
  *
  * Usage:
  *   pnpm exec tsx scripts/build-global-graph-layout.ts

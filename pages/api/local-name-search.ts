@@ -13,9 +13,11 @@ type LocalSearchEntry = {
 	secNumber: string;
 	currentAddress: string;
 	searchableNames: string[];
-	searchableValues: string[];
 	searchableNameTokens: string[];
 	searchText: string;
+	currentFirm?: string;
+	currentCity?: string;
+	currentState?: string;
 };
 
 type LocalSearchGroup = {
@@ -348,6 +350,64 @@ async function buildLocalSearchIndex(keys: string[]) {
 
 				if (!hasFinra && !hasSec) return null;
 
+				let currentFirm = '';
+				let currentCity = '';
+				let currentState = '';
+				if (group.type === 'individual') {
+					for (const file of prioritizedFiles) {
+						try {
+							const payload = await loadSavedPayload(file);
+							const normalizedPayload = normalizeRawPayload(payload);
+							const emps = [
+								...(Array.isArray(normalizedPayload?.currentEmployments) ? normalizedPayload.currentEmployments : []),
+								...(Array.isArray(normalizedPayload?.currentIAEmployments) ? normalizedPayload.currentIAEmployments : [])
+							];
+							for (const emp of emps) {
+								const empObj = getObject(emp);
+								if (empObj && typeof empObj.firmName === 'string') {
+									currentFirm = normalizeWhitespace(empObj.firmName);
+									const locations = Array.isArray(empObj.branchOfficeLocations) ? (empObj.branchOfficeLocations as Record<string, unknown>[]) : [];
+									const primaryLoc = locations.find((loc) => loc?.locatedAtFlag === 'Y') || locations[0];
+									if (primaryLoc) {
+										currentCity = getString(primaryLoc.city);
+										currentState = getString(primaryLoc.state);
+									} else {
+										currentCity = getString(empObj.city);
+										currentState = getString(empObj.state);
+									}
+									break;
+								}
+							}
+							if (currentFirm) break;
+
+							// Fallback to previous employments if no current employment
+							if (!currentFirm) {
+								const prevEmps = [
+									...(Array.isArray(normalizedPayload?.previousEmployments) ? normalizedPayload.previousEmployments : []),
+									...(Array.isArray(normalizedPayload?.previousIAEmployments) ? normalizedPayload.previousIAEmployments : [])
+								];
+								for (const emp of prevEmps) {
+									const empObj = getObject(emp);
+									if (empObj && typeof empObj.firmName === 'string') {
+										currentFirm = normalizeWhitespace(empObj.firmName);
+										const locations = Array.isArray(empObj.branchOfficeLocations) ? (empObj.branchOfficeLocations as Record<string, unknown>[]) : [];
+										const primaryLoc = locations.find((loc) => loc?.locatedAtFlag === 'Y') || locations[0];
+										if (primaryLoc) {
+											currentCity = getString(primaryLoc.city);
+											currentState = getString(primaryLoc.state);
+										} else {
+											currentCity = getString(empObj.city);
+											currentState = getString(empObj.state);
+										}
+										break;
+									}
+								}
+							}
+							if (currentFirm) break;
+						} catch {}
+					}
+				}
+
 				const primaryName = orderedNames[0] || `${group.type === 'individual' ? 'Individual' : 'Firm'} ${group.crd}`;
 				const aliases = orderedNames.slice(1);
 				const searchableNames = [primaryName, ...aliases];
@@ -366,6 +426,9 @@ async function buildLocalSearchIndex(keys: string[]) {
 					searchableValues,
 					searchableNameTokens,
 					searchText: searchableValues.map((value) => normalizeForSearch(value)).join('\n'),
+					currentFirm,
+					currentCity,
+					currentState
 				} satisfies LocalSearchEntry;
 			}),
 		)
@@ -495,6 +558,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 			.sort(
 				(left, right) =>
 					right.matchScore - left.matchScore ||
+					(left.type === 'individual' ? 0 : 1) - (right.type === 'individual' ? 0 : 1) ||
 					right.matchedTerms.length - left.matchedTerms.length ||
 					left.name.localeCompare(right.name, undefined, { sensitivity: 'base', numeric: true }),
 			);

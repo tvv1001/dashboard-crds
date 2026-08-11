@@ -393,31 +393,47 @@ function getEmploymentAddress(item: any): string {
 }
 
 function getEmploymentDateRangeText(item: any): string {
-	const start = pickFirstNonEmpty(item.registrationBeginDate, item.effectiveDate, item.startDate);
-	const end = pickFirstNonEmpty(item.registrationEndDate, item.endDate);
-	if (start && end) return `${start} – ${end}`;
-	if (start) return `Since ${start}`;
-	if (end) return `Until ${end}`;
+	// Match finra-data-chart-next-02 individual sidebar: "start → present".
+	const start = pickFirstNonEmpty(item.registrationBeginDate, item.effectiveDate, item.startDate, item.start);
+	const end = pickFirstNonEmpty(item.registrationEndDate, item.endDate, item.end);
+	if (start && end) return `${start} → ${end}`;
+	if (start) return `${start} → present`;
+	if (end) return `– → ${end}`;
 	return '';
 }
 
+function getEmploymentScopeTags(item: any): string[] {
+	const tags: string[] = [];
+	const role = pickFirstNonEmpty(item.role, item.regScope, item.scope, item.iaOnlyFlag === 'Y' ? 'IA' : '', item.bdOnlyFlag === 'Y' ? 'BD' : '');
+	if (role) tags.push(role);
+	const status = pickFirstNonEmpty(item.employmentStatus, item.status, item.currentRegistration);
+	if (status && !/^(active|current|approved)$/i.test(status)) tags.push(status);
+	const position = pickFirstNonEmpty(item.position, item.title);
+	if (position && !tags.some((t) => t.toLowerCase() === position.toLowerCase())) tags.push(position);
+	return tags;
+}
+
 function getEmploymentSortMs(item: any): number {
-	const endMs = toDateMs(item.registrationEndDate) || toDateMs(item.endDate);
+	const endMs = toDateMs(item.registrationEndDate) || toDateMs(item.endDate) || toDateMs(item.end);
 	if (endMs) return endMs;
-	return toDateMs(item.registrationBeginDate) || toDateMs(item.effectiveDate) || toDateMs(item.startDate);
+	return toDateMs(item.registrationBeginDate) || toDateMs(item.effectiveDate) || toDateMs(item.startDate) || toDateMs(item.start);
 }
 
 // Adds an address + date subtitle to each employment row and orders the list
 // most-recent-first (by end date, falling back to start date for open-ended/
-// current employments).
+// current employments). Mirrors reference timeline: dates, office, scope tags.
 function decorateEmploymentItems(rows: any[]): any[] {
 	return rows
 		.map((row) => {
 			const address = getEmploymentAddress(row);
 			const dateText = getEmploymentDateRangeText(row);
+			const scopeTags = getEmploymentScopeTags(row);
+			const parts = [dateText, address, scopeTags.length ? scopeTags.join(' · ') : ''].filter(Boolean);
 			return {
 				...row,
-				__subtitleOverride: [address, dateText].filter(Boolean).join(' • '),
+				// Prefer firmName so person employment rows show the firm, not a person name field.
+				firmName: pickFirstNonEmpty(row.firmName, row.organizationName, row.legalName, row.name),
+				__subtitleOverride: parts.join(' · '),
 				__employmentSortMs: getEmploymentSortMs(row),
 			};
 		})
@@ -891,17 +907,23 @@ function DetailList({
 			<h4 className='record-detail-section-title'>{title}</h4>
 			<div className='record-detail-list'>
 				{items.map((item, index) => {
-					const rawTitleText = pickFirstNonEmpty(item.legalName, item.name, item.individualName, item.fullName, item.firmName, item.organizationName, item.disclosureType);
+					// Employment rows: firm name first (reference timeline). People rows keep person name first.
+					const rawTitleText =
+						fallbackType === 'firm' ?
+							pickFirstNonEmpty(item.firmName, item.organizationName, item.legalName, item.name, item.individualName, item.fullName, item.disclosureType)
+						:	pickFirstNonEmpty(item.legalName, item.name, item.individualName, item.fullName, item.firmName, item.organizationName, item.disclosureType);
 					const titleText = rawTitleText ? formatDisplayName(rawTitleText) : rawTitleText;
-					const crd = pickFirstNonEmpty(item.crdNumber, item.crd, item.firmId, item.firmID);
+					const crd = pickFirstNonEmpty(item.crdNumber, item.crd, item.firmId, item.firmID, item.firmCrd);
+					const secNo = pickFirstNonEmpty(item.bdSecNumber, item.bdSECNumber, item.iaSECNumber, item.secNumber);
 					const subtitle =
 						item.__subtitleOverride || pickFirstNonEmpty(item.position, item.currentRegistration, item.status, item.control, item.effectiveDate, item.disclosureCount);
 					const rowType = inferRowType(item, fallbackType);
 					const canSelect = Boolean(crd && onSelectKey);
-					const selectionKey = canSelect ? `sec:${rowType}:${crd}` : '';
+					// Prefer finra: keys — matches dashboard/chart activate paths and BrokerCheck CRDs.
+					const selectionKey = canSelect ? `finra:${rowType}:${crd}` : '';
 					return (
 						<div
-							className={`record-detail-item ${canSelect ? 'record-detail-item-clickable' : ''}`}
+							className={`record-detail-item ${muted ? 'record-detail-item--previous' : ''} ${canSelect ? 'record-detail-item-clickable' : ''}`}
 							key={`${title}-${index}-${titleText}-${crd}`}
 							onClick={() => {
 								if (!canSelect || !onSelectKey) return;
@@ -930,6 +952,9 @@ function DetailList({
 										}}>
 										CRD#{crd}
 									</button>
+								:	null}
+								{secNo ?
+									<span className='record-detail-inline-tag record-detail-inline-tag--sec'>SEC#{secNo}</span>
 								:	null}
 								{!hideSourceTag && item.__sourceTag ?
 									<span className={`record-detail-inline-tag ${sourceTagClass(item.__sourceTag)}`}>{String(item.__sourceTag)}</span>
@@ -1330,17 +1355,61 @@ function RecordInfoView({
 		const headlineName = mergedNames[0]?.value || crd;
 		const linkedFallbackType: 'individual' | 'firm' = type === 'individual' ? 'firm' : 'individual';
 		const isFirmRecord = type === 'firm';
+		// Individual hero stats — same fields as finra-data-chart-next-02 sidebar.
+		const yearsExperience = pickFirstNonEmpty(finraBody.yearsExperience, finraBasic.yearsExperience, secBody.yearsExperience);
+		const daysInIndustry = pickFirstNonEmpty(finraBody.daysInIndustry, finraBasic.daysInIndustry);
+		const firmCountDerived = currentEmploymentDisplay.length + previousEmploymentDisplay.length;
+		const firmCountAllTime = pickFirstNonEmpty(finraBody.firmCount, finraBasic.firmCount, firmCountDerived > 0 ? firmCountDerived : null);
+		const licenseCount = pickFirstNonEmpty(
+			finraBody.registrationCount?.approvedStateRegistrationCount,
+			finraBody.registrations?.approvedStateRegistrationCount,
+			registeredStateTags.length || null,
+		);
+		const disclosureCountHero = combinedDisclosures.reduce((sum: number, row: any) => sum + Number(row?.disclosureCount || 0), 0);
+		const primaryOfficeHero = mergedOfficeAddress[0]?.value || getEmploymentAddress(currentEmploymentDisplay[0]) || '';
 		return (
 			<div className='record-detail-wrapper'>
 				<div className='record-detail-view combined-record-detail-view'>
 					<section className='record-detail-hero'>
+						{!isFirmRecord ?
+							<div className='record-detail-grid record-detail-hero-stats'>
+								{yearsExperience ?
+									<div>
+										<strong>Years of Experience:</strong> {yearsExperience}
+									</div>
+								: daysInIndustry ?
+									<div>
+										<strong>Days in Industry:</strong> {Number(daysInIndustry).toLocaleString?.() || daysInIndustry}
+									</div>
+								:	null}
+								{firmCountAllTime ?
+									<div>
+										<strong>Firms (all time):</strong> {firmCountAllTime}
+									</div>
+								:	null}
+								{licenseCount ?
+									<div>
+										<strong>State Licenses:</strong> {licenseCount}
+									</div>
+								:	null}
+								<div>
+									<strong>Disclosures:</strong> {disclosureCountHero}
+								</div>
+								{primaryOfficeHero ?
+									<div className='record-detail-hero-stat-wide'>
+										<strong>Primary Office:</strong> {primaryOfficeHero}
+									</div>
+								:	null}
+							</div>
+						:	null}
 						{mergedOfficeAddress.length || mergedMailingAddress.length || mergedPhone.length ?
 							<div className='record-detail-grid'>
-								{mergedOfficeAddress.map((item, index) => (
-									<div key={`combined-office-${index}`}>
-										<strong>Main Address:</strong> {item.value}
-									</div>
-								))}
+								{isFirmRecord &&
+									mergedOfficeAddress.map((item, index) => (
+										<div key={`combined-office-${index}`}>
+											<strong>Main Address:</strong> {item.value}
+										</div>
+									))}
 								{mergedMailingAddress.map((item, index) => (
 									<div key={`combined-mailing-${index}`}>
 										<strong>Mailing:</strong> {item.value}
@@ -1453,7 +1522,7 @@ function RecordInfoView({
 
 					{!isFirmRecord ?
 						<DetailList
-							title={`Current employment (${currentEmploymentDisplay.length})`}
+							title={`Current Employment (${currentEmploymentDisplay.length})`}
 							items={currentEmploymentDisplay}
 							onSelectKey={onSelectKey}
 							fallbackType={linkedFallbackType}
@@ -1461,7 +1530,7 @@ function RecordInfoView({
 						/>
 					:	null}
 					<DetailList
-						title={`Previous employment (${previousEmploymentDisplay.length})`}
+						title={`Previous Employment (${previousEmploymentDisplay.length})`}
 						items={previousEmploymentDisplay}
 						onSelectKey={onSelectKey}
 						fallbackType={linkedFallbackType}
@@ -1577,6 +1646,13 @@ function RecordInfoView({
 	const previousConnections = toArray(body.previousConnections);
 	const directOwners = toArray(body.directOwners);
 	const affiliateDisclosures = body.affiliateDisclosures && typeof body.affiliateDisclosures === 'object' ? body.affiliateDisclosures : {};
+	// Explicit employment arrays (BrokerCheck individual shape) — same as reference sidebar.
+	const currentEmploymentRows = decorateEmploymentItems(
+		mergeEmploymentRows(toArray(body.currentEmployments), toArray(body.currentIAEmployments), toArray(body.ind_current_employments), toArray(body.ind_ia_current_employments)),
+	);
+	const previousEmploymentRows = decorateEmploymentItems(
+		mergeEmploymentRows(toArray(body.previousEmployments), toArray(body.previousIAEmployments), toArray(body.ind_previous_employments), toArray(body.ind_ia_previous_employments)),
+	);
 
 	const name =
 		pickFirstNonEmpty(basic.iaFirmName, basic.firmName, basic.fullName, basic.individualName, basic.orgName, (body as any)?.orphan?.name) || (parsedKey ? parsedKey.crd : '');
@@ -1593,10 +1669,10 @@ function RecordInfoView({
 	const secFirmStatusText = pickFirstNonEmpty(basic.iaScope, basic.legacyReportStatus, secOrgScopeFlags?.isSECRegistered);
 	const secFirmStatusLabel = secFirmStatusText ? String(secFirmStatusText) : 'Active';
 
-	const approvedFinra = pickFirstNonEmpty(registrations.approvedFinraRegistrationCount);
+	const approvedFinra = pickFirstNonEmpty(registrations.approvedFinraRegistrationCount, body.registrationCount?.approvedFinraRegistrationCount);
 	const approvedSec = pickFirstNonEmpty(registrations.approvedSECRegistrationCount);
-	const stateCount = pickFirstNonEmpty(registrations.approvedStateRegistrationCount);
-	const sroCount = pickFirstNonEmpty(registrations.approvedSRORegistrationCount);
+	const stateCount = pickFirstNonEmpty(registrations.approvedStateRegistrationCount, body.registrationCount?.approvedStateRegistrationCount);
+	const sroCount = pickFirstNonEmpty(registrations.approvedSRORegistrationCount, body.registrationCount?.approvedSRORegistrationCount);
 
 	const stateExams = toArray(body.stateExamCategory).concat(toArray(body.stateExams));
 	const productExams = toArray(body.productExamCategory).concat(toArray(body.productExams));
@@ -1614,6 +1690,19 @@ function RecordInfoView({
 		owner: fallbackConnectionBucketsRaw.owner,
 	};
 	const isFirmRecord = parsedKey?.type === 'firm' || Boolean(basic.firmName || basic.iaFirmName || basic.firmId);
+	const yearsExperience = pickFirstNonEmpty(body.yearsExperience, basic.yearsExperience);
+	const daysInIndustry = pickFirstNonEmpty(body.daysInIndustry, basic.daysInIndustry);
+	const firmCountDerivedSingle = currentEmploymentRows.length + previousEmploymentRows.length;
+	const firmCountAllTime = pickFirstNonEmpty(body.firmCount, basic.firmCount, firmCountDerivedSingle > 0 ? firmCountDerivedSingle : null);
+	const registeredStateTagsSingle = Array.from(
+		new Set(
+			toArray(body.registeredStates)
+				.map((row: any) => String(row?.state || row || '').trim())
+				.filter(Boolean),
+		),
+	).sort((a, b) => a.localeCompare(b));
+	const licenseCount = pickFirstNonEmpty(stateCount, registeredStateTagsSingle.length || null);
+	const primaryOfficeSingle = officeAddress || getEmploymentAddress(currentEmploymentRows[0]) || '';
 
 	return (
 		<div className='record-detail-view'>
@@ -1631,7 +1720,38 @@ function RecordInfoView({
 						<span>SEC#: {secNumber}</span>
 					:	null}
 				</div>
-				{officeAddress || mailingAddress || phone ?
+				{!isFirmRecord ?
+					<div className='record-detail-grid record-detail-hero-stats'>
+						{yearsExperience ?
+							<div>
+								<strong>Years of Experience:</strong> {yearsExperience}
+							</div>
+						: daysInIndustry ?
+							<div>
+								<strong>Days in Industry:</strong> {Number(daysInIndustry).toLocaleString?.() || daysInIndustry}
+							</div>
+						:	null}
+						{firmCountAllTime ?
+							<div>
+								<strong>Firms (all time):</strong> {firmCountAllTime}
+							</div>
+						:	null}
+						{licenseCount ?
+							<div>
+								<strong>State Licenses:</strong> {licenseCount}
+							</div>
+						:	null}
+						<div>
+							<strong>Disclosures:</strong> {totalDisclosureCount || nonRegisteredAffiliateDisclosureCount || 0}
+						</div>
+						{primaryOfficeSingle ?
+							<div className='record-detail-hero-stat-wide'>
+								<strong>Primary Office:</strong> {primaryOfficeSingle}
+							</div>
+						:	null}
+					</div>
+				:	null}
+				{isFirmRecord && (officeAddress || mailingAddress || phone) ?
 					<div className='record-detail-grid'>
 						{officeAddress ?
 							<div>
@@ -1810,6 +1930,26 @@ function RecordInfoView({
 				hasSec={parsedKey?.source === 'sec'}
 			/>
 
+			{!isFirmRecord && currentEmploymentRows.length ?
+				<DetailList
+					title={`Current Employment (${currentEmploymentRows.length})`}
+					items={currentEmploymentRows}
+					onSelectKey={onSelectKey}
+					fallbackType='firm'
+					hideSourceTag
+				/>
+			:	null}
+			{!isFirmRecord && previousEmploymentRows.length ?
+				<DetailList
+					title={`Previous Employment (${previousEmploymentRows.length})`}
+					items={previousEmploymentRows}
+					onSelectKey={onSelectKey}
+					fallbackType='firm'
+					hideSourceTag
+					muted
+				/>
+			:	null}
+
 			<DetailList
 				title={`Direct owners & executive officers (${fallbackConnectionBuckets.owner.length})`}
 				items={fallbackConnectionBuckets.owner}
@@ -1833,19 +1973,30 @@ function RecordInfoView({
 					/>
 				</>
 			:	null}
-			<DetailList
-				title={`Current connections (${fallbackConnectionBuckets.current.length})`}
-				items={fallbackConnectionBuckets.current}
-				onSelectKey={onSelectKey}
-				fallbackType={linkedFallbackType}
-			/>
-			<DetailList
-				title={`Previous connections (${fallbackConnectionBuckets.previous.length})`}
-				items={fallbackConnectionBuckets.previous}
-				onSelectKey={onSelectKey}
-				fallbackType={linkedFallbackType}
-				muted
-			/>
+			{/* Generic connection buckets only when employment arrays weren't present (firm/orphan shapes). */}
+			{(isFirmRecord || (!currentEmploymentRows.length && !previousEmploymentRows.length)) && (
+				<>
+					<DetailList
+						title={`Current connections (${fallbackConnectionBuckets.current.length})`}
+						items={fallbackConnectionBuckets.current}
+						onSelectKey={onSelectKey}
+						fallbackType={linkedFallbackType}
+					/>
+					<DetailList
+						title={`Previous connections (${fallbackConnectionBuckets.previous.length})`}
+						items={fallbackConnectionBuckets.previous}
+						onSelectKey={onSelectKey}
+						fallbackType={linkedFallbackType}
+						muted
+					/>
+				</>
+			)}
+			{!isFirmRecord && registeredStateTagsSingle.length ?
+				<TagListSection
+					title={`Registered States (${registeredStateTagsSingle.length})`}
+					tags={registeredStateTagsSingle}
+				/>
+			:	null}
 			<RawFieldGroups
 				title='Additional details'
 				body={body}
