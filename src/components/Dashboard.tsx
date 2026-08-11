@@ -6,6 +6,7 @@ import { useNewCrds } from '../hooks/useNewCrds';
 import { useLocalNameSearch } from '../hooks/useLocalNameSearch';
 import { buildGroups } from '../lib/buildGroups';
 import { parseCrdKey, parseRequestedSelectionFromUrl } from '../lib/parseKey';
+import { writeLastCrdSelection } from '../lib/lastCrdSelection';
 import type { SortOrder } from '../types';
 import { Panel } from './panel/Panel';
 import { NewCrdsSidebar } from './new-crds/NewCrdsSidebar';
@@ -316,6 +317,8 @@ export default function Dashboard() {
 		const parsed = parseCrdKey(key);
 		if (!parsed) return;
 		const newPath = `/${parsed.type}/${parsed.crd}`;
+		// Remember for Global Map / Node Graph when user is on bare /chart or /graph.
+		writeLastCrdSelection({ type: parsed.type, crd: parsed.crd, key });
 		if (window.location.pathname === newPath) {
 			window.dispatchEvent(
 				new CustomEvent('crd-selection-change', {

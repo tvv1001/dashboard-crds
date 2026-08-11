@@ -4,6 +4,7 @@ import { SpeedInsights } from '@vercel/speed-insights/next';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { readLastCrdSelection, writeLastCrdSelection } from '../src/lib/lastCrdSelection';
 import '../public/styles.css';
 
 type CrdSelection = { type: 'individual' | 'firm'; crd: string };
@@ -135,7 +136,39 @@ export default function MyApp({ Component, pageProps }: AppProps) {
 		[analyticsDisabled],
 	);
 
-	const selection = useMemo(() => selectionFromPath(livePath) || selectionFromPath(routePath), [livePath, routePath]);
+	const pathSelection = useMemo(() => selectionFromPath(livePath) || selectionFromPath(routePath), [livePath, routePath]);
+	// When user is on bare / or /chart, still deep-link Global Map / Graph to the last CRD.
+	const [storedSelection, setStoredSelection] = useState<CrdSelection | null>(null);
+
+	useEffect(() => {
+		const stored = readLastCrdSelection();
+		if (stored) setStoredSelection({ type: stored.type, crd: stored.crd });
+	}, []);
+
+	useEffect(() => {
+		if (!pathSelection) return;
+		writeLastCrdSelection(pathSelection);
+		setStoredSelection(pathSelection);
+	}, [pathSelection]);
+
+	useEffect(() => {
+		const onSelection = (event: Event) => {
+			const detail = (event as CustomEvent<{ type?: string; crd?: string }>).detail;
+			const type: CrdSelection['type'] | null =
+				detail?.type === 'firm' ? 'firm'
+				: detail?.type === 'individual' ? 'individual'
+				: null;
+			const crd = String(detail?.crd || '').trim();
+			if (!type || !/^\d+$/.test(crd)) return;
+			const next: CrdSelection = { type, crd };
+			writeLastCrdSelection(next);
+			setStoredSelection(next);
+		};
+		window.addEventListener('crd-selection-change', onSelection as EventListener);
+		return () => window.removeEventListener('crd-selection-change', onSelection as EventListener);
+	}, []);
+
+	const selection = pathSelection || storedSelection;
 
 	const pageRouteClass = `page-${
 		routePath

@@ -12,6 +12,7 @@ import { StatusBox, type SelectionLogEntry } from '../../src/components/panel/St
 import { extractNamesFromPayload, getContentBlock, resolveEntityDisplayName } from '../../src/lib/extractNames';
 import { toProperCaseName } from '../../src/lib/format';
 import { parseCrdKey } from '../../src/lib/parseKey';
+import { readLastCrdSelection } from '../../src/lib/lastCrdSelection';
 import type { LocalNameSearchResult } from '../../src/types';
 
 function toArray(value: unknown): any[] {
@@ -876,6 +877,8 @@ export default function GlobalGraphPage() {
 	/** Last deep-link key we successfully added+focused on canvas. */
 	const appliedRouteKeyRef = useRef<string | null>(null);
 	const routeBootstrapDoneRef = useRef(false);
+	/** Only auto-open last dashboard CRD once per map mount (not after Clear). */
+	const lastSelectionAutoOpenDoneRef = useRef(false);
 
 	// /chart/individual/5567605  (same shape as /graph/... and /individual/...)
 	// Prefer query.params; fall back to asPath so hard-refresh deep links work before
@@ -957,7 +960,15 @@ export default function GlobalGraphPage() {
 	const focusNodeRef = useRef<
 		(
 			nodeId: string,
-			opts?: { openEgo?: boolean; animate?: boolean; addIfMissing?: boolean; syncUrl?: boolean; withNeighbors?: boolean | 'firms' | 'all' | 'none'; fetchExpand?: boolean },
+			opts?: {
+				openEgo?: boolean;
+				animate?: boolean;
+				addIfMissing?: boolean;
+				syncUrl?: boolean;
+				withNeighbors?: boolean | 'firms' | 'all' | 'none';
+				fetchExpand?: boolean;
+				typeHint?: 'firm' | 'individual';
+			},
 		) => boolean
 	>(() => false);
 	const clearFocusRef = useRef<() => void>(() => undefined);
@@ -1897,6 +1908,8 @@ export default function GlobalGraphPage() {
 				withNeighbors?: boolean | 'firms' | 'all' | 'none';
 				/** When false, skip /api/finra/expand (already-fetched focus only). */
 				fetchExpand?: boolean;
+				/** When catalog lacks the CRD, seed as this type (dashboard deep-links). */
+				typeHint?: 'firm' | 'individual';
 			},
 		) => {
 			const graph = graphRef.current;
@@ -1904,10 +1917,34 @@ export default function GlobalGraphPage() {
 			const payload = layoutRef.current;
 			if (!graph || !sigma || !payload) return false;
 
+			// Out-of-catalog CRDs (most dashboard picks) must still land on the map.
+			if (!nodeIndexRef.current.has(nodeId) && opts?.addIfMissing !== false && /^\d+$/.test(nodeId)) {
+				const typeHint =
+					opts?.typeHint === 'firm' ? 'firm'
+					: opts?.typeHint === 'individual' ? 'individual'
+					: 'individual';
+				const basex = focusedIdRef.current && graph.hasNode(focusedIdRef.current) ? Number(graph.getNodeAttribute(focusedIdRef.current, 'x')) || 0 : 0;
+				const basey = focusedIdRef.current && graph.hasNode(focusedIdRef.current) ? Number(graph.getNodeAttribute(focusedIdRef.current, 'y')) || 0 : 0;
+				nodeIndexRef.current.set(nodeId, {
+					id: nodeId,
+					type: typeHint,
+					label: nodeId,
+					degree: 1,
+					weight: 1,
+					size: dynamicNodeSize(1, typeHint),
+					x: basex / LAYOUT_SPREAD + (Math.random() - 0.5) * 8,
+					y: basey / LAYOUT_SPREAD + (Math.random() - 0.5) * 8,
+					color: nodeDisplayColor(typeHint, false),
+					inactive: false,
+				});
+			}
+
 			const catalogMeta = nodeIndexRef.current.get(nodeId);
 			const seedTypeHint =
 				catalogMeta?.type === 'firm' ? 'firm'
 				: catalogMeta?.type === 'individual' ? 'individual'
+				: opts?.typeHint === 'firm' ? 'firm'
+				: opts?.typeHint === 'individual' ? 'individual'
 				: graph.hasNode(nodeId) ? String(graph.getNodeAttribute(nodeId, 'nodeType') || 'unknown')
 				: 'unknown';
 			// Match /graph expand-in-place: person → firms; firm → full direct star (employees + previous).
@@ -2168,6 +2205,7 @@ export default function GlobalGraphPage() {
 				addIfMissing: true,
 				withNeighbors,
 				fetchExpand: true,
+				typeHint: type,
 			});
 			if (ok) return true;
 
@@ -2200,6 +2238,7 @@ export default function GlobalGraphPage() {
 				addIfMissing: true,
 				withNeighbors,
 				fetchExpand: true,
+				typeHint: type,
 			});
 		},
 		[focusNode],
@@ -2657,6 +2696,28 @@ export default function GlobalGraphPage() {
 		};
 	}, [destroySigma]);
 
+	// Bare /chart with a remembered dashboard CRD → open that node once (fetch if needed).
+	useEffect(() => {
+		if (status !== 'ready' || !router.isReady) return;
+		if (routeParams) {
+			lastSelectionAutoOpenDoneRef.current = true;
+			return;
+		}
+		if (lastSelectionAutoOpenDoneRef.current) return;
+		if (appliedRouteKeyRef.current || focusedIdRef.current) {
+			lastSelectionAutoOpenDoneRef.current = true;
+			return;
+		}
+		const last = readLastCrdSelection();
+		lastSelectionAutoOpenDoneRef.current = true;
+		if (!last) return;
+		const path = String(router.asPath || '')
+			.split('?')[0]
+			.split('#')[0];
+		if (path !== '/chart' && path !== '/chart/') return;
+		syncGlobalRoute(last.type, last.crd);
+	}, [status, routeParams, router.isReady, router.asPath, syncGlobalRoute]);
+
 	// Deep-link: /chart/{type}/{crd} → add + focus when catalog is ready.
 	// CRDs missing from the precomputed layout (inactive / out-of-sample) are
 	// seeded on demand via /api/key + /api/finra/expand — same data as dashboard.
@@ -2887,6 +2948,7 @@ export default function GlobalGraphPage() {
 				syncUrl: false,
 				withNeighbors: deepLinkNeighbors,
 				fetchExpand: true,
+				typeHint: canonicalType,
 			});
 
 			if (!ok) {
