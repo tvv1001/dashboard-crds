@@ -1471,19 +1471,27 @@ export default function NodeGraphPage() {
 		[clientPointToGraph, graphData.links],
 	);
 
-	const handleNodePointerUp = useCallback((event: React.PointerEvent<SVGGElement>) => {
-		const drag = dragStateRef.current;
-		if (!drag) return;
-		const node = dragNodesRef.current.find((n) => n.id === drag.id);
-		// Release pin so layout continues fluidly (reference fluidDrag end).
-		if (node) {
-			node.fx = null;
-			node.fy = null;
-		}
-		dragStateRef.current = null;
-		setDraggingNodeId(null);
-		simulationRef.current?.alphaTarget(0);
-	}, []);
+	const handleNodePointerUp = useCallback(
+		(event: React.PointerEvent<SVGGElement>) => {
+			const drag = dragStateRef.current;
+			if (!drag) return;
+			const node = dragNodesRef.current.find((n) => n.id === drag.id);
+			// Keep the selected node pinned; only release non-selected drag pins.
+			if (node) {
+				if (drag.id === focusedNodeId) {
+					node.fx = node.x;
+					node.fy = node.y;
+				} else {
+					node.fx = null;
+					node.fy = null;
+				}
+			}
+			dragStateRef.current = null;
+			setDraggingNodeId(null);
+			simulationRef.current?.alphaTarget(0);
+		},
+		[focusedNodeId],
+	);
 
 	// Graph dimensions
 	const width = 1200;
@@ -1525,7 +1533,7 @@ export default function NodeGraphPage() {
 
 	const handleCenter = useCallback(() => {
 		if (svgRef.current && zoomBehaviorRef.current) {
-			d3.select(svgRef.current).transition().duration(300).call(zoomBehaviorRef.current.transform, d3.zoomIdentity);
+			d3.select(svgRef.current).transition().duration(4000).ease(d3.easeLinear).call(zoomBehaviorRef.current.transform, d3.zoomIdentity);
 		} else {
 			setTransform(d3.zoomIdentity);
 		}
@@ -1703,14 +1711,29 @@ export default function NodeGraphPage() {
 			: nCount > 600 ? 32
 			: nCount > 300 ? 30
 			: 26;
+		// Very slow restart so expand / selection motion is easy to follow.
 		const restartAlpha =
-			nCount <= 0 ? 0.28
-			: nCount > 1000 ? 0.2
-			: nCount > 300 ? 0.24
-			: 0.28;
+			nCount <= 0 ? 0.12
+			: nCount > 1000 ? 0.08
+			: nCount > 300 ? 0.1
+			: 0.12;
 
 		const degreeOf = (d: any) => connectionCountById[d?.id] || 0;
 		const isFirmNode = (d: any) => resolveNodeEntityType(d as GraphNode) === 'firm' || d?.entityType === 'firm';
+
+		// Keep the currently selected node fixed while neighbors settle around it.
+		const pinSelectedNode = () => {
+			if (!focusedNodeId) return;
+			const n = nodeById.get(focusedNodeId) as any;
+			if (!n) return;
+			if (typeof n.fx !== 'number') n.fx = n.x;
+			if (typeof n.fy !== 'number') n.fy = n.y;
+			n.x = n.fx;
+			n.y = n.fy;
+			n.vx = 0;
+			n.vy = 0;
+		};
+		pinSelectedNode();
 
 		// For each hub, order neighbors and assign staggered ring distances so
 		// child nodes sit on alternating radii (readable labels + associations).
@@ -1869,13 +1892,13 @@ export default function NodeGraphPage() {
 		const simulation = d3
 			.forceSimulation(d3Nodes as d3.SimulationNodeDatum[])
 			.alpha(restartAlpha)
-			.alphaMin(0.0008)
+			.alphaMin(0.00035)
 			.alphaDecay(
-				dense ? 0.018
-				: mid ? 0.014
-				: 0.009,
+				dense ? 0.005
+				: mid ? 0.004
+				: 0.0035,
 			)
-			.velocityDecay(mid || dense ? 0.55 : 0.5)
+			.velocityDecay(mid || dense ? 0.74 : 0.7)
 			.force(
 				'link',
 				d3
@@ -2003,11 +2026,12 @@ export default function NodeGraphPage() {
 
 		simulation.on('tick', () => {
 			tickCount += 1;
+			pinSelectedNode();
 			// While hot, only push every 2nd tick (reference cadence).
-			if (simulation.alpha() > 0.15 && tickCount % 2 !== 0) return;
+			if (simulation.alpha() > 0.1 && tickCount % 2 !== 0) return;
 
-			// Slight ease keeps SVG React updates from feeling stepped.
-			const ease = 0.34;
+			// Low ease = very slow visual settle toward simulation targets.
+			const ease = 0.08;
 			d3Nodes.forEach((raw) => {
 				const n = raw as any;
 				if (!n.id) return;
@@ -2015,6 +2039,7 @@ export default function NodeGraphPage() {
 				const ty = typeof n.fy === 'number' ? n.fy : (n.y ?? 0);
 				const prev = displayPos[n.id];
 				if (typeof n.fx === 'number' && typeof n.fy === 'number') {
+					// Selected / dragged nodes stay exactly fixed.
 					displayPos[n.id] = { x: tx, y: ty };
 				} else if (!prev) {
 					displayPos[n.id] = { x: tx, y: ty };
@@ -2031,11 +2056,11 @@ export default function NodeGraphPage() {
 			}
 		});
 
-		// Let dense multi-firm graphs settle longer so separation forces finish.
+		// Longer settle window so the slow alpha can finish separating orbits.
 		const stopMs =
-			dense ? 9000
-			: mid ? 7000
-			: 5500;
+			dense ? 24000
+			: mid ? 20000
+			: 16000;
 		const stopTimer = window.setTimeout(() => {
 			try {
 				simulation.stop();
@@ -2050,7 +2075,7 @@ export default function NodeGraphPage() {
 			if (rafId) cancelAnimationFrame(rafId);
 			if (simulationRef.current === simulation) simulationRef.current = null;
 		};
-	}, [graphData, nodeRadius, connectionCountById, width, height]);
+	}, [graphData, nodeRadius, connectionCountById, width, height, focusedNodeId]);
 
 	const selectNode = useCallback(
 		(nodeId: string) => {
@@ -2059,6 +2084,35 @@ export default function NodeGraphPage() {
 			// detail drawer, matching the reference site's "closed until a
 			// node is picked" behavior.
 			setDrawerOpen(true);
+
+			// Pin selection immediately so expand layout orbits around a fixed hub.
+			const simNode = dragNodesRef.current.find((n) => n.id === nodeId) as any;
+			if (simNode) {
+				const px = typeof simNode.x === 'number' ? simNode.x : positionsRef.current[nodeId]?.x;
+				const py = typeof simNode.y === 'number' ? simNode.y : positionsRef.current[nodeId]?.y;
+				if (typeof px === 'number' && typeof py === 'number') {
+					simNode.fx = px;
+					simNode.fy = py;
+					simNode.x = px;
+					simNode.y = py;
+					simNode.vx = 0;
+					simNode.vy = 0;
+					positionsRef.current[nodeId] = { x: px, y: py };
+					setGraphPositions((prev) => ({ ...prev, [nodeId]: { x: px, y: py } }));
+				}
+				// Unpin previous selection so only the active node stays fixed.
+				for (const n of dragNodesRef.current) {
+					if (n.id !== nodeId && typeof (n as any).fx === 'number') {
+						// Keep drag pins only while actively dragging.
+						if (draggingNodeId && n.id === draggingNodeId) continue;
+						(n as any).fx = null;
+						(n as any).fy = null;
+					}
+				}
+				// Soft restart so neighbors slowly settle around the pinned selection.
+				simulationRef.current?.alpha(0.12).restart();
+			}
+
 			const node = graphData.nodes.find((n) => n.id === nodeId);
 			if (!node) return;
 
@@ -2080,7 +2134,7 @@ export default function NodeGraphPage() {
 			// for a firm) merged into the existing graph, in place.
 			expandNode(node);
 		},
-		[graphData.nodes, loadKey, loadPanelForNode, expandNode],
+		[graphData.nodes, loadKey, loadPanelForNode, expandNode, draggingNodeId],
 	);
 
 	// Wraps `selectNode` so that releasing a drag (which fires a trailing

@@ -13,11 +13,12 @@ type LocalSearchEntry = {
 	secNumber: string;
 	currentAddress: string;
 	searchableNames: string[];
+	searchableValues: string[];
 	searchableNameTokens: string[];
 	searchText: string;
-	currentFirm?: string;
-	currentCity?: string;
-	currentState?: string;
+	currentFirm: string;
+	currentCity: string;
+	currentState: string;
 };
 
 type LocalSearchGroup = {
@@ -360,7 +361,7 @@ async function buildLocalSearchIndex(keys: string[]) {
 							const normalizedPayload = normalizeRawPayload(payload);
 							const emps = [
 								...(Array.isArray(normalizedPayload?.currentEmployments) ? normalizedPayload.currentEmployments : []),
-								...(Array.isArray(normalizedPayload?.currentIAEmployments) ? normalizedPayload.currentIAEmployments : [])
+								...(Array.isArray(normalizedPayload?.currentIAEmployments) ? normalizedPayload.currentIAEmployments : []),
 							];
 							for (const emp of emps) {
 								const empObj = getObject(emp);
@@ -384,7 +385,7 @@ async function buildLocalSearchIndex(keys: string[]) {
 							if (!currentFirm) {
 								const prevEmps = [
 									...(Array.isArray(normalizedPayload?.previousEmployments) ? normalizedPayload.previousEmployments : []),
-									...(Array.isArray(normalizedPayload?.previousIAEmployments) ? normalizedPayload.previousIAEmployments : [])
+									...(Array.isArray(normalizedPayload?.previousIAEmployments) ? normalizedPayload.previousIAEmployments : []),
 								];
 								for (const emp of prevEmps) {
 									const empObj = getObject(emp);
@@ -428,7 +429,7 @@ async function buildLocalSearchIndex(keys: string[]) {
 					searchText: searchableValues.map((value) => normalizeForSearch(value)).join('\n'),
 					currentFirm,
 					currentCity,
-					currentState
+					currentState,
 				} satisfies LocalSearchEntry;
 			}),
 		)

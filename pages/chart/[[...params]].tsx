@@ -243,7 +243,7 @@ function normalizeEdgeType(raw: string | undefined): EdgeTypeKey {
 }
 
 /** d3-force bake is already wide; client scale opens dense firm clusters more. */
-const LAYOUT_SPREAD = 2.6;
+const LAYOUT_SPREAD = 7;
 
 function hashString(input: string): number {
 	let h = 2166136261;
@@ -434,7 +434,8 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 		const unique = Array.from(new Set(kids)).sort((a, b) => a.localeCompare(b));
 		const hubNode = nodeById.get(hub);
 		const hubType = hubNode?.firm ? 'firm' : 'individual';
-		const preferSingle = Boolean(starEgo && hub === egoHubId && (egoIsPerson || unique.length <= 28));
+		// /graph prefers a single ring when the hub has ≤28 kids.
+		const preferSingle = unique.length <= 28 || Boolean(starEgo && hub === egoHubId);
 		const { ringCount } = orbitRadiusForHub({
 			hubType,
 			childCount: unique.length,
@@ -457,55 +458,53 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 			childCount: kidCount,
 			ringIndex: ring,
 			ringCount: meta?.ringCount,
-			preferSingleRing: Boolean(starEgo && hubId === egoHubId && (egoIsPerson || kidCount <= 28)),
+			preferSingleRing: kidCount <= 28,
 		});
-		const jitter =
-			((hashString(`${hubId}:${childId}`) % 1000) / 999 - 0.5) *
-			(starEgo && hubId === egoHubId ?
-				egoIsPerson ? 14
-				:	22
-			:	28);
+		const jitter = ((hashString(`${hubId}:${childId}`) % 1000) / 999 - 0.5) * 28;
 		return radius + jitter;
 	};
 
+	// Force constants aligned with /graph expand settle (spread hubs, ring leaves).
 	const baseCharge =
 		starEgo ?
-			egoIsPerson ? -720
-			:	-980
-		: dense ? -1800
-		: mid ? -1400
-		: -1100;
+			egoIsPerson ? 1200
+			:	-1400
+		: dense ? 2200
+		: mid ? 1750
+		: 1200;
 	const linkStrengthBase =
 		starEgo ?
-			egoIsPerson ? 0.55
-			:	0.38
-		: dense ? 0.14
-		: mid ? 0.2
-		: 0.28;
+			egoIsPerson ? 0.48
+			:	0.36
+		: dense ? 0.16
+		: mid ? 0.22
+		: 0.32;
 	const linkDistBase =
 		starEgo ?
-			egoIsPerson ? 380
-			:	320
-		: nCount > 300 ? 420
-		: nCount > 150 ? 380
-		: nCount > 80 ? 400
-		: 460;
-	// Collision pad scales with rendered node footprint so large hex/circles don't stack.
+			egoIsPerson ? 420
+			:	380
+		: nCount > 1000 ? 560
+		: nCount > 300 ? 480
+		: nCount > 150 ? 420
+		: nCount > 80 ? 460
+		: 560;
 	const collidePad =
 		starEgo ?
-			egoIsPerson ? Math.max(40, INDIVIDUAL_NODE_SIZE * 0.85)
-			:	Math.max(48, FIRM_NODE_SIZE * 0.9)
-		: nCount > 300 ? Math.max(36, INDIVIDUAL_NODE_SIZE * 0.7)
-		: nCount > 120 ? Math.max(44, FIRM_NODE_SIZE * 0.75)
-		: nCount > 60 ? Math.max(52, FIRM_NODE_SIZE * 0.85)
-		: Math.max(60, FIRM_NODE_SIZE * 1.0);
+			egoIsPerson ? 72
+			:	86
+		: nCount > 1000 ? 36
+		: nCount > 600 ? 44
+		: nCount > 300 ? 52
+		: nCount > 120 ? 64
+		: nCount > 60 ? 78
+		: 92;
 	const centerStrength =
 		starEgo ? 0.02
-		: dense ? 0.0006
-		: mid ? 0.001
-		: 0.0022;
-	// Star ego stays circular (left /graph). Progressive multi-hub maps flatten Y.
-	const yFlatten = starEgo ? 1 : 0.55;
+		: dense ? 0.0008
+		: mid ? 0.0014
+		: 0.0035;
+	// Full 2D (circular) — no Y squash.
+	const yFlatten = 1;
 
 	let cx = 0;
 	let cy = 0;
@@ -516,23 +515,40 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 	cx /= pts.length;
 	cy /= pts.length;
 
-	const firmHubIds = pts.filter((p) => p.firm && p.degree >= 4).map((p) => p.id);
+	// Push every expanded hub (firm + person) so private orbits don't overlap (/graph).
+	const expandedHubIds = pts.filter((p) => p.degree >= 4).map((p) => p.id);
 	const firmHubSeparation = (alpha: number) => {
-		if (firmHubIds.length < 2) return;
-		const minDistBase =
-			dense ? 620
-			: mid ? 540
-			: 480;
-		for (let i = 0; i < firmHubIds.length; i++) {
-			const a = nodeById.get(firmHubIds[i]);
+		if (expandedHubIds.length < 2) return;
+		for (let i = 0; i < expandedHubIds.length; i++) {
+			const a = nodeById.get(expandedHubIds[i]);
 			if (!a) continue;
-			for (let j = i + 1; j < firmHubIds.length; j++) {
-				const b = nodeById.get(firmHubIds[j]);
+			const aMeta = hubOrbitMeta.get(a.id);
+			const aOrbit =
+				aMeta ?
+					orbitRadiusForHub({
+						hubType: aMeta.hubType,
+						childCount: aMeta.kidCount,
+						ringIndex: Math.max(0, aMeta.ringCount - 1),
+						ringCount: aMeta.ringCount,
+					}).radius
+				:	orbitRadiusForHub({ hubType: a.firm ? 'firm' : 'individual', childCount: Math.max(a.degree, 4) }).radius;
+			for (let j = i + 1; j < expandedHubIds.length; j++) {
+				const b = nodeById.get(expandedHubIds[j]);
 				if (!b) continue;
+				const bMeta = hubOrbitMeta.get(b.id);
+				const bOrbit =
+					bMeta ?
+						orbitRadiusForHub({
+							hubType: bMeta.hubType,
+							childCount: bMeta.kidCount,
+							ringIndex: Math.max(0, bMeta.ringCount - 1),
+							ringCount: bMeta.ringCount,
+						}).radius
+					:	orbitRadiusForHub({ hubType: b.firm ? 'firm' : 'individual', childCount: Math.max(b.degree, 4) }).radius;
 				let dx = (b.x ?? 0) - (a.x ?? 0);
 				let dy = (b.y ?? 0) - (a.y ?? 0);
 				let dist = Math.hypot(dx, dy);
-				const need = minDistBase + Math.sqrt(Math.max(a.degree, 1)) * 24 + Math.sqrt(Math.max(b.degree, 1)) * 24;
+				const need = aOrbit + bOrbit + ORBIT_HUB_GAP;
 				if (dist >= need) continue;
 				if (dist < 1e-6) {
 					const ang = ((hashString(`${a.id}|${b.id}`) % 1000) / 999) * Math.PI * 2;
@@ -540,13 +556,17 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 					dy = Math.sin(ang);
 					dist = 1;
 				}
-				const push = ((need - dist) / need) * alpha * 0.85;
+				const push = ((need - dist) / need) * alpha * 0.9;
 				const ux = (dx / dist) * push;
 				const uy = (dy / dist) * push;
-				a.vx = (a.vx ?? 0) - ux;
-				a.vy = (a.vy ?? 0) - uy;
-				b.vx = (b.vx ?? 0) + ux;
-				b.vy = (b.vy ?? 0) + uy;
+				if (!a.pinned) {
+					a.vx = (a.vx ?? 0) - ux;
+					a.vy = (a.vy ?? 0) - uy;
+				}
+				if (!b.pinned) {
+					b.vx = (b.vx ?? 0) + ux;
+					b.vy = (b.vy ?? 0) + uy;
+				}
 			}
 		}
 	};
@@ -560,49 +580,57 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 			const hub = nodeById.get(hubId);
 			const child = nodeById.get(childId);
 			if (!hub || !child) continue;
-			// Star ego: pin every spoke leaf to the circle even if degree is high.
-			if (!starEgo && (hub.degree < 4 || child.degree > 4)) continue;
-			if (starEgo && hubId !== egoHubId) continue;
+			// /graph: seat true leaves on hub rings; star ego keeps full spoke circle.
+			if (starEgo) {
+				if (hubId !== egoHubId) continue;
+			} else {
+				if (hub.degree < 4) continue;
+				if (child.degree > 4) continue;
+			}
 			const targetDist = staggeredChildDistance(hubId, childId, Math.max(hub.degree, childrenByHub.get(hubId)?.length || 1));
 			const slot = childSlotIndex.get(key) ?? 0;
 			const kids = childrenByHub.get(hubId)?.length || 1;
-			const angle = (slot / Math.max(kids, 1)) * Math.PI * 2 + (starEgo ? 0 : ring * 0.17);
+			const angle = (slot / Math.max(kids, 1)) * Math.PI * 2 + ring * 0.17;
 			const tx = (hub.x ?? 0) + Math.cos(angle) * targetDist;
 			const ty = (hub.y ?? 0) + Math.sin(angle) * targetDist * yFlatten;
 			const strength =
 				(starEgo ?
-					egoIsPerson ? 0.72
-					:	0.48
-				: dense ? 0.1
-				: mid ? 0.14
-				: 0.18) * alpha;
+					egoIsPerson ? 0.32
+					:	0.28
+				: dense ? 0.12
+				: mid ? 0.16
+				: 0.2) * alpha;
 			child.vx = (child.vx ?? 0) + (tx - (child.x ?? 0)) * strength;
 			child.vy = (child.vy ?? 0) + (ty - (child.y ?? 0)) * strength;
 		}
 	};
 
-	// Keep the ego person fixed at the star center (reference screenshot).
-	const pinEgoHub = () => {
-		if (!starEgo || !egoHubId) return;
-		const hub = nodeById.get(egoHubId);
-		if (!hub) return;
-		hub.fx = hub.x;
-		hub.fy = hub.y;
-		hub.vx = 0;
-		hub.vy = 0;
+	// Keep selected / ego hubs fixed in place while the rest of the graph settles slowly.
+	const pinFixedHubs = () => {
+		for (const p of pts) {
+			if (p.pinned || (starEgo && egoHubId && p.id === egoHubId)) {
+				if (typeof p.fx !== 'number') p.fx = p.x;
+				if (typeof p.fy !== 'number') p.fy = p.y;
+				p.x = p.fx;
+				p.y = p.fy;
+				p.vx = 0;
+				p.vy = 0;
+			}
+		}
 	};
-	pinEgoHub();
+	pinFixedHubs();
 
 	let tickCount = 0;
 	const sim = forceSimulation(pts)
-		.alpha(dense ? 0.22 : 0.28)
-		.alphaMin(0.001)
+		// Very slow settle so expand / selection motion is easy to follow.
+		.alpha(dense ? 0.1 : 0.12)
+		.alphaMin(0.0004)
 		.alphaDecay(
-			dense ? 0.022
-			: mid ? 0.016
-			: 0.012,
+			dense ? 0.006
+			: mid ? 0.005
+			: 0.004,
 		)
-		.velocityDecay(dense || mid ? 0.52 : 0.48)
+		.velocityDecay(dense || mid ? 0.72 : 0.68)
 		.force(
 			'charge',
 			forceManyBody()
@@ -610,23 +638,23 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 					const deg = d.degree || 1;
 					if (d.firm) {
 						const hubMul =
-							deg > 80 ? 3.2
-							: deg > 20 ? 2.5
+							deg > 80 ? 3.4
+							: deg > 20 ? 2.6
 							: 2.0;
 						return baseCharge * hubMul;
 					}
 					const leaf =
-						deg <= 2 ? 1.4
-						: deg <= 4 ? 1.15
+						deg <= 2 ? 1.45
+						: deg <= 4 ? 1.2
 						: 1;
-					return (deg > 20 ? 1.8 * baseCharge : baseCharge) * leaf;
+					return (deg > 20 ? 1.9 * baseCharge : baseCharge) * leaf;
 				})
 				.distanceMax(
-					dense ? 1400
-					: mid ? 1200
-					: 1000,
+					dense ? 1600
+					: mid ? 1300
+					: 1100,
 				)
-				.theta(dense || mid ? 0.86 : 0.78),
+				.theta(dense || mid ? 0.86 : 0.76),
 		)
 		.force(
 			'link',
@@ -642,26 +670,28 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 					const hubId = sDeg >= tDeg ? s.id : t.id;
 					const childId = sDeg >= tDeg ? t.id : s.id;
 
+					// /graph stretches firm↔firm and leaf stagger (~×2 effective distance).
 					if (s.firm && t.firm) {
-						return linkDistBase * 2.4 + Math.sqrt(sDeg) * 32 + Math.sqrt(tDeg) * 32;
+						return (linkDistBase * 1.9 + Math.sqrt(Math.max(sDeg, 1)) * 36 + Math.sqrt(Math.max(tDeg, 1)) * 36) * 2;
 					}
 
 					const childIsLeaf = Math.min(sDeg, tDeg) <= 3;
 					const stagger = childIsLeaf && hubDeg >= 4 ? staggeredChildDistance(hubId, childId, hubDeg) : 0;
 					const degScale =
-						hubDeg > 100 ? 1.7
-						: hubDeg > 50 ? 1.45
-						: hubDeg > 20 ? 1.25
-						: 1.1;
-					return stagger > 0 ? stagger : linkDistBase * degScale;
+						hubDeg > 100 ? 1.85
+						: hubDeg > 50 ? 1.6
+						: hubDeg > 20 ? 1.35
+						: 1.15;
+					const base = stagger > 0 ? stagger : linkDistBase * degScale;
+					return base * 2;
 				})
 				.strength((d: any) => {
 					const s = typeof d.source === 'object' ? d.source : nodeById.get(d.source);
 					const t = typeof d.target === 'object' ? d.target : nodeById.get(d.target);
-					if (s?.firm && t?.firm) return linkStrengthBase * 0.32;
+					if (s?.firm && t?.firm) return linkStrengthBase * 0.35;
 					const deg = Math.max(s?.degree || 1, t?.degree || 1);
-					if (deg > 80) return linkStrengthBase * 0.4;
-					if (deg > 20) return linkStrengthBase * 0.6;
+					if (deg > 80) return linkStrengthBase * 0.42;
+					if (deg > 20) return linkStrengthBase * 0.62;
 					return linkStrengthBase;
 				}),
 		)
@@ -670,40 +700,42 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 			forceCollide()
 				.radius((d: any) => {
 					const deg = d.degree || 1;
-					const body = d.firm ? FIRM_NODE_SIZE * 0.72 : INDIVIDUAL_NODE_SIZE * 0.72;
-					// Expanded hubs need a larger keep-out so their private orbit stays clear.
+					const body = d.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
+					// /graph-style hub halo (not full outer orbit — that over-expands chart).
 					const hubHalo =
-						d.firm ? Math.min(220, body + 36 + Math.sqrt(deg) * 14)
-						: deg >= 4 ? Math.min(160, body + 24 + Math.sqrt(deg) * 10)
-						: body * 0.35;
+						d.firm ? Math.min(dense ? 320 : 280, body + 50 + Math.sqrt(Math.max(deg, 1)) * (dense ? 18 : 16))
+						: deg >= 4 ? Math.min(220, body + 36 + Math.sqrt(Math.max(deg, 1)) * 12)
+						: body * 0.25;
 					const leafBoost =
-						deg <= 2 ? body * 0.55
-						: deg <= 4 ? body * 0.35
+						deg <= 2 ? body * 0.45
+						: deg <= 4 ? body * 0.28
 						: 0;
-					return collidePad + leafBoost + hubHalo + Math.min(36, Math.sqrt(deg) * 4);
+					return body + collidePad + leafBoost + hubHalo;
 				})
 				.strength(1)
-				.iterations(dense || mid || starEgo ? 4 : 3),
+				.iterations(dense || mid || starEgo ? 3 : 2),
 		)
 		.force('x', forceX(starEgo && egoHubId ? (nodeById.get(egoHubId)?.x ?? cx) : cx).strength(centerStrength))
-		// Stronger Y pull + weaker Y motion keeps multi-hub maps flatter; star stays circular.
-		.force('y', forceY(starEgo && egoHubId ? (nodeById.get(egoHubId)?.y ?? cy) : cy).strength(starEgo ? centerStrength : centerStrength * 2.4))
-		.force('firm-separate', (starEgo ? () => undefined : firmHubSeparation) as any)
+		// Equal X/Y centering keeps orbits circular in true 2D (no vertical squash).
+		.force('y', forceY(starEgo && egoHubId ? (nodeById.get(egoHubId)?.y ?? cy) : cy).strength(centerStrength))
+		.force('firm-separate', firmHubSeparation as any)
 		.force('ring-orbit', ringOrbitForce as any)
 		.on('tick', () => {
 			tickCount += 1;
-			pinEgoHub();
-			// Flatten residual vertical motion so multi-hub layouts settle wide.
-			if (!starEgo) {
-				for (const p of pts) {
-					if (typeof p.vy === 'number') p.vy *= yFlatten;
-				}
-			}
+			pinFixedHubs();
 			// While hot, skip every other paint (same cadence as /graph).
-			if (sim.alpha() > 0.15 && tickCount % 2 !== 0) return;
+			if (sim.alpha() > 0.12 && tickCount % 2 !== 0) return;
 			for (const p of pts) {
-				graph.setNodeAttribute(p.id, 'x', p.x);
-				graph.setNodeAttribute(p.id, 'y', p.y);
+				// Pinned selection never drifts — write fixed coords back.
+				if (p.pinned || (starEgo && egoHubId && p.id === egoHubId)) {
+					const fx = typeof p.fx === 'number' ? p.fx : p.x;
+					const fy = typeof p.fy === 'number' ? p.fy : p.y;
+					graph.setNodeAttribute(p.id, 'x', fx);
+					graph.setNodeAttribute(p.id, 'y', fy);
+				} else {
+					graph.setNodeAttribute(p.id, 'x', p.x);
+					graph.setNodeAttribute(p.id, 'y', p.y);
+				}
 			}
 			try {
 				sigma.refresh();
@@ -734,17 +766,17 @@ const STATIC_NODE_SIZE = 46;
 /** Collision / separation radius in graph units — independent of on-screen disk px. */
 const COLLISION_GRAPH_RADIUS = 14;
 
-/** On-screen px: firms match /graph MS hex; people are smaller blue circles. */
-const FIRM_NODE_SIZE = 44;
-const INDIVIDUAL_NODE_SIZE = 24;
+/** On-screen px: match /graph firm hex + person circles. */
+const FIRM_NODE_SIZE = 33;
+const INDIVIDUAL_NODE_SIZE = 20;
 
 function dynamicNodeSize(degree: number, type: string): number {
 	return type === 'firm' ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
 }
 
 /**
- * Orbit radius so neighbors sit on a ring around the hub without packing too tight.
- * Uses circumference spacing from node footprint + count; multi-ring when needed.
+ * Private orbit around an expanded hub — same formula as /graph `graphOrbitRadiusForHub`
+ * so chart expand seats leaves the same way.
  */
 function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringIndex?: number; ringCount?: number; preferSingleRing?: boolean }): {
 	radius: number;
@@ -755,7 +787,6 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	const hubSize = hubIsFirm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
 	// Children of a firm are mostly people (smaller); children of a person are firms (larger).
 	const childSize = hubIsFirm ? INDIVIDUAL_NODE_SIZE : FIRM_NODE_SIZE;
-	// Keep ~1.35× diameter between neighbor centers along the arc.
 	const arcPad = childSize * 2.7;
 	const minClear = hubSize + childSize + Math.max(48, childSize * 1.1);
 
@@ -775,11 +806,14 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	const perRing = Math.max(1, Math.ceil(childCount / ringCount));
 	// Radius from arc length: 2πr / n >= arcPad  =>  r >= n * arcPad / 2π
 	const fromArc = (perRing * arcPad) / (Math.PI * 2);
-	const base = Math.max(minClear, fromArc, hubIsFirm ? 200 : 260);
+	const base = Math.max(minClear, fromArc, hubIsFirm ? 220 : 280);
 	const ring = Math.max(0, opts.ringIndex ?? 0);
-	const ringStep = Math.max(childSize * 2.4 + 36, 90 + Math.min(70, Math.sqrt(childCount) * 8));
+	const ringStep = Math.max(childSize * 2.4 + 40, 100 + Math.min(80, Math.sqrt(childCount) * 9));
 	return { radius: base + ring * ringStep, ringCount };
 }
+
+/** Gap between outer edges of two expanded hub orbits (/graph parity). */
+const ORBIT_HUB_GAP = Math.max(100, FIRM_NODE_SIZE * 1.1);
 
 /** Stamp display sizes onto layout nodes once (collision uses node size). */
 function bakeDisplaySizes(payload: LayoutPayload): LayoutPayload {
@@ -1300,7 +1334,8 @@ export default function GlobalGraphPage() {
 			suppressing = true;
 			if (animate) {
 				animating = true;
-				cam.animate(next, { duration: 420 }, () => {
+				// Very slow, constant-speed pan so association to the new focus is obvious.
+				cam.animate(next, { duration: 14000, easing: 'linear' }, () => {
 					animating = false;
 					suppressing = false;
 				});
@@ -1415,7 +1450,7 @@ export default function GlobalGraphPage() {
 			label: n.label,
 			x: pos ? pos.x : n.x * LAYOUT_SPREAD,
 			// Slight vertical compress on baked coords so the map opens wider than tall.
-			y: pos ? pos.y : n.y * LAYOUT_SPREAD * 0.72,
+			y: pos ? pos.y : n.y * LAYOUT_SPREAD * 4,
 			size,
 			baseSize: size,
 			type: nodeRenderType(n.type),
@@ -1631,21 +1666,22 @@ export default function GlobalGraphPage() {
 				candidates.push(...ranked);
 				const seen = new Set<string>();
 				const placeCap = Math.min(candidates.length, neighborLimit);
-				// Each expanded hub owns its orbit: radius from child count + node footprint.
+				// Same private-orbit seating as /graph expand merge.
 				const { ringCount: sizedRings } = orbitRadiusForHub({
 					hubType: seed.type,
 					childCount: Math.max(1, placeCap),
-					preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 28),
+					preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 28) || placeCap <= 28,
 				});
 				const ringCount = sizedRings;
-				const yScale = starEgoSeed || firmStarSeed ? 1 : 0.55;
+				// Always circular 2D placement (no Y squash).
+				const yScale = 1;
 				let hubX = seed.x * LAYOUT_SPREAD;
-				let hubY = seed.y * LAYOUT_SPREAD * (starEgoSeed || firmStarSeed ? 1 : 0.72);
+				let hubY = seed.y * LAYOUT_SPREAD;
 				if (graph.hasNode(nodeId)) {
 					hubX = Number(graph.getNodeAttribute(nodeId, 'x')) || hubX;
 					hubY = Number(graph.getNodeAttribute(nodeId, 'y')) || hubY;
 				}
-				// Soft push away from other expanded hubs so private orbits don't stack.
+				// Soft push away from other expanded hubs (orbit + gap) before seating leaves.
 				const otherHubs: Array<{ x: number; y: number; r: number }> = [];
 				graph.forEachNode((id, attrs) => {
 					if (id === nodeId) return;
@@ -1672,13 +1708,13 @@ export default function GlobalGraphPage() {
 					}).radius;
 					let px = hubX;
 					let py = hubY;
-					for (let iter = 0; iter < 8; iter++) {
+					for (let iter = 0; iter < 12; iter++) {
 						let moved = false;
 						for (const o of otherHubs) {
 							let dx = px - o.x;
 							let dy = py - o.y;
 							let dist = Math.hypot(dx, dy);
-							const need = myOuter + o.r + Math.max(80, FIRM_NODE_SIZE * 1.2);
+							const need = myOuter + o.r + ORBIT_HUB_GAP;
 							if (dist >= need) continue;
 							if (dist < 1e-3) {
 								const ang = ((hashString(`${nodeId}|${o.x},${o.y}`) % 1000) / 999) * Math.PI * 2;
@@ -1686,7 +1722,7 @@ export default function GlobalGraphPage() {
 								dy = Math.sin(ang);
 								dist = 1;
 							}
-							const push = (need - dist) * 0.55;
+							const push = (need - dist) * 0.75;
 							px += (dx / dist) * push;
 							py += (dy / dist) * push;
 							moved = true;
@@ -1715,15 +1751,15 @@ export default function GlobalGraphPage() {
 					// Even angular slots per ring (not one global slot) so dense rings stay spaced.
 					const onRing = Math.ceil(placeCap / ringCount);
 					const indexOnRing = Math.floor(slot / ringCount);
-					const angle = (indexOnRing / Math.max(onRing, 1)) * Math.PI * 2 + ring * ((Math.PI * 2) / Math.max(ringCount * onRing, 1)) * 0.5;
+					const angle = (indexOnRing / Math.max(onRing, 1)) * Math.PI * 2 + ring * 0.17;
 					const { radius } = orbitRadiusForHub({
 						hubType: seed.type,
 						childCount: Math.max(1, placeCap),
 						ringIndex: ring,
 						ringCount,
-						preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 28),
+						preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 28) || placeCap <= 28,
 					});
-					const jitter = ((hashString(`${nodeId}:${c.id}`) % 1000) / 999 - 0.5) * (starEgoSeed ? 12 : 22);
+					const jitter = ((hashString(`${nodeId}:${c.id}`) % 1000) / 999 - 0.5) * 28;
 					const dist = radius + jitter;
 					const pos = {
 						x: hubX + Math.cos(angle) * dist,
@@ -1843,7 +1879,7 @@ export default function GlobalGraphPage() {
 		syncGlobalRoute(null, null);
 		try {
 			sigma.refresh();
-			sigma.getCamera().animatedReset({ duration: 280 });
+			sigma.getCamera().animatedReset({ duration: 4000, easing: 'linear' });
 		} catch {
 			// ignore
 		}
@@ -3169,7 +3205,7 @@ export default function GlobalGraphPage() {
 			return;
 		}
 		try {
-			sigma.getCamera().animatedReset({ duration: 350 });
+			sigma.getCamera().animatedReset({ duration: 4000, easing: 'linear' });
 		} catch {
 			// ignore
 		}
