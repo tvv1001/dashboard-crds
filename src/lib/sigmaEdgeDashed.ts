@@ -73,8 +73,8 @@ varying float v_progress;
 const vec4 transparent = vec4(0.0, 0.0, 0.0, 0.0);
 // Dash length in progress units (0–1 along edge). Longer ON segment so previous
 // employment spokes stay easy to see on dark backgrounds.
-const float DASH_PERIOD = 0.10;
-const float DASH_ON = 0.72;
+const float DASH_PERIOD = 0.03;
+const float DASH_ON = 0.5;
 
 void main(void) {
   #ifdef PICKING_MODE

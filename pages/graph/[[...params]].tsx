@@ -2464,13 +2464,19 @@ export default function NodeGraphPage() {
 												/>
 											</>
 										)}
-										{/* Always render circle */}
-										<circle
-											className={`graph-node ${nodeEntityType === 'firm' ? 'firm' : 'individual'}${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
-											cx={0}
-											cy={0}
-											r={radius}
-										/>
+										{nodeEntityType === 'firm' ? (
+											<polygon
+												className={`graph-node firm${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
+												points={`0,${-radius} ${radius * 0.866},${-radius / 2} ${radius * 0.866},${radius / 2} 0,${radius} ${-radius * 0.866},${radius / 2} ${-radius * 0.866},${-radius / 2}`}
+											/>
+										) : (
+											<circle
+												className={`graph-node individual${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
+												cx={0}
+												cy={0}
+												r={radius}
+											/>
+										)}
 										{isPrimary && !isInactive && roleRows.includes('Investment Adviser') && (
 											<circle
 												className='graph-node-adviser-badge'
@@ -2965,7 +2971,7 @@ export default function NodeGraphPage() {
 				}
 				.graph-link-glow {
 					stroke: rgba(6, 182, 212, 0.55);
-					stroke-width: 1.75;
+					stroke-width: 0.8;
 					stroke-linecap: round;
 					/* No geometric transitions — edges must track node x/y every frame. */
 					transition: opacity 150ms ease;
@@ -2974,28 +2980,28 @@ export default function NodeGraphPage() {
 				/* Current employment (both ends active): blue solid. */
 				.graph-link-glow.current {
 					stroke: rgba(30, 136, 255, 0.88);
-					stroke-width: 1.75;
+					stroke-width: 0.8;
 				}
 				/* Previous OR inactive-endpoint: full gray dashed (reference app). */
 				.graph-link-glow.previous {
-					stroke: rgba(135, 155, 183, 0.78);
-					stroke-width: 1.05;
-					stroke-dasharray: 2 3;
+					stroke: rgba(156, 163, 175, 0.45);
+					stroke-width: 0.5;
+					stroke-dasharray: 1 2;
 					overflow: visible;
 				}
 				.theme-light .graph-link-glow.previous {
-					stroke: rgba(113, 117, 123, 0.55);
+					stroke: rgba(156, 163, 175, 0.35);
 				}
 				/* Active spoke on selected node only (current active edges). */
 				.graph-link-glow.current.selected {
 					stroke: #60a5fa;
-					stroke-width: 2.6;
+					stroke-width: 1.4;
 				}
 				/* Gray edges that touch selection stay gray dashed — never blue. */
 				.graph-link-glow.previous.selection-muted {
-					stroke: rgba(148, 163, 184, 0.55);
-					stroke-width: 0.95;
-					stroke-dasharray: 2 3;
+					stroke: rgba(156, 163, 175, 0.8);
+					stroke-width: 0.6;
+					stroke-dasharray: 1 2;
 					opacity: 0.85;
 				}
 				.theme-light .graph-link-glow.previous.selection-muted {

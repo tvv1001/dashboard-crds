@@ -25,6 +25,26 @@ function resolveDefaultExport<T = any>(mod: any): T {
 	return (mod.default ?? mod) as T;
 }
 
+/** Resolve a Sigma Node/Edge program class from a dynamic import (CJS/ESM/Turbopack interop). */
+function resolveProgramClass(mod: any, names: string[] = []): any {
+	if (!mod) return null;
+	if (typeof mod === 'function') return mod;
+	for (const name of names) {
+		if (typeof mod[name] === 'function') return mod[name];
+		if (mod.default && typeof mod.default[name] === 'function') return mod.default[name];
+	}
+	if (typeof mod.default === 'function') return mod.default;
+	if (mod.default && typeof mod.default.default === 'function') return mod.default.default;
+	for (const value of Object.values(mod)) {
+		if (typeof value === 'function') {
+			const n = String((value as Function).name || '');
+			if (/Program|Node|Edge/i.test(n) || !n) return value;
+		}
+		if (value && typeof (value as any).default === 'function') return (value as any).default;
+	}
+	return null;
+}
+
 function toArray(value: unknown): any[] {
 	return Array.isArray(value) ? value : [];
 }
@@ -123,12 +143,11 @@ const FIRM_NODE_COLOR = '#22d3ee';
 function nodeDisplayColor(type: string, inactive?: boolean, degree?: number): string {
 	if (inactive) return INACTIVE_NODE_COLOR;
 	if (type === 'firm') return FIRM_NODE_COLOR;
-	if (degree && degree > 20) return '#d97706'; // Orange hubs
 	return INDIVIDUAL_NODE_COLOR;
 }
 
 function nodeRenderType(type: string): 'circle' | 'hexagon' {
-	return 'circle';
+	return type === 'firm' ? 'hexagon' : 'circle';
 }
 
 type LayoutEdge = {
@@ -700,9 +719,9 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 						return baseCharge * hubMul;
 					}
 					const leaf =
-						deg <= 2 ? 1.55
-						: deg <= 4 ? 1.25
-						: 1;
+						deg <= 2 ? 4.55
+						: deg <= 4 ? 6.25
+						: 3;
 					return (deg > 20 ? 2.1 * baseCharge : baseCharge) * leaf;
 				})
 				.distanceMax(
@@ -826,12 +845,14 @@ const STATIC_NODE_SIZE = 46;
 const COLLISION_GRAPH_RADIUS = 14;
 
 /** On-screen px: match finra-data-chart-next-02 reference (large hubs, tiny leaves) */
-const FIRM_NODE_SIZE = 14;
-const INDIVIDUAL_NODE_SIZE = 4;
+const FIRM_NODE_SIZE = 22;
+const INDIVIDUAL_NODE_SIZE = 22;
 
 function dynamicNodeSize(degree: number, type: string): number {
-	// Large if it is a firm or a high-degree individual (hub), otherwise tiny leaf
-	return type === 'firm' || degree > 20 ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
+	if (type === 'firm') return FIRM_NODE_SIZE;
+	if (degree <= 1) return INDIVIDUAL_NODE_SIZE;
+	// Grow size smoothly based on number of connections up to firm size
+	return Math.min(FIRM_NODE_SIZE, INDIVIDUAL_NODE_SIZE + (degree - 1) * 1.8);
 }
 
 /**
@@ -849,7 +870,14 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	// Children of a firm are mostly people (smaller); children of a person are firms (larger).
 	const childSize = hubIsFirm ? INDIVIDUAL_NODE_SIZE : FIRM_NODE_SIZE;
 	// Extra padding on person→firm rings (firms are large hexes) and dense firm stars.
-	const arcPad = childSize * (hubIsFirm ? (childCount > 80 ? 3.6 : 3.1) : childCount > 24 ? 3.8 : 3.2);
+	const arcPad =
+		childSize *
+		(hubIsFirm ?
+			childCount > 80 ?
+				3.6
+			:	3.1
+		: childCount > 24 ? 3.8
+		: 3.2);
 	const minClear = hubSize + childSize + Math.max(72, childSize * 1.45);
 
 	let ringCount = opts.ringCount ?? 1;
@@ -873,7 +901,7 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	const base = Math.max(minClear, fromArc, hubIsFirm ? 280 : 360);
 	const ring = Math.max(0, opts.ringIndex ?? 0);
 	const ringStep = Math.max(childSize * 3.1 + 56, 130 + Math.min(110, Math.sqrt(childCount) * 12));
-	
+
 	// Revert to original dense layout from finra-data-chart-next-02
 	return { radius: base + ring * ringStep, ringCount };
 }
@@ -896,13 +924,7 @@ function outerOrbitRadius(opts: { hubType: string; childCount: number; ringCount
  * Deterministic angular slot for a newly expanded hub around the local cluster,
  * so successive expands fan out instead of stacking on the same baked coordinates.
  */
-function packNewHubAwayFromOthers(
-	hubX: number,
-	hubY: number,
-	myOuter: number,
-	others: Array<{ x: number; y: number; r: number }>,
-	hubId: string,
-): { x: number; y: number } {
+function packNewHubAwayFromOthers(hubX: number, hubY: number, myOuter: number, others: Array<{ x: number; y: number; r: number }>, hubId: string): { x: number; y: number } {
 	if (!others.length) return { x: hubX, y: hubY };
 
 	let px = hubX;
@@ -984,12 +1006,11 @@ function bakeDisplaySizes(payload: LayoutPayload): LayoutPayload {
 	return payload;
 }
 
-/** Base edge thickness in screen px (itemSizesReference: screen). */
 function edgeBaseSize(weight?: number, grayDashed = false): number {
 	const w = Number(weight) || 1;
 	// Previous/inactive dashed links stay slightly thinner, but still clearly visible.
-	if (grayDashed) return Math.min(2.4, 1.7 + w * 0.04);
-	return Math.min(3.0, 2.2 + w * 0.05);
+	if (grayDashed) return Math.min(1.4, 0.8 + w * 0.04);
+	return Math.min(1.6, 1.0 + w * 0.05);
 }
 
 /**
@@ -998,22 +1019,22 @@ function edgeBaseSize(weight?: number, grayDashed = false): number {
  * - previous employment OR either endpoint inactive: full red line
  */
 const CURRENT_EDGE_COLOR = '#3b82f6'; // solid hex — floatColor-safe
-const GRAY_DASHED_EDGE_COLOR = '#ef4444'; // Red for previous
+const GRAY_DASHED_EDGE_COLOR = 'rgba(156, 163, 175, 0.45)'; // Light gray with opacity
 
 function edgeColor(opts: { previous?: boolean; inactiveEndpoint?: boolean; isDimmed?: boolean }): string {
 	const gray = Boolean(opts.previous || opts.inactiveEndpoint);
-	if (gray) return opts.isDimmed ? 'rgba(239, 68, 68, 0.15)' : GRAY_DASHED_EDGE_COLOR;
+	if (gray) return opts.isDimmed ? 'rgba(156, 163, 175, 0.15)' : GRAY_DASHED_EDGE_COLOR;
 	return opts.isDimmed ? 'rgba(59, 130, 246, 0.15)' : CURRENT_EDGE_COLOR;
 }
 
 /** Selected hub spoke — brighter blue (current) / stronger gray (previous). */
 const SELECTED_EDGE_COLOR = '#60a5fa';
-const SELECTED_PREV_EDGE_COLOR = '#94a3b8';
+const SELECTED_PREV_EDGE_COLOR = 'rgba(156, 163, 175, 0.8)';
 /** Screen-pixel thickness for selected hub→child spokes. */
-const SELECTED_EDGE_SIZE = 3.4;
-const SELECTED_EDGE_SIZE_MAX = 4.6;
-const SELECTED_PREV_EDGE_SIZE = 2.8;
-const SELECTED_PREV_EDGE_SIZE_MAX = 3.6;
+const SELECTED_EDGE_SIZE = 1.6;
+const SELECTED_EDGE_SIZE_MAX = 2.4;
+const SELECTED_PREV_EDGE_SIZE = 1.4;
+const SELECTED_PREV_EDGE_SIZE_MAX = 2.0;
 
 /**
  * Global network map: WebGL via Sigma + graphology, positions precomputed offline.
@@ -1565,13 +1586,8 @@ export default function GlobalGraphPage() {
 
 		const onCameraUpdated = () => {
 			if (suppressing || animating) return;
-			// Defer so we don't fight the active pan gesture mid-frame.
-			window.setTimeout(() => {
-				if (!disposed) keepPinnedInView(false);
-			}, 0);
+			// Removed keepPinnedInView on pan to allow free dragging
 		};
-
-		camera.on('updated', onCameraUpdated);
 
 		// Initial center + short retries (indexation can lag one frame after add).
 		centerOnPinned(doAnimate);
@@ -1798,12 +1814,9 @@ export default function GlobalGraphPage() {
 			CHART_PRELOAD_SEEDS.forEach((seed, i) => {
 				const crd = String(seed.crd);
 				const catalog = nMap.get(crd);
-				const type = (
-					catalog?.type === 'firm' || catalog?.type === 'individual' ? catalog.type : seed.type
-				) as LayoutNode['type'];
+				const type = (catalog?.type === 'firm' || catalog?.type === 'individual' ? catalog.type : seed.type) as LayoutNode['type'];
 				const catLabel = catalog?.label ? String(catalog.label).trim() : '';
-				const label =
-					(catLabel && !/^crd\s*\d+$/i.test(catLabel) && catLabel !== crd ? catLabel : null) || seed.label || crd;
+				const label = (catLabel && !/^crd\s*\d+$/i.test(catLabel) && catLabel !== crd ? catLabel : null) || seed.label || crd;
 				const degree = Math.max(1, Number(catalog?.degree) || 1);
 				const angle = i * golden;
 				const radius = ringStep * Math.sqrt(i + 1);
@@ -1846,10 +1859,7 @@ export default function GlobalGraphPage() {
 			}
 
 			setVisibleCount(visibleIdsRef.current.size);
-			setLodHint(
-				`preload · ${visibleIdsRef.current.size} nodes · ${edgesAdded} edges` +
-					(missingFromCatalog ? ` · ${missingFromCatalog} off-layout` : ''),
-			);
+			setLodHint(`preload · ${visibleIdsRef.current.size} nodes · ${edgesAdded} edges` + (missingFromCatalog ? ` · ${missingFromCatalog} off-layout` : ''));
 
 			if (graph.order >= 1 && !cancelled()) {
 				try {
@@ -1903,10 +1913,7 @@ export default function GlobalGraphPage() {
 								const sx = Math.max(80, Math.abs(vpBR.x - vpTL.x));
 								const sy = Math.max(80, Math.abs(vpBR.y - vpTL.y));
 								const r2 = Math.max(sx / Math.max(w2 * pad, 1), sy / Math.max(h2 * pad, 1), 0.15);
-								sigma.getCamera().animate(
-									{ x: framed.x, y: framed.y, ratio: Math.min(Math.max(r2, 0.2), 80), angle: 0 },
-									{ duration: 700, easing: 'quadraticInOut' },
-								);
+								sigma.getCamera().animate({ x: framed.x, y: framed.y, ratio: Math.min(Math.max(r2, 0.2), 80), angle: 0 }, { duration: 700, easing: 'quadraticInOut' });
 								sigma.refresh();
 							} catch {
 								// ignore
@@ -2653,25 +2660,53 @@ export default function GlobalGraphPage() {
 				setVisibleCount(0);
 
 				// Client-only: sigma/rendering and our WebGL programs touch WebGL* globals.
-				const [graphologyMod, sigmaMod, renderingMod, dashedMod, hexMod] = await Promise.all([
+				const [graphologyMod, sigmaMod, renderingMod, dashedMod, hexMod, circleMod] = await Promise.all([
 					import('graphology'),
 					import('sigma'),
 					import('sigma/rendering'),
 					import('../../src/lib/sigmaEdgeDashed'),
 					import('../../src/lib/sigmaNodeHexagon'),
+					import('../../src/lib/sigmaNodeCircle'),
 				]);
 				if (cancelled || !containerRef.current) return;
 
 				const GraphCtor = resolveDefaultExport<any>(graphologyMod);
 				const SigmaCtor = resolveDefaultExport<any>(sigmaMod);
+				// Prefer custom glow circle; fall back to stock Sigma circle if interop fails.
+				const NodeCircleGlowProgram = resolveProgramClass(circleMod, ['NodeCircleGlowProgram', 'default']);
 				const NodeCircleProgram =
-					(renderingMod as any).NodeCircleProgram || (renderingMod as any).default?.NodeCircleProgram;
-				const EdgeDashedProgram = resolveDefaultExport<any>(dashedMod);
-				const NodeHexagonProgram = resolveDefaultExport<any>(hexMod);
+					NodeCircleGlowProgram ||
+					resolveProgramClass(renderingMod, ['NodeCircleProgram']) ||
+					(renderingMod as any)?.NodeCircleProgram ||
+					(renderingMod as any)?.default?.NodeCircleProgram;
+				const EdgeDashedProgram = resolveProgramClass(dashedMod, ['EdgeDashedProgram', 'default']);
+				const NodeHexagonProgram = resolveProgramClass(hexMod, ['NodeHexagonProgram', 'default']);
 				if (!GraphCtor || !SigmaCtor) throw new Error('Failed to load graphology/sigma');
-				if (typeof NodeCircleProgram !== 'function') throw new Error('NodeCircleProgram missing from sigma/rendering');
+				if (typeof NodeCircleProgram !== 'function') {
+					throw new Error('NodeCircleProgram failed to load (custom glow + sigma/rendering)');
+				}
 				if (typeof NodeHexagonProgram !== 'function') throw new Error('NodeHexagonProgram failed to load');
 				if (typeof EdgeDashedProgram !== 'function') throw new Error('EdgeDashedProgram failed to load');
+
+				// Firm → hexagon, people → circle. Must match constructor + post-construct reducer.
+				const firmHexNodeReducer = (_id: string, attrs: Record<string, any>) => {
+					const nodeType = String(attrs?.nodeType || '');
+					const isFirm = nodeType === 'firm' || attrs?.type === 'hexagon';
+					return {
+						...attrs,
+						type: isFirm ? 'hexagon' : 'circle',
+						// Keep every node above every edge in the zIndex-enabled programs.
+						zIndex: Math.max(2, Number(attrs?.zIndex) || 0),
+					};
+				};
+
+				const nodeProgramClasses = {
+					circle: NodeCircleProgram,
+					hexagon: NodeHexagonProgram,
+				};
+				const edgeProgramClasses = {
+					dashed: EdgeDashedProgram,
+				};
 
 				// Blank graph — search / expand merge nodes onto the canvas (never replace).
 				const graph = new GraphCtor({ type: 'undirected', multi: false, allowSelfLoops: false });
@@ -2686,11 +2721,7 @@ export default function GlobalGraphPage() {
 					// Linear zoomFn + 'screen' => rendered radius scales exactly with zoom.
 					itemSizesReference: 'screen',
 					zoomToSizeRatioFunction: (ratio: number) => ratio,
-					nodeReducer: (_id: string, attrs: Record<string, any>) => ({
-						...attrs,
-						type: 'circle',
-						zIndex: Math.max(2, Number(attrs.zIndex) || 0),
-					}),
+					nodeReducer: firmHexNodeReducer,
 					// Labels use fixed CSS px via drawLabelAbove; keep threshold low so they stay on.
 					labelRenderedSizeThreshold: 0,
 					labelDensity: 0.55,
@@ -2744,15 +2775,8 @@ export default function GlobalGraphPage() {
 					defaultNodeType: 'circle',
 					// Firms = hexagon, people = circle; previous edges = dashed program.
 					// Always include `circle` explicitly: some Sigma merges replace the whole map.
-					// Register programs only at construct — post-construct setSetting(nodeProgramClasses)
-					// can desync settings vs this.nodePrograms and throw on refresh.
-					nodeProgramClasses: {
-						circle: NodeCircleProgram,
-						hexagon: NodeHexagonProgram,
-					},
-					edgeProgramClasses: {
-						dashed: EdgeDashedProgram,
-					},
+					nodeProgramClasses,
+					edgeProgramClasses,
 					defaultNodeColor: INDIVIDUAL_NODE_COLOR,
 					minCameraRatio: 0.004,
 					maxCameraRatio: 40,
@@ -2762,18 +2786,27 @@ export default function GlobalGraphPage() {
 				sigma.setSetting('itemSizesReference', 'screen');
 				sigma.setSetting('zoomToSizeRatioFunction', (ratio: number) => ratio);
 				sigma.setSetting('enableEdgeEvents', true);
-				// Do NOT call setSetting('nodeProgramClasses' | 'edgeProgramClasses') here.
-				// Must keep firm → hexagon mapping here: the post-construct reducer
-				// replaces the constructor one and previously dropped `type: hexagon`.
-				const firmHexNodeReducer = (_id: string, attrs: Record<string, unknown>) => {
-					return {
-						...attrs,
-						type: 'circle',
-						// Keep every node above every edge in the zIndex-enabled programs.
-						zIndex: Math.max(2, Number(attrs.zIndex) || 0),
-					};
-				};
+				// Keep firm → hexagon mapping (same function as constructor).
 				sigma.setSetting('nodeReducer', firmHexNodeReducer as any);
+				// Force-register programs after construct so settings + this.nodePrograms stay aligned.
+				// setSetting(nodeProgramClasses) triggers registerNodeProgram via handleSettingsUpdate.
+				sigma.setSetting('nodeProgramClasses', { ...nodeProgramClasses });
+				sigma.setSetting('edgeProgramClasses', {
+					...(sigma.getSetting('edgeProgramClasses') || {}),
+					...edgeProgramClasses,
+				});
+				// Hard fallback if setSetting path skipped registration for any reason.
+				try {
+					if (typeof sigma.registerNodeProgram === 'function') {
+						sigma.registerNodeProgram('circle', NodeCircleProgram);
+						sigma.registerNodeProgram('hexagon', NodeHexagonProgram);
+					}
+					if (typeof sigma.registerEdgeProgram === 'function') {
+						sigma.registerEdgeProgram('dashed', EdgeDashedProgram);
+					}
+				} catch {
+					// ignore — constructor path may already own these
+				}
 				sigma.setSetting('edgeReducer', (_id: string, attrs: Record<string, any>) => ({
 					...attrs,
 					// Edges always stay under the node layer (never compete with disks).
