@@ -1,10 +1,15 @@
 import type { AppProps } from 'next/app';
+import { Analytics, type BeforeSendEvent as AnalyticsBeforeSendEvent } from '@vercel/analytics/next';
+import { SpeedInsights } from '@vercel/speed-insights/next';
 import Link from 'next/link';
 import { useRouter } from 'next/router';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import '../public/styles.css';
 
 type CrdSelection = { type: 'individual' | 'firm'; crd: string };
+type SpeedInsightsEvent = { type: 'vital'; url: string; route?: string };
+
+const ANALYTICS_DISABLE_STORAGE_KEY = 'dashboard-crds:disable_analytics';
 
 function selectionFromPath(path: string): CrdSelection | null {
 	const clean = String(path || '/')
@@ -28,12 +33,44 @@ function selectionFromPath(path: string): CrdSelection | null {
 	return null;
 }
 
+function readStoredAnalyticsDisabled(): boolean {
+	if (typeof window === 'undefined') return false;
+	try {
+		return window.localStorage.getItem(ANALYTICS_DISABLE_STORAGE_KEY) === '1';
+	} catch {
+		return false;
+	}
+}
+
+function writeStoredAnalyticsDisabled(disabled: boolean) {
+	if (typeof window === 'undefined') return;
+	try {
+		if (disabled) window.localStorage.setItem(ANALYTICS_DISABLE_STORAGE_KEY, '1');
+		else window.localStorage.removeItem(ANALYTICS_DISABLE_STORAGE_KEY);
+	} catch {
+		// ignore quota / private mode
+	}
+}
+
+function parseAnalyticsQueryFlag(raw: string | string[] | undefined): boolean | null {
+	if (raw == null) return null;
+	const value = String(Array.isArray(raw) ? raw[0] : raw)
+		.trim()
+		.toLowerCase();
+	if (!value) return null;
+	if (value === '1' || value === 'true' || value === 'yes' || value === 'on') return true;
+	if (value === '0' || value === 'false' || value === 'no' || value === 'off') return false;
+	return null;
+}
+
 export default function MyApp({ Component, pageProps }: AppProps) {
 	const router = useRouter();
 	const isDashboardRoute = router.pathname === '/' || router.pathname === '/[type]/[crd]';
 	const routePath = (router.asPath || '/').split('?')[0].split('#')[0];
 	// Prefer live window path so dashboard history.pushState selections are visible.
 	const [livePath, setLivePath] = useState(routePath);
+	// Start true so first paint does not emit analytics before localStorage / query is read.
+	const [analyticsDisabled, setAnalyticsDisabled] = useState(true);
 
 	useEffect(() => {
 		const syncFromLocation = () => {
@@ -63,6 +100,40 @@ export default function MyApp({ Component, pageProps }: AppProps) {
 	useEffect(() => {
 		setLivePath(routePath);
 	}, [routePath]);
+
+	// Persist /?disable_analytics=1 (or =0 to re-enable) on this browser so local
+	// machines do not inflate Vercel Analytics / Speed Insights.
+	useEffect(() => {
+		if (!router.isReady) return;
+		const flag = parseAnalyticsQueryFlag(router.query.disable_analytics);
+		if (flag === true) {
+			writeStoredAnalyticsDisabled(true);
+			setAnalyticsDisabled(true);
+			return;
+		}
+		if (flag === false) {
+			writeStoredAnalyticsDisabled(false);
+			setAnalyticsDisabled(false);
+			return;
+		}
+		setAnalyticsDisabled(readStoredAnalyticsDisabled());
+	}, [router.isReady, router.query.disable_analytics]);
+
+	const beforeSendAnalytics = useCallback(
+		(event: AnalyticsBeforeSendEvent) => {
+			if (analyticsDisabled || readStoredAnalyticsDisabled()) return null;
+			return event;
+		},
+		[analyticsDisabled],
+	);
+
+	const beforeSendSpeedInsights = useCallback(
+		(event: SpeedInsightsEvent) => {
+			if (analyticsDisabled || readStoredAnalyticsDisabled()) return null;
+			return event;
+		},
+		[analyticsDisabled],
+	);
 
 	const selection = useMemo(() => selectionFromPath(livePath) || selectionFromPath(routePath), [livePath, routePath]);
 
@@ -108,6 +179,12 @@ export default function MyApp({ Component, pageProps }: AppProps) {
 			<div className={`app-page ${isDashboardRoute ? 'dashboard-page' : ''} ${pageRouteClass}`.trim()}>
 				<Component {...pageProps} />
 			</div>
+			{!analyticsDisabled ?
+				<>
+					<Analytics beforeSend={beforeSendAnalytics} />
+					<SpeedInsights beforeSend={beforeSendSpeedInsights} />
+				</>
+			:	null}
 		</div>
 	);
 }
