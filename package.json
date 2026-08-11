@@ -23,7 +23,8 @@
 		"update-crd-log": "tsx scripts/update-crd-log.ts",
 		"query-target-crds-supervisor": "tsx scripts/query-target-crds-supervisor.ts",
 		"build-global-graph-layout": "tsx scripts/build-global-graph-layout.ts",
-		"build-global-graph-layout:smoke": "tsx scripts/build-global-graph-layout.ts --max-nodes 5000 --iterations 180"
+		"build-global-graph-layout:smoke": "tsx scripts/build-global-graph-layout.ts --max-nodes 5000 --iterations 180",
+		"publish-global-graph-layout": "tsx scripts/publish-global-graph-layout.ts"
 	},
 	"dependencies": {
 		"@upstash/redis": "^1.38.0",
