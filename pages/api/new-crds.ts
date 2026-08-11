@@ -3,7 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { spawn, type ChildProcessByStdio } from 'child_process';
 import type { Readable } from 'stream';
-import { formatErrorMessage, getRedisConnectionMode, listSavedKeysWithStats, loadSavedPayload } from './_lib';
+import { formatErrorMessage, getCacheValue, getRedisConnectionMode, listSavedKeysWithStats, loadSavedPayload, setCacheValue } from './_lib';
 
 type SavedSummaryGroup = {
 	id: string;
@@ -45,10 +45,14 @@ type NewCrdsState = {
 	manualCooldownUntil: string | null;
 };
 
-const derivedDir = path.resolve(process.cwd(), 'data', 'derived');
+const isServerlessRuntime = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+// On Vercel the deploy FS is read-only under /var/task; prefer Redis, then /tmp.
+const derivedDir =
+	isServerlessRuntime ? path.join('/tmp', 'dashboard-crds', 'data', 'derived') : path.resolve(process.cwd(), 'data', 'derived');
 const highWaterReportPath = path.join(derivedDir, 'query-high-water-crds-report.json');
 const highWaterFrontierPath = path.join(derivedDir, 'query-high-water-crds-frontier.json');
 const newCrdsDashboardPath = path.join(derivedDir, 'new-crds-dashboard.json');
+const newCrdsStateRedisKey = 'dashboard:new-crds-state';
 const newCrdsCheckIntervalMs = 24 * 60 * 60 * 1000;
 const newCrdsManualCooldownMs = 15 * 60 * 1000;
 // External-API frontier scans are intentionally slow/intermittent — don't kick one off on
@@ -57,6 +61,11 @@ const newCrdsAutoScanIntervalMs = 15 * 60 * 1000;
 const newCrdsLogTailLimit = 40;
 
 let newCrdScanProcess: ChildProcessByStdio<null, Readable, Readable> | null = null;
+
+function canSpawnBackgroundScan() {
+	// Serverless cannot run long-lived local tsx child processes.
+	return !isServerlessRuntime;
+}
 
 function parseSavedKeyInfo(entry: string | { key?: string; mtime?: number }) {
 	const key =
@@ -304,7 +313,32 @@ function createEmptyNewCrdsState(savedMaxes: Partial<Record<'individual' | 'firm
 }
 
 async function ensureDerivedDir() {
-	await fs.mkdir(derivedDir, { recursive: true });
+	try {
+		await fs.mkdir(derivedDir, { recursive: true });
+		return true;
+	} catch (error) {
+		// Serverless/read-only deploy FS — Redis is the source of truth for state.
+		console.warn(`new-crds: could not ensure derived dir ${derivedDir}: ${formatErrorMessage(error)}`);
+		return false;
+	}
+}
+
+async function readNewCrdsStateRaw(): Promise<string | null> {
+	if (getRedisConnectionMode() !== 'none') {
+		try {
+			const fromRedis = await getCacheValue(newCrdsStateRedisKey);
+			if (fromRedis) return fromRedis;
+		} catch (error) {
+			console.warn(`new-crds: redis state read failed: ${formatErrorMessage(error)}`);
+		}
+	}
+	try {
+		return await fs.readFile(newCrdsDashboardPath, 'utf-8');
+	} catch (error: unknown) {
+		const code = error && typeof error === 'object' && 'code' in error ? String((error as { code?: string }).code || '') : '';
+		if (code === 'ENOENT') return null;
+		throw error;
+	}
 }
 
 async function collectSavedCrdGroups() {
@@ -391,15 +425,41 @@ function buildNewCrdItemFromGroup(group: SavedSummaryGroup, existingItem: NewCrd
 }
 
 async function writeNewCrdsState(state: NewCrdsState) {
-	await ensureDerivedDir();
-	await fs.writeFile(newCrdsDashboardPath, JSON.stringify(state, null, 2), 'utf-8');
+	const payload = JSON.stringify(state, null, 2);
+	let wroteSomewhere = false;
+	if (getRedisConnectionMode() !== 'none') {
+		try {
+			await setCacheValue(newCrdsStateRedisKey, payload);
+			wroteSomewhere = true;
+		} catch (error) {
+			console.warn(`new-crds: redis state write failed: ${formatErrorMessage(error)}`);
+		}
+	}
+	const dirOk = await ensureDerivedDir();
+	if (dirOk) {
+		try {
+			await fs.writeFile(newCrdsDashboardPath, payload, 'utf-8');
+			wroteSomewhere = true;
+		} catch (error) {
+			console.warn(`new-crds: disk state write failed: ${formatErrorMessage(error)}`);
+		}
+	}
+	if (!wroteSomewhere) {
+		// Still allow the request to succeed; redisHighWater does not depend on this file.
+		console.warn('new-crds: state was not persisted (no Redis and no writable disk).');
+	}
 }
 
 async function loadNewCrdsState(savedSummary: Awaited<ReturnType<typeof collectSavedCrdGroups>> | null = null, options: { preserveRunning?: boolean } = {}) {
 	const summary = savedSummary || (await collectSavedCrdGroups());
 	const defaultState = createEmptyNewCrdsState(summary.maxes);
 	try {
-		const parsed = JSON.parse(await fs.readFile(newCrdsDashboardPath, 'utf-8')) as Partial<NewCrdsState>;
+		const raw = await readNewCrdsStateRaw();
+		if (!raw) {
+			await writeNewCrdsState(defaultState);
+			return defaultState;
+		}
+		const parsed = JSON.parse(raw) as Partial<NewCrdsState>;
 		const state: NewCrdsState = {
 			initializedAt: parseIsoTime(parsed?.initializedAt) ? new Date(String(parsed.initializedAt)).toISOString() : defaultState.initializedAt,
 			lastCheckedAt: parseIsoTime(parsed?.lastCheckedAt) ? new Date(String(parsed.lastCheckedAt)).toISOString() : null,
@@ -443,7 +503,8 @@ async function loadNewCrdsState(savedSummary: Awaited<ReturnType<typeof collectS
 			await writeNewCrdsState(defaultState);
 			return defaultState;
 		}
-		throw error;
+		console.warn(`new-crds: load state failed, using defaults: ${formatErrorMessage(error)}`);
+		return defaultState;
 	}
 }
 
@@ -551,6 +612,25 @@ function pushNewCrdLogLines(lines: string[], chunk: Buffer | string) {
 
 async function startNewCrdBackgroundScan(reason: 'scheduled' | 'manual' = 'scheduled') {
 	if (newCrdScanProcess) return false;
+	if (!canSpawnBackgroundScan()) {
+		// Vercel/serverless: still return Redis high-water list; crawls run from a host/cron with disk.
+		const savedSummary = await collectSavedCrdGroups();
+		const state = await loadNewCrdsState(savedSummary, { preserveRunning: true });
+		const now = new Date().toISOString();
+		state.lastRun = {
+			status: 'idle',
+			startedAt: state.lastRun.startedAt,
+			completedAt: state.lastRun.completedAt || now,
+			exitCode: null,
+			message: 'Background high-water scan is disabled on serverless. Showing highest CRDs currently saved in Redis.',
+			logTail: state.lastRun.logTail || [],
+		};
+		if (reason === 'manual') {
+			state.manualCooldownUntil = new Date(Date.now() + newCrdsManualCooldownMs).toISOString();
+		}
+		await writeNewCrdsState(state);
+		return false;
+	}
 	const savedSummary = await collectSavedCrdGroups();
 	const state = await loadNewCrdsState(savedSummary, { preserveRunning: true });
 	const startedAt = new Date().toISOString();

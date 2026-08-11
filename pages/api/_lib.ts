@@ -139,7 +139,7 @@ async function getRedisClient() {
 	return redisClient;
 }
 
-async function getCacheValue(key: string) {
+export async function getCacheValue(key: string) {
 	if (upstashRedisClient) {
 		const value = await upstashRedisClient.get(key);
 		if (value == null) return null;
@@ -150,7 +150,7 @@ async function getCacheValue(key: string) {
 	return client.get(key);
 }
 
-async function setCacheValue(key: string, value: string, ttlSeconds?: number) {
+export async function setCacheValue(key: string, value: string, ttlSeconds?: number) {
 	if (upstashRedisClient) {
 		if (ttlSeconds && ttlSeconds > 0) {
 			await upstashRedisClient.set(key, value, { ex: Math.floor(ttlSeconds) });
