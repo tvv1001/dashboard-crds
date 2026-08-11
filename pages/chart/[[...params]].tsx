@@ -13,7 +13,17 @@ import { extractNamesFromPayload, getContentBlock, resolveEntityDisplayName } fr
 import { toProperCaseName } from '../../src/lib/format';
 import { parseCrdKey } from '../../src/lib/parseKey';
 import { readLastCrdSelection } from '../../src/lib/lastCrdSelection';
+import { CHART_PRELOAD_SEEDS } from '../../src/lib/chartPreloadSeeds';
 import type { LocalNameSearchResult } from '../../src/types';
+
+/** Sigma rendering touches WebGL globals — never import it at module top-level (SSR/Turbopack). */
+function resolveDefaultExport<T = any>(mod: any): T {
+	if (!mod) return null as T;
+	if (typeof mod === 'function') return mod as T;
+	if (typeof mod.default === 'function') return mod.default as T;
+	if (mod.default && typeof mod.default.default === 'function') return mod.default.default as T;
+	return (mod.default ?? mod) as T;
+}
 
 function toArray(value: unknown): any[] {
 	return Array.isArray(value) ? value : [];
@@ -246,6 +256,12 @@ function normalizeEdgeType(raw: string | undefined): EdgeTypeKey {
 /** d3-force bake is already wide; client scale opens dense firm clusters more. */
 const LAYOUT_SPREAD = 7;
 
+/**
+ * Local testing: bare `/chart` preloads curated CRD seeds (see chartPreloadSeeds)
+ * plus catalog edges among them. Set false to restore blank-canvas behavior.
+ */
+const CHART_USE_PRELOAD_SEEDS = true;
+
 function hashString(input: string): number {
 	let h = 2166136261;
 	for (let i = 0; i < input.length; i++) {
@@ -435,8 +451,8 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 		const unique = Array.from(new Set(kids)).sort((a, b) => a.localeCompare(b));
 		const hubNode = nodeById.get(hub);
 		const hubType = hubNode?.firm ? 'firm' : 'individual';
-		// /graph prefers a single ring when the hub has ≤28 kids.
-		const preferSingle = unique.length <= 28 || Boolean(starEgo && hub === egoHubId);
+		// Prefer a single ring only for small stars; dense hubs use multi-ring packing.
+		const preferSingle = unique.length <= 18 || Boolean(starEgo && hub === egoHubId && unique.length <= 28);
 		const { ringCount } = orbitRadiusForHub({
 			hubType,
 			childCount: unique.length,
@@ -459,51 +475,52 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 			childCount: kidCount,
 			ringIndex: ring,
 			ringCount: meta?.ringCount,
-			preferSingleRing: kidCount <= 28,
+			preferSingleRing: kidCount <= 18,
 		});
-		const jitter = ((hashString(`${hubId}:${childId}`) % 1000) / 999 - 0.5) * 28;
+		const jitter = ((hashString(`${hubId}:${childId}`) % 1000) / 999 - 0.5) * 12;
 		return radius + jitter;
 	};
 
-	// Force constants aligned with /graph expand settle (spread hubs, ring leaves).
+	// Force constants: spread hubs hard; keep leaves on private rings.
 	const baseCharge =
 		starEgo ?
-			egoIsPerson ? 1200
-			:	-1400
-		: dense ? 2200
-		: mid ? 1750
-		: 1200;
+			egoIsPerson ? -2200
+			:	-2600
+		: dense ? -3200
+		: mid ? -2600
+		: -2000;
 	const linkStrengthBase =
 		starEgo ?
-			egoIsPerson ? 0.48
-			:	0.36
-		: dense ? 0.16
-		: mid ? 0.22
-		: 0.32;
+			egoIsPerson ? 0.42
+			:	0.34
+		: dense ? 0.12
+		: mid ? 0.18
+		: 0.26;
 	const linkDistBase =
 		starEgo ?
-			egoIsPerson ? 420
-			:	380
-		: nCount > 1000 ? 560
-		: nCount > 300 ? 480
-		: nCount > 150 ? 420
-		: nCount > 80 ? 460
-		: 560;
+			egoIsPerson ? 520
+			:	460
+		: nCount > 1000 ? 720
+		: nCount > 300 ? 640
+		: nCount > 150 ? 580
+		: nCount > 80 ? 540
+		: 620;
 	const collidePad =
 		starEgo ?
-			egoIsPerson ? 72
-			:	86
-		: nCount > 1000 ? 36
-		: nCount > 600 ? 44
-		: nCount > 300 ? 52
-		: nCount > 120 ? 64
-		: nCount > 60 ? 78
-		: 92;
+			egoIsPerson ? 96
+			:	110
+		: nCount > 1000 ? 58
+		: nCount > 600 ? 68
+		: nCount > 300 ? 78
+		: nCount > 120 ? 90
+		: nCount > 60 ? 104
+		: 118;
+	// Weak centering so multi-hub maps don't collapse back together.
 	const centerStrength =
-		starEgo ? 0.02
-		: dense ? 0.0008
-		: mid ? 0.0014
-		: 0.0035;
+		starEgo ? 0.012
+		: dense ? 0.00025
+		: mid ? 0.0005
+		: 0.0012;
 	// Full 2D (circular) — no Y squash.
 	const yFlatten = 1;
 
@@ -516,36 +533,41 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 	cx /= pts.length;
 	cy /= pts.length;
 
-	// Push every expanded hub (firm + person) so private orbits don't overlap (/graph).
-	const expandedHubIds = pts.filter((p) => p.degree >= 4).map((p) => p.id);
+	// Treat any node with kids (or pinned/selected expand hubs) as needing orbit clearance.
+	const expandedHubIds = pts
+		.filter((p) => {
+			const kids = childrenByHub.get(p.id)?.length || 0;
+			return kids >= 2 || p.degree >= 3 || p.pinned || (starEgo && p.id === egoHubId);
+		})
+		.map((p) => p.id);
+
+	const hubOuterOrbit = (id: string, fallbackDeg: number, firm: boolean) => {
+		const meta = hubOrbitMeta.get(id);
+		if (meta) {
+			return outerOrbitRadius({
+				hubType: meta.hubType,
+				childCount: Math.max(meta.kidCount, 1),
+				ringCount: meta.ringCount,
+			});
+		}
+		return outerOrbitRadius({
+			hubType: firm ? 'firm' : 'individual',
+			childCount: Math.max(fallbackDeg, childrenByHub.get(id)?.length || 4, 4),
+		});
+	};
+
+	// Hard push so private orbits never stack (pinned hubs still repel unpinned ones).
 	const firmHubSeparation = (alpha: number) => {
 		if (expandedHubIds.length < 2) return;
+		const pushScale = 1.55 + Math.min(1.2, expandedHubIds.length * 0.04);
 		for (let i = 0; i < expandedHubIds.length; i++) {
 			const a = nodeById.get(expandedHubIds[i]);
 			if (!a) continue;
-			const aMeta = hubOrbitMeta.get(a.id);
-			const aOrbit =
-				aMeta ?
-					orbitRadiusForHub({
-						hubType: aMeta.hubType,
-						childCount: aMeta.kidCount,
-						ringIndex: Math.max(0, aMeta.ringCount - 1),
-						ringCount: aMeta.ringCount,
-					}).radius
-				:	orbitRadiusForHub({ hubType: a.firm ? 'firm' : 'individual', childCount: Math.max(a.degree, 4) }).radius;
+			const aOrbit = hubOuterOrbit(a.id, a.degree, a.firm);
 			for (let j = i + 1; j < expandedHubIds.length; j++) {
 				const b = nodeById.get(expandedHubIds[j]);
 				if (!b) continue;
-				const bMeta = hubOrbitMeta.get(b.id);
-				const bOrbit =
-					bMeta ?
-						orbitRadiusForHub({
-							hubType: bMeta.hubType,
-							childCount: bMeta.kidCount,
-							ringIndex: Math.max(0, bMeta.ringCount - 1),
-							ringCount: bMeta.ringCount,
-						}).radius
-					:	orbitRadiusForHub({ hubType: b.firm ? 'firm' : 'individual', childCount: Math.max(b.degree, 4) }).radius;
+				const bOrbit = hubOuterOrbit(b.id, b.degree, b.firm);
 				let dx = (b.x ?? 0) - (a.x ?? 0);
 				let dy = (b.y ?? 0) - (a.y ?? 0);
 				let dist = Math.hypot(dx, dy);
@@ -557,17 +579,40 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 					dy = Math.sin(ang);
 					dist = 1;
 				}
-				const push = ((need - dist) / need) * alpha * 0.9;
+				// Absolute graph-unit push (not only normalized) so stuck hubs break free.
+				const overlap = need - dist;
+				const push = (overlap / Math.max(need, 1)) * alpha * pushScale + overlap * alpha * 0.08;
 				const ux = (dx / dist) * push;
 				const uy = (dy / dist) * push;
-				if (!a.pinned) {
-					a.vx = (a.vx ?? 0) - ux;
-					a.vy = (a.vy ?? 0) - uy;
+				const aFixed = Boolean(a.pinned || (starEgo && a.id === egoHubId));
+				const bFixed = Boolean(b.pinned || (starEgo && b.id === egoHubId));
+				if (aFixed && bFixed) {
+					// Both fixed: nudge children will stay; still try slight drift if not fx-locked.
+					if (typeof a.fx !== 'number') {
+						a.vx = (a.vx ?? 0) - ux * 0.5;
+						a.vy = (a.vy ?? 0) - uy * 0.5;
+					}
+					if (typeof b.fx !== 'number') {
+						b.vx = (b.vx ?? 0) + ux * 0.5;
+						b.vy = (b.vy ?? 0) + uy * 0.5;
+					}
+					continue;
 				}
-				if (!b.pinned) {
-					b.vx = (b.vx ?? 0) + ux;
-					b.vy = (b.vy ?? 0) + uy;
+				if (aFixed && !bFixed) {
+					// Move free hub fully out of the pinned orbit.
+					b.vx = (b.vx ?? 0) + ux * 2;
+					b.vy = (b.vy ?? 0) + uy * 2;
+					continue;
 				}
+				if (!aFixed && bFixed) {
+					a.vx = (a.vx ?? 0) - ux * 2;
+					a.vy = (a.vy ?? 0) - uy * 2;
+					continue;
+				}
+				a.vx = (a.vx ?? 0) - ux;
+				a.vy = (a.vy ?? 0) - uy;
+				b.vx = (b.vx ?? 0) + ux;
+				b.vy = (b.vy ?? 0) + uy;
 			}
 		}
 	};
@@ -581,26 +626,33 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 			const hub = nodeById.get(hubId);
 			const child = nodeById.get(childId);
 			if (!hub || !child) continue;
-			// /graph: seat true leaves on hub rings; star ego keeps full spoke circle.
+			// Seat leaves on hub rings; multi-hub maps also seat mid-degree nodes lightly.
 			if (starEgo) {
 				if (hubId !== egoHubId) continue;
 			} else {
-				if (hub.degree < 4) continue;
-				if (child.degree > 4) continue;
+				if (hub.degree < 3 && !(childrenByHub.get(hubId)?.length || 0)) continue;
+				// Don't yank another expanded hub off its own center onto a leaf ring.
+				if (child.degree > 6 && (childrenByHub.get(childId)?.length || 0) >= 3) continue;
 			}
-			const targetDist = staggeredChildDistance(hubId, childId, Math.max(hub.degree, childrenByHub.get(hubId)?.length || 1));
+			const kidsArr = childrenByHub.get(hubId) || [];
+			const uniqueKids = Math.max(1, new Set(kidsArr).size);
+			const targetDist = staggeredChildDistance(hubId, childId, Math.max(hub.degree, uniqueKids));
 			const slot = childSlotIndex.get(key) ?? 0;
-			const kids = childrenByHub.get(hubId)?.length || 1;
-			const angle = (slot / Math.max(kids, 1)) * Math.PI * 2 + ring * 0.17;
+			const meta = hubOrbitMeta.get(hubId);
+			const ringCount = meta?.ringCount || 1;
+			// Even angular spacing per ring (not one global slot) — matches initial place.
+			const onRing = Math.max(1, Math.ceil(uniqueKids / ringCount));
+			const indexOnRing = Math.floor(slot / ringCount);
+			const angle = (indexOnRing / onRing) * Math.PI * 2 + ring * 0.21;
 			const tx = (hub.x ?? 0) + Math.cos(angle) * targetDist;
 			const ty = (hub.y ?? 0) + Math.sin(angle) * targetDist * yFlatten;
 			const strength =
 				(starEgo ?
-					egoIsPerson ? 0.32
-					:	0.28
-				: dense ? 0.12
-				: mid ? 0.16
-				: 0.2) * alpha;
+					egoIsPerson ? 0.48
+					:	0.42
+				: dense ? 0.22
+				: mid ? 0.28
+				: 0.34) * alpha;
 			child.vx = (child.vx ?? 0) + (tx - (child.x ?? 0)) * strength;
 			child.vy = (child.vy ?? 0) + (ty - (child.y ?? 0)) * strength;
 		}
@@ -623,39 +675,40 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 
 	let tickCount = 0;
 	const sim = forceSimulation(pts)
-		// Very slow settle so expand / selection motion is easy to follow.
-		.alpha(dense ? 0.1 : 0.12)
-		.alphaMin(0.0004)
+		// Hot start so expand immediately breaks overlapping clusters.
+		.alpha(dense ? 0.22 : 0.28)
+		.alphaMin(0.00035)
 		.alphaDecay(
-			dense ? 0.006
-			: mid ? 0.005
-			: 0.004,
+			dense ? 0.008
+			: mid ? 0.007
+			: 0.006,
 		)
-		.velocityDecay(dense || mid ? 0.72 : 0.68)
+		.velocityDecay(dense || mid ? 0.62 : 0.58)
 		.force(
 			'charge',
 			forceManyBody()
 				.strength((d: any) => {
 					const deg = d.degree || 1;
-					if (d.firm) {
+					const kids = childrenByHub.get(d.id)?.length || 0;
+					if (d.firm || kids >= 3) {
 						const hubMul =
-							deg > 80 ? 3.4
-							: deg > 20 ? 2.6
-							: 2.0;
+							deg > 80 || kids > 80 ? 4.2
+							: deg > 20 || kids > 20 ? 3.2
+							: 2.4;
 						return baseCharge * hubMul;
 					}
 					const leaf =
-						deg <= 2 ? 1.45
-						: deg <= 4 ? 1.2
+						deg <= 2 ? 1.55
+						: deg <= 4 ? 1.25
 						: 1;
-					return (deg > 20 ? 1.9 * baseCharge : baseCharge) * leaf;
+					return (deg > 20 ? 2.1 * baseCharge : baseCharge) * leaf;
 				})
 				.distanceMax(
-					dense ? 1600
-					: mid ? 1300
-					: 1100,
+					dense ? 4200
+					: mid ? 3200
+					: 2600,
 				)
-				.theta(dense || mid ? 0.86 : 0.76),
+				.theta(dense || mid ? 0.82 : 0.72),
 		)
 		.force(
 			'link',
@@ -671,28 +724,29 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 					const hubId = sDeg >= tDeg ? s.id : t.id;
 					const childId = sDeg >= tDeg ? t.id : s.id;
 
-					// /graph stretches firm↔firm and leaf stagger (~×2 effective distance).
+					// Firm↔firm: stretch hard so hubs don't share a cloud.
 					if (s.firm && t.firm) {
-						return (linkDistBase * 1.9 + Math.sqrt(Math.max(sDeg, 1)) * 36 + Math.sqrt(Math.max(tDeg, 1)) * 36) * 2;
+						return (linkDistBase * 2.4 + Math.sqrt(Math.max(sDeg, 1)) * 48 + Math.sqrt(Math.max(tDeg, 1)) * 48) * 2.2;
 					}
 
-					const childIsLeaf = Math.min(sDeg, tDeg) <= 3;
-					const stagger = childIsLeaf && hubDeg >= 4 ? staggeredChildDistance(hubId, childId, hubDeg) : 0;
+					const childKids = childrenByHub.get(childId)?.length || 0;
+					const childIsLeaf = Math.min(sDeg, tDeg) <= 4 && childKids < 3;
+					const stagger = childIsLeaf && hubDeg >= 3 ? staggeredChildDistance(hubId, childId, hubDeg) : 0;
 					const degScale =
-						hubDeg > 100 ? 1.85
-						: hubDeg > 50 ? 1.6
-						: hubDeg > 20 ? 1.35
-						: 1.15;
+						hubDeg > 100 ? 2.1
+						: hubDeg > 50 ? 1.85
+						: hubDeg > 20 ? 1.55
+						: 1.3;
 					const base = stagger > 0 ? stagger : linkDistBase * degScale;
-					return base * 2;
+					return base * 2.15;
 				})
 				.strength((d: any) => {
 					const s = typeof d.source === 'object' ? d.source : nodeById.get(d.source);
 					const t = typeof d.target === 'object' ? d.target : nodeById.get(d.target);
-					if (s?.firm && t?.firm) return linkStrengthBase * 0.35;
+					if (s?.firm && t?.firm) return linkStrengthBase * 0.22;
 					const deg = Math.max(s?.degree || 1, t?.degree || 1);
-					if (deg > 80) return linkStrengthBase * 0.42;
-					if (deg > 20) return linkStrengthBase * 0.62;
+					if (deg > 80) return linkStrengthBase * 0.38;
+					if (deg > 20) return linkStrengthBase * 0.55;
 					return linkStrengthBase;
 				}),
 		)
@@ -702,19 +756,21 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 				.radius((d: any) => {
 					const deg = d.degree || 1;
 					const body = d.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
-					// /graph-style hub halo (not full outer orbit — that over-expands chart).
-					const hubHalo =
-						d.firm ? Math.min(dense ? 320 : 280, body + 50 + Math.sqrt(Math.max(deg, 1)) * (dense ? 18 : 16))
-						: deg >= 4 ? Math.min(220, body + 36 + Math.sqrt(Math.max(deg, 1)) * 12)
-						: body * 0.25;
+					const kids = childrenByHub.get(d.id)?.length || 0;
+					// Expanded hubs reserve near-full outer orbit so clouds don't interpenetrate.
+					if (kids >= 2 || deg >= 4 || d.pinned) {
+						const outer = hubOuterOrbit(d.id, deg, d.firm);
+						// Use a large fraction of outer radius as collision halo.
+						return Math.max(body + collidePad, outer * 0.72);
+					}
 					const leafBoost =
-						deg <= 2 ? body * 0.45
-						: deg <= 4 ? body * 0.28
-						: 0;
-					return body + collidePad + leafBoost + hubHalo;
+						deg <= 2 ? body * 0.7
+						: deg <= 4 ? body * 0.45
+						: body * 0.2;
+					return body + collidePad + leafBoost;
 				})
-				.strength(1)
-				.iterations(dense || mid || starEgo ? 3 : 2),
+				.strength(0.95)
+				.iterations(dense || mid || starEgo ? 4 : 3),
 		)
 		.force('x', forceX(starEgo && egoHubId ? (nodeById.get(egoHubId)?.x ?? cx) : cx).strength(centerStrength))
 		// Equal X/Y centering keeps orbits circular in true 2D (no vertical squash).
@@ -778,6 +834,7 @@ function dynamicNodeSize(degree: number, type: string): number {
 /**
  * Private orbit around an expanded hub — same formula as /graph `graphOrbitRadiusForHub`
  * so chart expand seats leaves the same way.
+ * Dense hubs get more rings + larger arc padding so leaves stay readable.
  */
 function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringIndex?: number; ringCount?: number; preferSingleRing?: boolean }): {
 	radius: number;
@@ -788,33 +845,131 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	const hubSize = hubIsFirm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
 	// Children of a firm are mostly people (smaller); children of a person are firms (larger).
 	const childSize = hubIsFirm ? INDIVIDUAL_NODE_SIZE : FIRM_NODE_SIZE;
-	const arcPad = childSize * 2.7;
-	const minClear = hubSize + childSize + Math.max(48, childSize * 1.1);
+	// Extra padding on person→firm rings (firms are large hexes) and dense firm stars.
+	const arcPad = childSize * (hubIsFirm ? (childCount > 80 ? 3.6 : 3.1) : childCount > 24 ? 3.8 : 3.2);
+	const minClear = hubSize + childSize + Math.max(72, childSize * 1.45);
 
 	let ringCount = opts.ringCount ?? 1;
-	if (opts.preferSingleRing && childCount <= 28) {
+	if (opts.preferSingleRing && childCount <= 22) {
 		ringCount = 1;
 	} else if (opts.ringCount == null) {
-		if (childCount > 200) ringCount = 7;
-		else if (childCount > 120) ringCount = 6;
-		else if (childCount > 70) ringCount = 5;
-		else if (childCount > 36) ringCount = 4;
-		else if (childCount > 18) ringCount = 3;
-		else if (childCount > 10) ringCount = 2;
+		// Prefer more rings earlier so dense hubs don't pack leaves into one clump.
+		if (childCount > 160) ringCount = 8;
+		else if (childCount > 100) ringCount = 7;
+		else if (childCount > 60) ringCount = 6;
+		else if (childCount > 36) ringCount = 5;
+		else if (childCount > 22) ringCount = 4;
+		else if (childCount > 12) ringCount = 3;
+		else if (childCount > 7) ringCount = 2;
 		else ringCount = 1;
 	}
 
 	const perRing = Math.max(1, Math.ceil(childCount / ringCount));
 	// Radius from arc length: 2πr / n >= arcPad  =>  r >= n * arcPad / 2π
 	const fromArc = (perRing * arcPad) / (Math.PI * 2);
-	const base = Math.max(minClear, fromArc, hubIsFirm ? 220 : 280);
+	const base = Math.max(minClear, fromArc, hubIsFirm ? 280 : 360);
 	const ring = Math.max(0, opts.ringIndex ?? 0);
-	const ringStep = Math.max(childSize * 2.4 + 40, 100 + Math.min(80, Math.sqrt(childCount) * 9));
+	const ringStep = Math.max(childSize * 3.1 + 56, 130 + Math.min(110, Math.sqrt(childCount) * 12));
 	return { radius: base + ring * ringStep, ringCount };
 }
 
-/** Gap between outer edges of two expanded hub orbits (/graph parity). */
-const ORBIT_HUB_GAP = Math.max(100, FIRM_NODE_SIZE * 1.1);
+/** Outer orbit radius for a hub (used for hub-to-hub packing). */
+function outerOrbitRadius(opts: { hubType: string; childCount: number; ringCount?: number; preferSingleRing?: boolean }): number {
+	const { radius, ringCount } = orbitRadiusForHub({
+		hubType: opts.hubType,
+		childCount: opts.childCount,
+		ringIndex: Math.max(0, (opts.ringCount ?? orbitRadiusForHub({ hubType: opts.hubType, childCount: opts.childCount, preferSingleRing: opts.preferSingleRing }).ringCount) - 1),
+		ringCount: opts.ringCount,
+		preferSingleRing: opts.preferSingleRing,
+	});
+	// Leaf body + small margin so neighboring orbits don't kiss.
+	const leaf = opts.hubType === 'firm' ? INDIVIDUAL_NODE_SIZE : FIRM_NODE_SIZE;
+	return radius + leaf * 0.65;
+}
+
+/**
+ * Deterministic angular slot for a newly expanded hub around the local cluster,
+ * so successive expands fan out instead of stacking on the same baked coordinates.
+ */
+function packNewHubAwayFromOthers(
+	hubX: number,
+	hubY: number,
+	myOuter: number,
+	others: Array<{ x: number; y: number; r: number }>,
+	hubId: string,
+): { x: number; y: number } {
+	if (!others.length) return { x: hubX, y: hubY };
+
+	let px = hubX;
+	let py = hubY;
+	// Strong iterative separation: push fully clear of every other orbit.
+	for (let iter = 0; iter < 28; iter++) {
+		let moved = false;
+		for (const o of others) {
+			let dx = px - o.x;
+			let dy = py - o.y;
+			let dist = Math.hypot(dx, dy);
+			const need = myOuter + o.r + ORBIT_HUB_GAP;
+			if (dist >= need) continue;
+			if (dist < 1e-3) {
+				const ang = ((hashString(`${hubId}|${o.x},${o.y}`) % 1000) / 999) * Math.PI * 2;
+				dx = Math.cos(ang);
+				dy = Math.sin(ang);
+				dist = 1;
+			}
+			const push = (need - dist) * 1.05;
+			px += (dx / dist) * push;
+			py += (dy / dist) * push;
+			moved = true;
+		}
+		if (!moved) break;
+	}
+
+	// If still colliding (pathological pile), park on a free angular slot around centroid.
+	let stillHit = false;
+	for (const o of others) {
+		const need = myOuter + o.r + ORBIT_HUB_GAP;
+		if (Math.hypot(px - o.x, py - o.y) < need) {
+			stillHit = true;
+			break;
+		}
+	}
+	if (stillHit) {
+		let cx = 0;
+		let cy = 0;
+		for (const o of others) {
+			cx += o.x;
+			cy += o.y;
+		}
+		cx /= others.length;
+		cy /= others.length;
+		const baseAng = ((hashString(hubId) % 1000) / 999) * Math.PI * 2;
+		let best = { x: px, y: py, score: -Infinity };
+		for (let k = 0; k < 24; k++) {
+			const ang = baseAng + (k / 24) * Math.PI * 2;
+			// Radius grows until clear of all others.
+			let rad = myOuter + ORBIT_HUB_GAP;
+			for (const o of others) {
+				rad = Math.max(rad, Math.hypot(o.x - cx, o.y - cy) + o.r + myOuter + ORBIT_HUB_GAP);
+			}
+			const tx = cx + Math.cos(ang) * rad;
+			const ty = cy + Math.sin(ang) * rad;
+			let minClear = Infinity;
+			for (const o of others) {
+				const need = myOuter + o.r + ORBIT_HUB_GAP;
+				minClear = Math.min(minClear, Math.hypot(tx - o.x, ty - o.y) - need);
+			}
+			if (minClear > best.score) best = { x: tx, y: ty, score: minClear };
+			if (minClear >= 0) break;
+		}
+		px = best.x;
+		py = best.y;
+	}
+	return { x: px, y: py };
+}
+
+/** Gap between outer edges of two expanded hub orbits — wide enough for legibility. */
+const ORBIT_HUB_GAP = Math.max(220, FIRM_NODE_SIZE * 4.5);
 
 /** Stamp display sizes onto layout nodes once (collision uses node size). */
 function bakeDisplaySizes(payload: LayoutPayload): LayoutPayload {
@@ -827,9 +982,9 @@ function bakeDisplaySizes(payload: LayoutPayload): LayoutPayload {
 /** Base edge thickness in screen px (itemSizesReference: screen). */
 function edgeBaseSize(weight?: number, grayDashed = false): number {
 	const w = Number(weight) || 1;
-	// Reference app: previous/inactive endpoints render thinner dashed links.
-	if (grayDashed) return Math.min(1.15, 0.85 + w * 0.02);
-	return Math.min(1.9, 1.45 + w * 0.03);
+	// Previous/inactive dashed links stay slightly thinner, but still clearly visible.
+	if (grayDashed) return Math.min(2.4, 1.7 + w * 0.04);
+	return Math.min(3.0, 2.2 + w * 0.05);
 }
 
 /**
@@ -837,20 +992,23 @@ function edgeBaseSize(weight?: number, grayDashed = false): number {
  * - current employment (both ends active): blue employed line
  * - previous employment OR either endpoint inactive: full gray dashed (never half-blue)
  */
-const CURRENT_EDGE_COLOR = 'rgba(30, 136, 255, 0.88)'; // --color-highlight-employed ≈ #1e88ff
-const GRAY_DASHED_EDGE_COLOR = 'rgba(135, 155, 183, 0.78)'; // --color-node-inactive-stroke family
+const CURRENT_EDGE_COLOR = '#1e88ff'; // solid hex — floatColor-safe
+const GRAY_DASHED_EDGE_COLOR = '#879bb7';
 
 function edgeColor(opts: { previous?: boolean; inactiveEndpoint?: boolean; isDimmed?: boolean }): string {
 	const gray = Boolean(opts.previous || opts.inactiveEndpoint);
-	if (gray) return opts.isDimmed ? 'rgba(135, 155, 183, 0.28)' : GRAY_DASHED_EDGE_COLOR;
-	return opts.isDimmed ? 'rgba(30, 136, 255, 0.22)' : CURRENT_EDGE_COLOR;
+	if (gray) return opts.isDimmed ? '#4b5563' : GRAY_DASHED_EDGE_COLOR;
+	return opts.isDimmed ? '#1e3a8a' : CURRENT_EDGE_COLOR;
 }
 
-/** Selected current spoke (active↔active only) — brighter blue. */
+/** Selected hub spoke — brighter blue (current) / stronger gray (previous). */
 const SELECTED_EDGE_COLOR = '#60a5fa';
+const SELECTED_PREV_EDGE_COLOR = '#94a3b8';
 /** Screen-pixel thickness for selected hub→child spokes. */
-const SELECTED_EDGE_SIZE = 2.6;
-const SELECTED_EDGE_SIZE_MAX = 3.4;
+const SELECTED_EDGE_SIZE = 3.4;
+const SELECTED_EDGE_SIZE_MAX = 4.6;
+const SELECTED_PREV_EDGE_SIZE = 2.8;
+const SELECTED_PREV_EDGE_SIZE_MAX = 3.6;
 
 /**
  * Global network map: WebGL via Sigma + graphology, positions precomputed offline.
@@ -1171,9 +1329,10 @@ export default function GlobalGraphPage() {
 			graph.setNodeAttribute(node, 'pinned', isSelected);
 		});
 
-		// Edges: keep the full map lit. Selection only thickens CURRENT active spokes.
+		// Edges: keep the full map lit. Selection thickens hub spokes (current + previous).
 		// Reference (finra-data-chart-next-02): previous OR inactive-endpoint links are
 		// gray dashed for the FULL length (even when the other end is active).
+		// Person hubs often have only previous employers — those must still read clearly.
 		graph.forEachEdge((edge, attrs, source, target) => {
 			const et = normalizeEdgeType(String(attrs.edgeType || ''));
 			const typeOn = enabled[et] !== false && !attrs.filterHidden && !attrs.typeHidden;
@@ -1189,21 +1348,32 @@ export default function GlobalGraphPage() {
 			const inactiveEndpoint = srcInactive || tgtInactive;
 			// Gray dashed whenever previous OR either endpoint is inactive.
 			const grayDashed = previous || inactiveEndpoint;
-			const baseSize = Number(attrs.baseSize) > 0 ? Number(attrs.baseSize) : edgeBaseSize(Number(attrs.weight), grayDashed);
+			// Always recompute base size so older thin values get upgraded.
+			const baseSize = edgeBaseSize(Number(attrs.weight), grayDashed);
 			const disabled = isDisabledEdge(attrsRec, source, target);
-			// Only current spokes between active nodes get selection emphasis.
-			const emphasizeCurrent = hasSelectionOrHover && !disabled && !grayDashed && isEmphasizedEdge(source, target, attrsRec);
+			const emphasized = hasSelectionOrHover && !disabled && isEmphasizedEdge(source, target, attrsRec);
 
 			// Always keep type-enabled edges visible (no hide/dim of background lines).
 			graph.setEdgeAttribute(edge, 'hidden', false);
 
-			if (emphasizeCurrent) {
+			if (emphasized) {
 				const weightBoost = Math.min(1.25, 1 + (Number(attrs.weight) || 1) * 0.03);
+				if (grayDashed) {
+					// Previous / inactive endpoint: thicker gray dashed so person stars stay readable.
+					const spokeSize = Math.min(SELECTED_PREV_EDGE_SIZE_MAX, SELECTED_PREV_EDGE_SIZE * weightBoost);
+					graph.setEdgeAttribute(edge, 'type', 'dashed');
+					graph.setEdgeAttribute(edge, 'color', SELECTED_PREV_EDGE_COLOR);
+					graph.setEdgeAttribute(edge, 'zIndex', -1);
+					graph.setEdgeAttribute(edge, 'size', spokeSize);
+					graph.setEdgeAttribute(edge, 'baseSize', baseSize);
+					return;
+				}
 				const spokeSize = Math.min(SELECTED_EDGE_SIZE_MAX, SELECTED_EDGE_SIZE * weightBoost);
 				graph.setEdgeAttribute(edge, 'type', 'line');
 				graph.setEdgeAttribute(edge, 'color', SELECTED_EDGE_COLOR);
 				graph.setEdgeAttribute(edge, 'zIndex', -1);
 				graph.setEdgeAttribute(edge, 'size', spokeSize);
+				graph.setEdgeAttribute(edge, 'baseSize', baseSize);
 				return;
 			}
 
@@ -1597,6 +1767,164 @@ export default function GlobalGraphPage() {
 	);
 
 	/**
+	 * Bare `/chart` test preload: paint curated CRDs + catalog edges among them.
+	 * Uses a local spiral (not global bake coords) so camera fit stays on-screen.
+	 */
+	const seedPreloadIntoGraph = useCallback(
+		(opts?: { cancelled?: () => boolean }): { nodesAdded: number; edgesAdded: number; missingFromCatalog: number } => {
+			const cancelled = opts?.cancelled || (() => false);
+			const graph = graphRef.current;
+			const sigma = sigmaRef.current;
+			const payload = layoutRef.current;
+			if (!graph || !sigma || !payload || !CHART_USE_PRELOAD_SEEDS || CHART_PRELOAD_SEEDS.length === 0) {
+				return { nodesAdded: 0, edgesAdded: 0, missingFromCatalog: 0 };
+			}
+			if (cancelled()) return { nodesAdded: 0, edgesAdded: 0, missingFromCatalog: 0 };
+
+			egoModeRef.current = null;
+			const nMap = nodeIndexRef.current;
+			const seedSet = new Set(CHART_PRELOAD_SEEDS.map((s) => String(s.crd)));
+			let nodesAdded = 0;
+			let edgesAdded = 0;
+			let missingFromCatalog = 0;
+			const golden = 2.399963229728653;
+			const ringStep = 28;
+
+			CHART_PRELOAD_SEEDS.forEach((seed, i) => {
+				const crd = String(seed.crd);
+				const catalog = nMap.get(crd);
+				const type = (
+					catalog?.type === 'firm' || catalog?.type === 'individual' ? catalog.type : seed.type
+				) as LayoutNode['type'];
+				const catLabel = catalog?.label ? String(catalog.label).trim() : '';
+				const label =
+					(catLabel && !/^crd\s*\d+$/i.test(catLabel) && catLabel !== crd ? catLabel : null) || seed.label || crd;
+				const degree = Math.max(1, Number(catalog?.degree) || 1);
+				const angle = i * golden;
+				const radius = ringStep * Math.sqrt(i + 1);
+				const gx = Math.cos(angle) * radius * LAYOUT_SPREAD;
+				const gy = Math.sin(angle) * radius * LAYOUT_SPREAD * 0.85;
+				const stub: LayoutNode = {
+					id: crd,
+					label,
+					type,
+					x: catalog && Number.isFinite(Number(catalog.x)) ? Number(catalog.x) : gx / LAYOUT_SPREAD,
+					y: catalog && Number.isFinite(Number(catalog.y)) ? Number(catalog.y) : gy / (LAYOUT_SPREAD * 0.85),
+					size: catalog?.size ?? 1,
+					color: catalog?.color || nodeDisplayColor(type),
+					degree,
+					cluster: catalog?.cluster,
+					region: catalog?.region,
+					regionGroup: catalog?.regionGroup,
+					brokerCount: catalog?.brokerCount,
+					firmLinkCount: catalog?.firmLinkCount,
+					weight: catalog?.weight ?? degree,
+					inactive: catalog?.inactive,
+				};
+				if (!catalog) {
+					missingFromCatalog++;
+					nMap.set(crd, stub);
+				} else {
+					catalog.label = label;
+					if (catalog.type !== 'firm' && catalog.type !== 'individual') catalog.type = type;
+					nMap.set(crd, catalog);
+				}
+				const meta = nMap.get(crd)!;
+				if (ensureNodeOnGraph(meta, { x: gx, y: gy })) nodesAdded++;
+			});
+
+			for (const e of payload.edges || []) {
+				const s = String(e.source);
+				const t = String(e.target);
+				if (!seedSet.has(s) || !seedSet.has(t)) continue;
+				if (ensureEdgeOnGraph({ ...e, source: s, target: t })) edgesAdded++;
+			}
+
+			setVisibleCount(visibleIdsRef.current.size);
+			setLodHint(
+				`preload · ${visibleIdsRef.current.size} nodes · ${edgesAdded} edges` +
+					(missingFromCatalog ? ` · ${missingFromCatalog} off-layout` : ''),
+			);
+
+			if (graph.order >= 1 && !cancelled()) {
+				try {
+					if (graph.order >= 2) runFluidLayout(graph, sigma);
+				} catch {
+					// ignore
+				}
+				try {
+					let minX = Infinity;
+					let maxX = -Infinity;
+					let minY = Infinity;
+					let maxY = -Infinity;
+					graph.forEachNode((_id, attrs) => {
+						const x = Number(attrs.x);
+						const y = Number(attrs.y);
+						if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+						if (x < minX) minX = x;
+						if (x > maxX) maxX = x;
+						if (y < minY) minY = y;
+						if (y > maxY) maxY = y;
+					});
+					if (Number.isFinite(minX) && Number.isFinite(maxX) && Number.isFinite(minY) && Number.isFinite(maxY)) {
+						if (!(maxX > minX)) {
+							minX -= 200;
+							maxX += 200;
+						}
+						if (!(maxY > minY)) {
+							minY -= 200;
+							maxY += 200;
+						}
+						const cx = (minX + maxX) / 2;
+						const cy = (minY + maxY) / 2;
+						const dims = sigma.getDimensions();
+						const w = Math.max(Number(dims.width) || 0, 800);
+						const h = Math.max(Number(dims.height) || 0, 600);
+						const pad = 0.82;
+						const spanX = Math.max(120, maxX - minX);
+						const spanY = Math.max(120, maxY - minY);
+						const ratio = Math.max(spanX / Math.max(w * pad, 1), spanY / Math.max(h * pad, 1), 0.15);
+						sigma.getCamera().setState({ x: cx, y: cy, ratio: Math.min(Math.max(ratio, 0.2), 80), angle: 0 });
+						window.setTimeout(() => {
+							try {
+								if (cancelled() || sigmaRef.current !== sigma) return;
+								const d2 = sigma.getDimensions();
+								const w2 = Math.max(Number(d2.width) || 0, 1);
+								const h2 = Math.max(Number(d2.height) || 0, 1);
+								if (w2 < 2 || h2 < 2) return;
+								const vpTL = sigma.graphToViewport({ x: minX, y: minY });
+								const vpBR = sigma.graphToViewport({ x: maxX, y: maxY });
+								const framed = sigma.viewportToFramedGraph(sigma.graphToViewport({ x: cx, y: cy }));
+								const sx = Math.max(80, Math.abs(vpBR.x - vpTL.x));
+								const sy = Math.max(80, Math.abs(vpBR.y - vpTL.y));
+								const r2 = Math.max(sx / Math.max(w2 * pad, 1), sy / Math.max(h2 * pad, 1), 0.15);
+								sigma.getCamera().animate(
+									{ x: framed.x, y: framed.y, ratio: Math.min(Math.max(r2, 0.2), 80), angle: 0 },
+									{ duration: 700, easing: 'quadraticInOut' },
+								);
+								sigma.refresh();
+							} catch {
+								// ignore
+							}
+						}, 120);
+					}
+				} catch {
+					// ignore camera fit
+				}
+			}
+
+			applyHighlightRef.current();
+			try {
+				sigma.refresh();
+			} catch {
+				// ignore
+			}
+			return { nodesAdded, edgesAdded, missingFromCatalog };
+		},
+		[ensureEdgeOnGraph, ensureNodeOnGraph],
+	);
+
+	/**
 	 * Neighbor policy (/graph expand-in-place):
 	 * - person/individual → attached firm nodes (current + previous)
 	 * - firm → full direct star (employees/owners + previous) unless caller forces 'none'
@@ -1681,7 +2009,7 @@ export default function GlobalGraphPage() {
 				const { ringCount: sizedRings } = orbitRadiusForHub({
 					hubType: seed.type,
 					childCount: Math.max(1, placeCap),
-					preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 28) || placeCap <= 28,
+					preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 18) || placeCap <= 18,
 				});
 				const ringCount = sizedRings;
 				// Always circular 2D placement (no Y squash).
@@ -1692,56 +2020,36 @@ export default function GlobalGraphPage() {
 					hubX = Number(graph.getNodeAttribute(nodeId, 'x')) || hubX;
 					hubY = Number(graph.getNodeAttribute(nodeId, 'y')) || hubY;
 				}
-				// Soft push away from other expanded hubs (orbit + gap) before seating leaves.
+				// Hard pack this hub away from every other expanded orbit before seating leaves.
 				const otherHubs: Array<{ x: number; y: number; r: number }> = [];
 				graph.forEachNode((id, attrs) => {
 					if (id === nodeId) return;
 					const deg = Number(attrs.degree) || graph.degree(id) || 0;
-					if (deg < 3 && !visitedIdsRef.current.has(id)) return;
+					const kidsOnCanvas = graph.degree(id);
+					// Count anything already expanded / multi-neighbor as an orbit owner.
+					if (deg < 2 && kidsOnCanvas < 2 && !visitedIdsRef.current.has(id) && !selectedIdsRef.current.has(id)) return;
 					const nt = String(attrs.nodeType || '');
-					const otherOrbit = orbitRadiusForHub({
+					const otherOrbit = outerOrbitRadius({
 						hubType: nt === 'firm' ? 'firm' : 'individual',
-						childCount: Math.max(deg, 4),
-						preferSingleRing: true,
-					}).radius;
+						childCount: Math.max(deg, kidsOnCanvas, 4),
+						preferSingleRing: kidsOnCanvas <= 22,
+					});
 					otherHubs.push({
 						x: Number(attrs.x) || 0,
 						y: Number(attrs.y) || 0,
 						r: otherOrbit,
 					});
 				});
+				const myOuter = outerOrbitRadius({
+					hubType: seed.type,
+					childCount: Math.max(1, placeCap),
+					ringCount,
+					preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 22) || placeCap <= 22,
+				});
 				if (otherHubs.length) {
-					const myOuter = orbitRadiusForHub({
-						hubType: seed.type,
-						childCount: Math.max(1, placeCap),
-						ringIndex: Math.max(0, ringCount - 1),
-						ringCount,
-					}).radius;
-					let px = hubX;
-					let py = hubY;
-					for (let iter = 0; iter < 12; iter++) {
-						let moved = false;
-						for (const o of otherHubs) {
-							let dx = px - o.x;
-							let dy = py - o.y;
-							let dist = Math.hypot(dx, dy);
-							const need = myOuter + o.r + ORBIT_HUB_GAP;
-							if (dist >= need) continue;
-							if (dist < 1e-3) {
-								const ang = ((hashString(`${nodeId}|${o.x},${o.y}`) % 1000) / 999) * Math.PI * 2;
-								dx = Math.cos(ang);
-								dy = Math.sin(ang);
-								dist = 1;
-							}
-							const push = (need - dist) * 0.75;
-							px += (dx / dist) * push;
-							py += (dy / dist) * push;
-							moved = true;
-						}
-						if (!moved) break;
-					}
-					hubX = px;
-					hubY = py;
+					const packed = packNewHubAwayFromOthers(hubX, hubY, myOuter, otherHubs, nodeId);
+					hubX = packed.x;
+					hubY = packed.y;
 					if (graph.hasNode(nodeId)) {
 						try {
 							graph.setNodeAttribute(nodeId, 'x', hubX);
@@ -1760,26 +2068,29 @@ export default function GlobalGraphPage() {
 					if (!meta) continue;
 					const ring = slot % ringCount;
 					// Even angular slots per ring (not one global slot) so dense rings stay spaced.
-					const onRing = Math.ceil(placeCap / ringCount);
+					const onRing = Math.max(1, Math.ceil(placeCap / ringCount));
 					const indexOnRing = Math.floor(slot / ringCount);
-					const angle = (indexOnRing / Math.max(onRing, 1)) * Math.PI * 2 + ring * 0.17;
+					const angle = (indexOnRing / onRing) * Math.PI * 2 + ring * 0.21;
 					const { radius } = orbitRadiusForHub({
 						hubType: seed.type,
 						childCount: Math.max(1, placeCap),
 						ringIndex: ring,
 						ringCount,
-						preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 28) || placeCap <= 28,
+						preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 22) || placeCap <= 22,
 					});
-					const jitter = ((hashString(`${nodeId}:${c.id}`) % 1000) / 999 - 0.5) * 28;
+					// Tiny jitter only — large jitter caused leaf piles on dense rings.
+					const jitter = ((hashString(`${nodeId}:${c.id}`) % 1000) / 999 - 0.5) * 12;
 					const dist = radius + jitter;
 					const pos = {
 						x: hubX + Math.cos(angle) * dist,
 						y: hubY + Math.sin(angle) * dist * yScale,
 					};
-					// Firm + person stars: always re-seat leaves onto this hub's private orbit.
-					if (starEgoSeed || firmStarSeed || !graph.hasNode(c.id)) {
+					// Always re-seat leaves of this expand onto the hub's private orbit.
+					// Other expanded hubs keep their own centers (handled in fluid layout).
+					const childIsOtherHub = graph.hasNode(c.id) && graph.degree(c.id) > 6;
+					if (starEgoSeed || firmStarSeed || !graph.hasNode(c.id) || !childIsOtherHub) {
 						if (ensureNodeOnGraph(meta, pos)) added++;
-						else if (graph.hasNode(c.id)) {
+						else if (graph.hasNode(c.id) && !childIsOtherHub) {
 							try {
 								graph.setNodeAttribute(c.id, 'x', pos.x);
 								graph.setNodeAttribute(c.id, 'y', pos.y);
@@ -2336,13 +2647,26 @@ export default function GlobalGraphPage() {
 				visibleIdsRef.current.clear();
 				setVisibleCount(0);
 
-				const [{ default: GraphCtor }, { default: SigmaCtor }, { default: EdgeDashedProgram }, { default: NodeHexagonProgram }] = await Promise.all([
+				// Client-only: sigma/rendering and our WebGL programs touch WebGL* globals.
+				const [graphologyMod, sigmaMod, renderingMod, dashedMod, hexMod] = await Promise.all([
 					import('graphology'),
 					import('sigma'),
+					import('sigma/rendering'),
 					import('../../src/lib/sigmaEdgeDashed'),
 					import('../../src/lib/sigmaNodeHexagon'),
 				]);
 				if (cancelled || !containerRef.current) return;
+
+				const GraphCtor = resolveDefaultExport<any>(graphologyMod);
+				const SigmaCtor = resolveDefaultExport<any>(sigmaMod);
+				const NodeCircleProgram =
+					(renderingMod as any).NodeCircleProgram || (renderingMod as any).default?.NodeCircleProgram;
+				const EdgeDashedProgram = resolveDefaultExport<any>(dashedMod);
+				const NodeHexagonProgram = resolveDefaultExport<any>(hexMod);
+				if (!GraphCtor || !SigmaCtor) throw new Error('Failed to load graphology/sigma');
+				if (typeof NodeCircleProgram !== 'function') throw new Error('NodeCircleProgram missing from sigma/rendering');
+				if (typeof NodeHexagonProgram !== 'function') throw new Error('NodeHexagonProgram failed to load');
+				if (typeof EdgeDashedProgram !== 'function') throw new Error('EdgeDashedProgram failed to load');
 
 				// Blank graph — search / expand merge nodes onto the canvas (never replace).
 				const graph = new GraphCtor({ type: 'undirected', multi: false, allowSelfLoops: false });
@@ -2356,8 +2680,8 @@ export default function GlobalGraphPage() {
 					// Screen-pixel sizes: scaleSize(s) = s / zoomFn(ratio) [* positions term].
 					// Linear zoomFn + 'screen' => rendered radius scales exactly with zoom.
 					itemSizesReference: 'screen',
-					zoomToSizeRatioFunction: (ratio) => ratio,
-					nodeReducer: (_id, attrs) => ({
+					zoomToSizeRatioFunction: (ratio: number) => ratio,
+					nodeReducer: (_id: string, attrs: Record<string, any>) => ({
 						...attrs,
 						type: attrs.type === 'hexagon' || attrs.nodeType === 'firm' ? 'hexagon' : 'circle',
 						zIndex: Math.max(2, Number(attrs.zIndex) || 0),
@@ -2370,14 +2694,19 @@ export default function GlobalGraphPage() {
 					labelFont: 'ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif',
 					labelWeight: '600',
 					labelColor: { color: '#e2e8f0' },
-					defaultDrawNodeLabel: (context, data, settings) => {
+					defaultDrawNodeLabel: (context: CanvasRenderingContext2D, data: any, settings: any) => {
 						drawLabelAbove(context, data as any, settings as any, { hover: false, recordHit: true });
 					},
-					defaultDrawNodeHover: (context, data, settings) => {
+					defaultDrawNodeHover: (context: CanvasRenderingContext2D, data: any, settings: any) => {
 						// /graph selection: outer halo + cyan ring (does not change fill).
 						const size = Number((data as any).size) || 11;
-						const x = Number((data as any).x) || 0;
-						const y = Number((data as any).y) || 0;
+						const x = Number((data as any).x);
+						const y = Number((data as any).y);
+						// Never fall back to (0,0) — that paints a stuck ring in the canvas top-left.
+						if (!Number.isFinite(x) || !Number.isFinite(y)) {
+							drawLabelAbove(context, data as any, settings as any, { hover: true, recordHit: true });
+							return;
+						}
 						const selected = Boolean((data as any).highlighted);
 
 						if (selected) {
@@ -2409,7 +2738,11 @@ export default function GlobalGraphPage() {
 					defaultEdgeType: 'line',
 					defaultNodeType: 'circle',
 					// Firms = hexagon, people = circle; previous edges = dashed program.
+					// Always include `circle` explicitly: some Sigma merges replace the whole map.
+					// Register programs only at construct — post-construct setSetting(nodeProgramClasses)
+					// can desync settings vs this.nodePrograms and throw on refresh.
 					nodeProgramClasses: {
+						circle: NodeCircleProgram,
 						hexagon: NodeHexagonProgram,
 					},
 					edgeProgramClasses: {
@@ -2422,20 +2755,35 @@ export default function GlobalGraphPage() {
 				});
 				// Re-assert after construct — some Sigma paths re-merge defaults once.
 				sigma.setSetting('itemSizesReference', 'screen');
-				sigma.setSetting('zoomToSizeRatioFunction', (ratio) => ratio);
+				sigma.setSetting('zoomToSizeRatioFunction', (ratio: number) => ratio);
 				sigma.setSetting('enableEdgeEvents', true);
-				sigma.setSetting('nodeReducer', (_id, attrs) => ({
-					...attrs,
-					// Keep every node above every edge in the zIndex-enabled programs.
-					zIndex: Math.max(2, Number(attrs.zIndex) || 0),
-				}));
-				sigma.setSetting('edgeReducer', (_id, attrs) => ({
+				// Do NOT call setSetting('nodeProgramClasses' | 'edgeProgramClasses') here.
+				// Must keep firm → hexagon mapping here: the post-construct reducer
+				// replaces the constructor one and previously dropped `type: hexagon`.
+				const firmHexNodeReducer = (_id: string, attrs: Record<string, unknown>) => {
+					const nodeType = String(attrs.nodeType || '');
+					const isFirm = nodeType === 'firm' || attrs.type === 'hexagon';
+					return {
+						...attrs,
+						type: isFirm ? 'hexagon' : 'circle',
+						// Keep every node above every edge in the zIndex-enabled programs.
+						zIndex: Math.max(2, Number(attrs.zIndex) || 0),
+					};
+				};
+				sigma.setSetting('nodeReducer', firmHexNodeReducer as any);
+				sigma.setSetting('edgeReducer', (_id: string, attrs: Record<string, any>) => ({
 					...attrs,
 					// Edges always stay under the node layer (never compete with disks).
-					// Keep authored size; only floor slightly for picking when visible.
-					size: attrs.hidden ? 0 : Math.max(Number(attrs.size) || 0.5, 0.9),
+					// Floor thickness so person spokes never disappear at fine zoom.
+					size: attrs.hidden ? 0 : Math.max(Number(attrs.size) || 1.6, 1.6),
 					zIndex: Math.min(-1, Number(attrs.zIndex) || -1),
 				}));
+				// Ensure solid default line program is registered (dashed is custom).
+				try {
+					sigma.setSetting('minEdgeThickness', 1.25);
+				} catch {
+					// older sigma builds may ignore
+				}
 
 				// Hard DOM/CSS stack: edges under nodes under labels (Sigma default
 				// append order can lose to host CSS; pin it explicitly).
@@ -2490,12 +2838,52 @@ export default function GlobalGraphPage() {
 
 					for (const id of toDraw) {
 						if (!graph.hasNode(id)) continue;
-						const display = sigma.getNodeDisplayData(id);
-						if (!display) continue;
 
-						const size = Number(display.size) || 11;
-						const x = Number(display.x) || 0;
-						const y = Number(display.y) || 0;
+						// Prefer live viewport projection so rings track the node during
+						// camera pan/layout. Display-data alone can be 0/undefined briefly
+						// and used to paint a stuck circle at the canvas origin (top-left).
+						let x = NaN;
+						let y = NaN;
+						let size = 11;
+						try {
+							const g = sigma.getGraph();
+							const gx = Number(g.getNodeAttribute(id, 'x'));
+							const gy = Number(g.getNodeAttribute(id, 'y'));
+							if (Number.isFinite(gx) && Number.isFinite(gy)) {
+								const vp = sigma.graphToViewport({ x: gx, y: gy });
+								if (vp && Number.isFinite(vp.x) && Number.isFinite(vp.y)) {
+									x = vp.x;
+									y = vp.y;
+								}
+							}
+						} catch {
+							// fall through to display data
+						}
+						const display = sigma.getNodeDisplayData(id);
+						if (display) {
+							size = Number(display.size) || size;
+							if (!Number.isFinite(x) || !Number.isFinite(y)) {
+								const dx = Number(display.x);
+								const dy = Number(display.y);
+								if (Number.isFinite(dx) && Number.isFinite(dy)) {
+									x = dx;
+									y = dy;
+								}
+							}
+						}
+						if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
+						// Skip degenerate off-screen / origin ghost rings.
+						if (Math.abs(x) < 0.5 && Math.abs(y) < 0.5) {
+							// Only allow true origin if the node graph-pos really projects there.
+							try {
+								const g = sigma.getGraph();
+								const gx = Number(g.getNodeAttribute(id, 'x'));
+								const gy = Number(g.getNodeAttribute(id, 'y'));
+								if (!(Number.isFinite(gx) && Number.isFinite(gy) && Math.hypot(gx, gy) < 1)) continue;
+							} catch {
+								continue;
+							}
+						}
 
 						ctx.beginPath();
 						ctx.arc(x, y, size + 10, 0, Math.PI * 2);
@@ -2552,7 +2940,7 @@ export default function GlobalGraphPage() {
 				sigma.getCamera().on('updated', updateLod);
 				updateLod();
 
-				sigma.on('enterNode', ({ node }) => {
+				sigma.on('enterNode', ({ node }: { node: string }) => {
 					hoverIdRef.current = node;
 					const attrs = graph.getNodeAttributes(node);
 					setHover({
@@ -2596,18 +2984,18 @@ export default function GlobalGraphPage() {
 					});
 				};
 
-				sigma.on('clickNode', ({ node, event }) => {
+				sigma.on('clickNode', ({ node, event }: { node: string; event: any }) => {
 					event.original.preventDefault();
 					event.original.stopPropagation();
 					const oe = event.original as MouseEvent;
 					activateNode(node, oe, Boolean(oe.metaKey));
 				});
-				sigma.on('doubleClickNode', ({ node, event }) => {
+				sigma.on('doubleClickNode', ({ node, event }: { node: string; event: any }) => {
 					event.preventSigmaDefault();
 					focusNodeRef.current(node, { openEgo: true, addIfMissing: true, fetchExpand: true });
 				});
 				// Click a connection line → focus the other endpoint (or the non-focused end).
-				sigma.on('clickEdge', ({ edge, event }) => {
+				sigma.on('clickEdge', ({ edge, event }: { edge: string; event: any }) => {
 					event.original.preventDefault();
 					event.original.stopPropagation();
 					const oe = event.original as MouseEvent;
@@ -2628,7 +3016,7 @@ export default function GlobalGraphPage() {
 				// Label chips sit on the labels canvas (not the WebGL node picker).
 				// clickStage fires when the node pick buffer misses — still select via label hit-test.
 				// Blank stage click: collapse the detail drawer (parity with /graph canvas bg click).
-				sigma.on('clickStage', ({ event }) => {
+				sigma.on('clickStage', ({ event }: { event: any }) => {
 					const oe = event.original as MouseEvent;
 					const labelNode = hitTestLabel(oe.clientX, oe.clientY, containerRef.current);
 					if (labelNode && graph.hasNode(labelNode)) {
@@ -2682,6 +3070,21 @@ export default function GlobalGraphPage() {
 				setSelectionCount(0);
 				setFocus(null);
 				setLodHint('blank · search to add');
+
+				// Testing bootstrap (bare /chart only): curated CRD list + edges among them.
+				// Deep-links (/chart/firm|individual/…) skip this so focus stays clean.
+				const pathNow =
+					typeof window !== 'undefined' ?
+						String(window.location.pathname || '')
+							.split('?')[0]
+							.split('#')[0]
+							.replace(/\/+$/, '') || '/'
+					:	'';
+				const bareChart = pathNow === '/chart' || /\/chart$/.test(pathNow);
+				if (bareChart && !cancelled) {
+					seedPreloadIntoGraph({ cancelled: () => cancelled });
+				}
+
 				if (!cancelled) setStatus('ready');
 			} catch (err) {
 				if (!cancelled) {
@@ -2694,11 +3097,33 @@ export default function GlobalGraphPage() {
 			cancelled = true;
 			destroySigma();
 		};
-	}, [destroySigma]);
+	}, [destroySigma, ensureEdgeOnGraph, ensureNodeOnGraph, seedPreloadIntoGraph]);
+
+	// Fallback: if mount bootstrap missed bare /chart (race / path) and canvas is empty, seed once ready.
+	useEffect(() => {
+		if (status !== 'ready') return;
+		if (!CHART_USE_PRELOAD_SEEDS || CHART_PRELOAD_SEEDS.length === 0) return;
+		if (routeParams) return;
+		const graph = graphRef.current;
+		const sigma = sigmaRef.current;
+		if (!graph || !sigma) return;
+		if (graph.order > 0) return;
+		const path = String(typeof window !== 'undefined' ? window.location.pathname : router.asPath || '')
+			.split('?')[0]
+			.split('#')[0]
+			.replace(/\/+$/, '');
+		if (path !== '/chart' && !/\/chart$/.test(path)) return;
+		seedPreloadIntoGraph();
+	}, [status, routeParams, router.asPath, seedPreloadIntoGraph]);
 
 	// Bare /chart with a remembered dashboard CRD → open that node once (fetch if needed).
+	// Skip when test bootstrap is seeding a dense map (would navigate away immediately).
 	useEffect(() => {
 		if (status !== 'ready' || !router.isReady) return;
+		if (CHART_USE_PRELOAD_SEEDS && CHART_PRELOAD_SEEDS.length > 0) {
+			lastSelectionAutoOpenDoneRef.current = true;
+			return;
+		}
 		if (routeParams) {
 			lastSelectionAutoOpenDoneRef.current = true;
 			return;

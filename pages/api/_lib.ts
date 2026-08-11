@@ -1,5 +1,6 @@
 import { promises as fs } from 'fs';
 import path from 'path';
+import zlib from 'zlib';
 import { createClient } from 'redis';
 import { Redis as UpstashRedis } from '@upstash/redis';
 import { toProperCaseName } from '../../src/lib/format';
@@ -143,33 +144,64 @@ async function getRedisClient() {
 	return redisClient;
 }
 
+function compressPayload(value: string): string {
+	try {
+		// Only compress if the value is reasonably large to avoid overhead
+		if (value.length > 512) {
+			return 'br:' + zlib.brotliCompressSync(Buffer.from(value)).toString('base64');
+		}
+	} catch {
+		// fallback
+	}
+	return value;
+}
+
+function decompressPayload(value: string): string {
+	if (typeof value === 'string' && value.startsWith('br:')) {
+		try {
+			return zlib.brotliDecompressSync(Buffer.from(value.slice(3), 'base64')).toString('utf-8');
+		} catch {
+			return value;
+		}
+	}
+	return value;
+}
+
 export async function getCacheValue(key: string) {
+	let rawValue: any = null;
 	if (upstashRedisClient) {
 		const value = await upstashRedisClient.get(key);
-		if (value == null) return null;
-		return typeof value === 'string' ? value : JSON.stringify(value);
+		if (value != null) {
+			rawValue = typeof value === 'string' ? value : JSON.stringify(value);
+		}
+	} else {
+		const client = await getRedisClient();
+		if (client) {
+			rawValue = await client.get(key);
+		}
 	}
-	const client = await getRedisClient();
-	if (!client) return null;
-	return client.get(key);
+	
+	if (rawValue == null) return null;
+	return decompressPayload(rawValue);
 }
 
 export async function setCacheValue(key: string, value: string, ttlSeconds?: number) {
+	const finalValue = compressPayload(value);
 	if (upstashRedisClient) {
 		if (ttlSeconds && ttlSeconds > 0) {
-			await upstashRedisClient.set(key, value, { ex: Math.floor(ttlSeconds) });
+			await upstashRedisClient.set(key, finalValue, { ex: Math.floor(ttlSeconds) });
 			return;
 		}
-		await upstashRedisClient.set(key, value);
+		await upstashRedisClient.set(key, finalValue);
 		return;
 	}
 	const client = await getRedisClient();
 	if (!client) return;
 	if (ttlSeconds && ttlSeconds > 0) {
-		await client.set(key, value, { EX: Math.floor(ttlSeconds) });
+		await client.set(key, finalValue, { EX: Math.floor(ttlSeconds) });
 		return;
 	}
-	await client.set(key, value);
+	await client.set(key, finalValue);
 }
 
 async function deleteCacheKey(key: string) {

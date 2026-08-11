@@ -71,9 +71,10 @@ varying float v_feather;
 varying float v_progress;
 
 const vec4 transparent = vec4(0.0, 0.0, 0.0, 0.0);
-// Dash length in progress units (0–1 along edge). ~8 dashes per edge.
-const float DASH_PERIOD = 0.12;
-const float DASH_ON = 0.55;
+// Dash length in progress units (0–1 along edge). Longer ON segment so previous
+// employment spokes stay easy to see on dark backgrounds.
+const float DASH_PERIOD = 0.10;
+const float DASH_ON = 0.72;
 
 void main(void) {
   #ifdef PICKING_MODE

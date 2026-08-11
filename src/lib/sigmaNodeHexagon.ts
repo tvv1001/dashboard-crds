@@ -1,9 +1,11 @@
 /**
  * Sigma 3 node program: firm hexagon matching /graph Morgan Stanley style.
- * Pointy-top dark fill (#0f172a) + bright cyan stroke (#22d3ee) + soft glow.
+ * Pointy-top dark fill + bright cyan stroke (#22d3ee) + soft glow.
  *
- * Geometry matches SVG:
- *   (0,-r), (±r*√3/2, ±r/2), (0,r)
+ * Sizing follows Sigma's NodeCircleProgram:
+ *   size = a_size * u_correctionRatio / u_sizeRatio * 4.0
+ *   v_radius = size / 2.0   // effective on-screen radius ≈ a_size (screen px)
+ * Covering triangle vertices sit at distance `size` from center (angles 0, 2π/3, 4π/3).
  */
 import type { Attributes } from 'graphology-types';
 import { NodeProgram } from 'sigma/rendering';
@@ -17,26 +19,30 @@ attribute vec2 a_position;
 attribute float a_size;
 attribute float a_angle;
 
+uniform mat3 u_matrix;
 uniform float u_sizeRatio;
 uniform float u_correctionRatio;
-uniform mat3 u_matrix;
 
 varying vec4 v_color;
 varying vec2 v_diffVector;
 varying float v_radius;
 
 const float bias = 255.0 / 254.0;
-// Cover pointy-top hexagon (vertex radius = size) plus stroke/glow margin.
-const float marginRatio = 1.18;
 
 void main() {
-  float size = a_size * u_correctionRatio / u_sizeRatio * marginRatio;
-  vec2 diffVector = vec2(cos(a_angle), sin(a_angle)) * size;
-  vec2 position = (u_matrix * vec3(a_position + diffVector, 1.0)).xy;
-  gl_Position = vec4(position, 0.0, 1.0);
+  // Same scale factor as Sigma NodeCircleProgram so hex size matches circle size.
+  float size = a_size * u_correctionRatio / u_sizeRatio * 4.0;
+  vec2 diffVector = size * vec2(cos(a_angle), sin(a_angle));
+  vec2 position = a_position + diffVector;
+  gl_Position = vec4(
+    (u_matrix * vec3(position, 1.0)).xy,
+    0.0,
+    1.0
+  );
 
   v_diffVector = diffVector;
-  v_radius = size / marginRatio;
+  // Circle program: radius = size/2. Hexagon circumradius uses the same value.
+  v_radius = size / 2.0;
 
   #ifdef PICKING_MODE
   v_color = a_id;
@@ -48,11 +54,13 @@ void main() {
 `;
 
 const FRAGMENT_SHADER_SOURCE = /* glsl */ `
-precision mediump float;
+precision highp float;
 
 varying vec4 v_color;
 varying vec2 v_diffVector;
 varying float v_radius;
+
+uniform float u_correctionRatio;
 
 const vec4 transparent = vec4(0.0, 0.0, 0.0, 0.0);
 // /graph .graph-node.firm stroke #22d3ee
@@ -70,30 +78,32 @@ void main(void) {
   // inside <= 1 is interior.
   float inside = max(ax * 1.15470053838, ax * 0.57735026919 + ay);
 
-  // Crisp outer AA
-  float edge = 1.0 - smoothstep(0.96, 1.0, inside);
+  // AA band in the same units as Sigma's circle border.
+  float border = (u_correctionRatio * 2.0) / max(v_radius, 1e-5);
+  float dist = inside - 1.0 + border;
 
   #ifdef PICKING_MODE
-  if (edge < 0.5) {
+  if (dist > border) {
     gl_FragColor = transparent;
   } else {
     gl_FragColor = v_color;
   }
   #else
-  if (edge <= 0.001) {
+  if (dist > border) {
     gl_FragColor = transparent;
   } else {
-    // Flat dark body (node color = #0f172a) like /graph fill.
+    float t = 0.0;
+    if (dist > 0.0) t = dist / border;
+
+    // Flat body (node color, typically #0f172a) + cyan rim + soft outer glow.
     vec3 fill = v_color.rgb;
+    float rim = smoothstep(0.78, 0.90, inside) * (1.0 - smoothstep(0.985, 1.02, inside));
+    float glow = smoothstep(0.90, 1.08, inside) * (1.0 - t);
 
-    // Cyan stroke band (≈ stroke-width 2.5 relative to node) + outer glow.
-    float rim = smoothstep(0.78, 0.90, inside) * (1.0 - smoothstep(0.985, 1.0, inside));
-    float glow = smoothstep(0.90, 1.05, inside) * edge;
+    vec3 rgb = mix(fill, CYAN, clamp(rim * 1.15, 0.0, 1.0));
+    rgb = mix(rgb, CYAN_GLOW, glow * 0.4);
 
-    vec3 rgb = mix(fill, CYAN, clamp(rim * 1.1, 0.0, 1.0));
-    rgb = mix(rgb, CYAN_GLOW, glow * 0.45);
-
-    gl_FragColor = vec4(rgb, min(1.0, v_color.a) * edge);
+    gl_FragColor = mix(vec4(rgb, min(1.0, v_color.a)), transparent, t);
   }
   #endif
 }
@@ -106,12 +116,11 @@ type ProgramInfoLike = {
 	uniformLocations: Record<(typeof UNIFORMS)[number], WebGLUniformLocation>;
 };
 
-export default class NodeHexagonProgram<N extends Attributes = Attributes, E extends Attributes = Attributes, G extends Attributes = Attributes> extends NodeProgram<
-	(typeof UNIFORMS)[number],
-	N,
-	E,
-	G
-> {
+export default class NodeHexagonProgram<
+	N extends Attributes = Attributes,
+	E extends Attributes = Attributes,
+	G extends Attributes = Attributes,
+> extends NodeProgram<(typeof UNIFORMS)[number], N, E, G> {
 	static ANGLE_1 = 0;
 	static ANGLE_2 = (2 * Math.PI) / 3;
 	static ANGLE_3 = (4 * Math.PI) / 3;
