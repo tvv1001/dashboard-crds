@@ -13,7 +13,11 @@ const cacheTtlSeconds = Number(process.env.CACHE_TTL_SECONDS) || 3600;
 // from disk) — Redis is now the single source of truth for saved payloads.
 // Do not reintroduce disk-based reads/writes/fallbacks for individual/firm
 // payload storage.
-const localDerivedDir = path.resolve(process.cwd(), 'data', 'derived');
+const isServerlessRuntime = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+// Vercel deploy FS under /var/task is read-only; keep local index cache in /tmp there.
+const localDerivedDir = isServerlessRuntime
+	? path.join('/tmp', 'dashboard-crds', 'data', 'derived')
+	: path.resolve(process.cwd(), 'data', 'derived');
 const rawKeysIndexPath = path.join(localDerivedDir, 'raw-keys-index.json');
 const rawFileSuffix = '.json';
 const redisClient = redisUrl ? createClient({ url: redisUrl, password: redisPassword }) : null;
@@ -319,7 +323,13 @@ export function buildEndpoint({ source, type, crd }: { source: string; type: str
 }
 
 async function ensureLocalDerivedDir() {
-	await fs.mkdir(localDerivedDir, { recursive: true });
+	try {
+		await fs.mkdir(localDerivedDir, { recursive: true });
+		return true;
+	} catch (error) {
+		console.warn('Failed to ensure local derived dir', formatErrorMessage(error));
+		return false;
+	}
 }
 
 async function writeRawValueToRedis(rawKey: string, serializedPayload: string) {
@@ -773,7 +783,8 @@ async function readSavedKeyIndexFile() {
 }
 
 async function writeSavedKeyIndexFile(entries: SavedKeyStat[]) {
-	await ensureLocalDerivedDir();
+	const dirOk = await ensureLocalDerivedDir();
+	if (!dirOk) return;
 	const payload = JSON.stringify(
 		{
 			generatedAt: new Date().toISOString(),
@@ -783,9 +794,14 @@ async function writeSavedKeyIndexFile(entries: SavedKeyStat[]) {
 		2,
 	);
 	// Atomic write: avoids truncated/concatenated JSON when multiple writers race.
-	const tempPath = `${rawKeysIndexPath}.${process.pid}.${Date.now()}.tmp`;
-	await fs.writeFile(tempPath, payload, 'utf-8');
-	await fs.rename(tempPath, rawKeysIndexPath);
+	try {
+		const tempPath = `${rawKeysIndexPath}.${process.pid}.${Date.now()}.tmp`;
+		await fs.writeFile(tempPath, payload, 'utf-8');
+		await fs.rename(tempPath, rawKeysIndexPath);
+	} catch (error) {
+		// Memory cache still works for the request; disk is best-effort on serverless.
+		console.warn('Failed to write saved-key index file', formatErrorMessage(error));
+	}
 }
 
 async function buildSavedKeyIndexFromRedis() {
