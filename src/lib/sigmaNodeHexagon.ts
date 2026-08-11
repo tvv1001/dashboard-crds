@@ -1,6 +1,9 @@
 /**
- * Sigma 3 node program: bright vector hexagon for firm nodes.
- * Pointy-top filled hex with crisp AA edges + luminous cyan stroke.
+ * Sigma 3 node program: firm hexagon matching /graph Morgan Stanley style.
+ * Pointy-top dark fill (#0f172a) + bright cyan stroke (#22d3ee) + soft glow.
+ *
+ * Geometry matches SVG:
+ *   (0,-r), (±r*√3/2, ±r/2), (0,r)
  */
 import type { Attributes } from 'graphology-types';
 import { NodeProgram } from 'sigma/rendering';
@@ -23,8 +26,8 @@ varying vec2 v_diffVector;
 varying float v_radius;
 
 const float bias = 255.0 / 254.0;
-// Cover pointy-top hexagon (vertices at r) with a slightly larger disc.
-const float marginRatio = 1.08;
+// Cover pointy-top hexagon (vertex radius = size) plus stroke/glow margin.
+const float marginRatio = 1.18;
 
 void main() {
   float size = a_size * u_correctionRatio / u_sizeRatio * marginRatio;
@@ -52,17 +55,23 @@ varying vec2 v_diffVector;
 varying float v_radius;
 
 const vec4 transparent = vec4(0.0, 0.0, 0.0, 0.0);
+// /graph .graph-node.firm stroke #22d3ee
+const vec3 CYAN = vec3(0.13333334, 0.82745098, 0.93333334);
+const vec3 CYAN_GLOW = vec3(0.25, 0.92, 1.0);
 
 void main(void) {
-  // Normalize into unit space where hexagon vertices sit at distance 1.
+  // Unit space where hexagon vertices sit at distance 1 (pointy-top).
   vec2 p = v_diffVector / max(v_radius, 1e-5);
   float ax = abs(p.x);
   float ay = abs(p.y);
-  // Pointy-top regular hexagon signed distance proxy (max of half-planes).
-  // Vertices at r=1 ⇒ flat edges at cos(30°)=√3/2 along axes.
-  float inside = max(ay * 0.57735026919 + ax, ay);
-  // Crisp vector AA — thin edge band for a sharp polygon silhouette.
-  float edge = 1.0 - smoothstep(0.965, 1.0, inside);
+
+  // Pointy-top regular hexagon, circumradius 1:
+  // vertices (0,±1), (±√3/2, ±1/2); vertical flats at |x|=√3/2.
+  // inside <= 1 is interior.
+  float inside = max(ax * 1.15470053838, ax * 0.57735026919 + ay);
+
+  // Crisp outer AA
+  float edge = 1.0 - smoothstep(0.96, 1.0, inside);
 
   #ifdef PICKING_MODE
   if (edge < 0.5) {
@@ -74,14 +83,16 @@ void main(void) {
   if (edge <= 0.001) {
     gl_FragColor = transparent;
   } else {
-    // Bright fill (node color) + luminous cyan rim for a vector-icon look.
-    float rim = smoothstep(0.82, 0.92, inside) * (1.0 - smoothstep(0.985, 1.0, inside));
-    // Soft center glow so the hex reads as a lit glyph, not a flat disc.
-    float glow = 1.0 - smoothstep(0.0, 0.85, inside);
+    // Flat dark body (node color = #0f172a) like /graph fill.
     vec3 fill = v_color.rgb;
-    vec3 hi = min(vec3(1.0), fill * 1.35 + vec3(0.12, 0.22, 0.28) * glow);
-    vec3 stroke = vec3(0.45, 0.96, 1.0); // #73f5ff bright cyan
-    vec3 rgb = mix(hi, stroke, rim * 0.98);
+
+    // Cyan stroke band (≈ stroke-width 2.5 relative to node) + outer glow.
+    float rim = smoothstep(0.78, 0.90, inside) * (1.0 - smoothstep(0.985, 1.0, inside));
+    float glow = smoothstep(0.90, 1.05, inside) * edge;
+
+    vec3 rgb = mix(fill, CYAN, clamp(rim * 1.1, 0.0, 1.0));
+    rgb = mix(rgb, CYAN_GLOW, glow * 0.45);
+
     gl_FragColor = vec4(rgb, min(1.0, v_color.a) * edge);
   }
   #endif

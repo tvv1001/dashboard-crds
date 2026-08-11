@@ -349,6 +349,44 @@ function nodeScatterBoost(degree: number, nodeCount: number): number {
 	return Math.min(cap, Math.sqrt(degree) * multiplier);
 }
 
+/** Default rendered radii (must stay in sync with nodeRadius callback defaults). */
+const GRAPH_FIRM_NODE_RADIUS = 110;
+const GRAPH_INDIVIDUAL_NODE_RADIUS = 65;
+
+/**
+ * Private orbit around an expanded hub: circumference spacing from node size + child count.
+ */
+function graphOrbitRadiusForHub(opts: { hubIsFirm: boolean; childCount: number; ringIndex?: number; ringCount?: number; preferSingleRing?: boolean }): {
+	radius: number;
+	ringCount: number;
+} {
+	const childCount = Math.max(1, opts.childCount | 0);
+	const hubSize = opts.hubIsFirm ? GRAPH_FIRM_NODE_RADIUS : GRAPH_INDIVIDUAL_NODE_RADIUS;
+	const childSize = opts.hubIsFirm ? GRAPH_INDIVIDUAL_NODE_RADIUS : GRAPH_FIRM_NODE_RADIUS;
+	const arcPad = childSize * 2.7;
+	const minClear = hubSize + childSize + Math.max(48, childSize * 1.1);
+
+	let ringCount = opts.ringCount ?? 1;
+	if (opts.preferSingleRing && childCount <= 28) {
+		ringCount = 1;
+	} else if (opts.ringCount == null) {
+		if (childCount > 200) ringCount = 7;
+		else if (childCount > 120) ringCount = 6;
+		else if (childCount > 70) ringCount = 5;
+		else if (childCount > 36) ringCount = 4;
+		else if (childCount > 18) ringCount = 3;
+		else if (childCount > 10) ringCount = 2;
+		else ringCount = 1;
+	}
+
+	const perRing = Math.max(1, Math.ceil(childCount / ringCount));
+	const fromArc = (perRing * arcPad) / (Math.PI * 2);
+	const base = Math.max(minClear, fromArc, opts.hubIsFirm ? 220 : 280);
+	const ring = Math.max(0, opts.ringIndex ?? 0);
+	const ringStep = Math.max(childSize * 2.4 + 40, 100 + Math.min(80, Math.sqrt(childCount) * 9));
+	return { radius: base + ring * ringStep, ringCount };
+}
+
 function entityTypeFromLoadKey(loadKey?: string): GraphEntityType | undefined {
 	if (!loadKey) return undefined;
 	const parts = loadKey.split(':');
@@ -359,7 +397,10 @@ function entityTypeFromLoadKey(loadKey?: string): GraphEntityType | undefined {
 	return undefined;
 }
 
-function resolveNodeEntityType(node: GraphNode, hubEntityType?: GraphEntityType): GraphEntityType {
+function resolveNodeEntityType(
+	node: Pick<GraphNode, 'id'> & Partial<Pick<GraphNode, 'entityType' | 'loadKey' | 'kind' | 'label'>>,
+	hubEntityType?: GraphEntityType,
+): GraphEntityType {
 	if (node.entityType === 'firm' || node.entityType === 'individual') return node.entityType;
 	if (node.id === 'primary' && (hubEntityType === 'firm' || hubEntityType === 'individual')) return hubEntityType;
 	const fromKey = entityTypeFromLoadKey(node.loadKey);
@@ -1001,7 +1042,10 @@ export default function NodeGraphPage() {
 							label,
 							kind: 'relation',
 							entityType: type as GraphEntityType,
-							subLabel: type === 'individual' && match.currentFirm ? `${match.currentFirm}${match.currentCity || match.currentState ? ` - ${[match.currentCity, match.currentState].filter(Boolean).join(', ')}` : ''}` : 'Search match',
+							subLabel:
+								type === 'individual' && match.currentFirm ?
+									`${match.currentFirm}${match.currentCity || match.currentState ? ` - ${[match.currentCity, match.currentState].filter(Boolean).join(', ')}` : ''}`
+								:	'Search match',
 							loadKey: match.key || `${type}:${crd}`,
 						};
 					})
@@ -1195,9 +1239,17 @@ export default function NodeGraphPage() {
 
 	const nodeRadius = useCallback(
 		(nodeId: string, kind?: GraphNode['kind']) => {
-			return 22;
+			const node = graphData.nodes.find((n) => n.id === nodeId);
+			const entityTypeForNode =
+				node ? resolveNodeEntityType(node, entityType === 'firm' ? 'firm' : 'individual')
+				: kind === 'primary' ?
+					entityType === 'firm' ?
+						'firm'
+					:	'individual'
+				:	entityTypeFromLoadKey(nodeId) || (nodeId.startsWith('firm:') || nodeId.includes(':firm:') ? 'firm' : 'individual');
+			return entityTypeForNode === 'firm' ? GRAPH_FIRM_NODE_RADIUS : GRAPH_INDIVIDUAL_NODE_RADIUS;
 		},
-		[connectionCountById],
+		[connectionCountById, graphData.nodes, entityType],
 	);
 
 	const focusedNode = useMemo(() => graphData.nodes.find((node) => node.id === focusedNodeId) ?? graphData.nodes[0], [graphData.nodes, focusedNodeId]);
@@ -1573,9 +1625,17 @@ export default function NodeGraphPage() {
 						const hubPos = seed ? positionsRef.current[seed.hub] || neighborPosition(n.id) : neighborPosition(n.id);
 						if (seed && hubPos) {
 							const hubDeg = degreeLookup(seed.hub);
-							const orbitBase = 220 + Math.min(420, Math.sqrt(Math.max(hubDeg, 1)) * 48);
-							const ringStep = 95 + Math.min(90, hubDeg * 0.55);
-							const dist = orbitBase + seed.ring * ringStep;
+							const hubNode = graphData.nodes.find((nn) => nn.id === seed.hub);
+							const hubIsFirm =
+								hubNode ?
+									resolveNodeEntityType(hubNode, entityType === 'firm' ? 'firm' : 'individual') === 'firm'
+								:	entityTypeFromLoadKey(seed.hub) === 'firm' || seed.hub.startsWith('firm:') || seed.hub.includes(':firm:') || (seed.hub === 'primary' && entityType === 'firm');
+							const { radius: orbitR } = graphOrbitRadiusForHub({
+								hubIsFirm,
+								childCount: Math.max(hubDeg, 1),
+								ringIndex: seed.ring,
+							});
+							const dist = orbitR;
 							return {
 								...n,
 								x: hubPos.x + Math.cos(seed.angle) * dist,
@@ -1669,65 +1729,90 @@ export default function NodeGraphPage() {
 		}
 		const childRingIndex = new Map<string, number>(); // `${hub}|${child}` -> ring
 		const childSlotIndex = new Map<string, number>(); // `${hub}|${child}` -> angular slot
+		const hubOrbitMeta = new Map<string, { ringCount: number; kidCount: number; hubIsFirm: boolean }>();
 		for (const [hub, kids] of childrenByHub) {
 			const unique = Array.from(new Set(kids)).sort((a, b) => a.localeCompare(b));
-			// More rings on large hubs so spokes don't stack into a single disk.
-			const ringCount =
-				unique.length > 400 ? 8
-				: unique.length > 200 ? 7
-				: unique.length > 80 ? 6
-				: unique.length > 30 ? 5
-				: 4;
+			const hubNode = nodeById.get(hub);
+			const hubIsFirm = isFirmNode(hubNode);
+			const { ringCount } = graphOrbitRadiusForHub({
+				hubIsFirm,
+				childCount: unique.length,
+				preferSingleRing: unique.length <= 28,
+			});
+			hubOrbitMeta.set(hub, { ringCount, kidCount: unique.length, hubIsFirm });
 			unique.forEach((child, i) => {
 				childRingIndex.set(`${hub}|${child}`, i % ringCount);
 				childSlotIndex.set(`${hub}|${child}`, i);
 			});
 		}
 		const staggeredChildDistance = (hubId: string, childId: string, hubDeg: number) => {
-			const ring = childRingIndex.get(`${hubId}|${childId}`) ?? hashString(childId) % 6;
-			// Wide orbit for open firms so leaf clouds don't bury hub-hub links.
-			const orbitBase = 220 + Math.min(420, Math.sqrt(Math.max(hubDeg, 1)) * 48);
-			const ringStep = 95 + Math.min(90, hubDeg * 0.55);
-			// Small deterministic jitter so rings aren't perfectly circular.
-			const jitter = ((hashString(`${hubId}:${childId}`) % 1000) / 999 - 0.5) * 52;
-			return orbitBase + ring * ringStep + jitter;
+			const ring = childRingIndex.get(`${hubId}|${childId}`) ?? 0;
+			const meta = hubOrbitMeta.get(hubId);
+			const hubIsFirm = meta?.hubIsFirm ?? isFirmNode(nodeById.get(hubId));
+			const kidCount = Math.max(meta?.kidCount || 1, hubDeg || 1);
+			const { radius } = graphOrbitRadiusForHub({
+				hubIsFirm,
+				childCount: kidCount,
+				ringIndex: ring,
+				ringCount: meta?.ringCount,
+				preferSingleRing: kidCount <= 28,
+			});
+			const jitter = ((hashString(`${hubId}:${childId}`) % 1000) / 999 - 0.5) * 28;
+			return radius + jitter;
 		};
 
 		const collisionRadius = (d: any) => {
 			const deg = degreeOf(d);
 			const firm = isFirmNode(d);
-			// Large exclusion zone around firm hubs so neighboring firm clouds
-			// cannot sit on top of each other.
-			const hubHalo = firm ? Math.min(nCount > 1000 ? 260 : 220, 70 + Math.sqrt(Math.max(deg, 1)) * (dense ? 16 : 14)) : 0;
+			const body = Number(d.radius) || (firm ? GRAPH_FIRM_NODE_RADIUS : GRAPH_INDIVIDUAL_NODE_RADIUS);
+			// Expanded hubs (firm or person) keep a private keep-out for their orbit.
+			const hubHalo =
+				firm ? Math.min(nCount > 1000 ? 320 : 280, body + 50 + Math.sqrt(Math.max(deg, 1)) * (dense ? 18 : 16))
+				: deg >= 4 ? Math.min(220, body + 36 + Math.sqrt(Math.max(deg, 1)) * 12)
+				: body * 0.25;
 			const scatterPad = Math.min(nCount > 1000 ? 96 : 80, nodeScatterBoost(deg, nCount) * 0.55);
 			const labelLenPad = Math.min(34, Math.max(0, String(d?.label || '').length - 8) * 0.65);
-			// Extra air around leaves so labels don't sit on top of each other.
 			const leafBoost =
-				deg <= 2 ? 26
-				: deg <= 4 ? 14
+				deg <= 2 ? body * 0.45
+				: deg <= 4 ? body * 0.28
 				: 0;
-			return (d.radius ?? 10) + collidePad + labelPad + scatterPad + labelLenPad + leafBoost + hubHalo;
+			return body + collidePad + labelPad + scatterPad + labelLenPad + leafBoost + hubHalo;
 		};
 
-		// Explicit firm↔firm separation force (beyond charge): push high-degree
-		// firm centers apart so their employee clouds stop overlapping.
-		const firmHubIds = d3Nodes.filter((n: any) => isFirmNode(n) && degreeOf(n) >= 4).map((n: any) => n.id);
+		// Push expanded hubs (firms and people) apart so each keeps its private orbit.
+		const expandedHubIds = d3Nodes.filter((n: any) => degreeOf(n) >= 4).map((n: any) => n.id);
 		const firmHubSeparation = (alpha: number) => {
-			if (firmHubIds.length < 2) return;
-			const minDistBase =
-				dense ? 720
-				: mid ? 640
-				: 560;
-			for (let i = 0; i < firmHubIds.length; i++) {
-				const a = nodeById.get(firmHubIds[i]) as any;
+			if (expandedHubIds.length < 2) return;
+			for (let i = 0; i < expandedHubIds.length; i++) {
+				const a = nodeById.get(expandedHubIds[i]) as any;
 				if (!a) continue;
-				for (let j = i + 1; j < firmHubIds.length; j++) {
-					const b = nodeById.get(firmHubIds[j]) as any;
+				const aMeta = hubOrbitMeta.get(a.id);
+				const aOrbit =
+					aMeta ?
+						graphOrbitRadiusForHub({
+							hubIsFirm: aMeta.hubIsFirm,
+							childCount: aMeta.kidCount,
+							ringIndex: Math.max(0, aMeta.ringCount - 1),
+							ringCount: aMeta.ringCount,
+						}).radius
+					:	graphOrbitRadiusForHub({ hubIsFirm: isFirmNode(a), childCount: Math.max(degreeOf(a), 4) }).radius;
+				for (let j = i + 1; j < expandedHubIds.length; j++) {
+					const b = nodeById.get(expandedHubIds[j]) as any;
 					if (!b) continue;
+					const bMeta = hubOrbitMeta.get(b.id);
+					const bOrbit =
+						bMeta ?
+							graphOrbitRadiusForHub({
+								hubIsFirm: bMeta.hubIsFirm,
+								childCount: bMeta.kidCount,
+								ringIndex: Math.max(0, bMeta.ringCount - 1),
+								ringCount: bMeta.ringCount,
+							}).radius
+						:	graphOrbitRadiusForHub({ hubIsFirm: isFirmNode(b), childCount: Math.max(degreeOf(b), 4) }).radius;
 					let dx = (b.x ?? 0) - (a.x ?? 0);
 					let dy = (b.y ?? 0) - (a.y ?? 0);
 					let dist = Math.hypot(dx, dy);
-					const need = minDistBase + Math.sqrt(Math.max(degreeOf(a), 1)) * 28 + Math.sqrt(Math.max(degreeOf(b), 1)) * 28;
+					const need = aOrbit + bOrbit + Math.max(100, GRAPH_FIRM_NODE_RADIUS * 1.1);
 					if (dist >= need) continue;
 					if (dist < 1e-6) {
 						const ang = ((hashString(`${a.id}|${b.id}`) % 1000) / 999) * Math.PI * 2;
@@ -1735,7 +1820,7 @@ export default function NodeGraphPage() {
 						dy = Math.sin(ang);
 						dist = 1;
 					}
-					const push = ((need - dist) / need) * alpha * 0.85;
+					const push = ((need - dist) / need) * alpha * 0.9;
 					const ux = (dx / dist) * push;
 					const uy = (dy / dist) * push;
 					if (a.fx == null) {
@@ -1830,11 +1915,12 @@ export default function NodeGraphPage() {
 						const base = stagger > 0 ? stagger : linkDistBase * degScale + scatter * 1.7;
 
 						return (
-							base +
-							(controls ? 50
-							: former ? 34
-							: 0)
-						) * 2;
+							(base +
+								(controls ? 50
+								: former ? 34
+								: 0)) *
+							2
+						);
 					})
 					// Softer springs on high-degree hubs so stagger distances can stick.
 					.strength((d: any) => {
@@ -2231,13 +2317,29 @@ export default function NodeGraphPage() {
 								if (!sourcePos || !targetPos) return null;
 								const dimmed = traceConnectedIds ? !(traceConnectedIds.has(sourceId) && traceConnectedIds.has(targetId)) : false;
 								const isPrevious = link.isCurrent === false || /previous|former|prior/i.test(String(link.label || ''));
-								// Selection only lights active/current spokes — never gray previous/disabled lines.
+								// Reference app: inactive endpoint OR previous => full gray dashed edge.
+								const sourceNode = graphData.nodes.find((n) => n.id === sourceId);
+								const targetNode = graphData.nodes.find((n) => n.id === targetId);
+								const sourceCanonical = sourceNode ? canonicalIdForNode(sourceNode) : null;
+								const targetCanonical = targetNode ? canonicalIdForNode(targetNode) : null;
+								const sourceInactive =
+									inactiveNodeIds.has(sourceId) ||
+									(!!sourceNode?.loadKey && inactiveNodeIds.has(sourceNode.loadKey)) ||
+									(!!sourceCanonical && inactiveNodeIds.has(sourceCanonical)) ||
+									Boolean(sourceNode?.inactive);
+								const targetInactive =
+									inactiveNodeIds.has(targetId) ||
+									(!!targetNode?.loadKey && inactiveNodeIds.has(targetNode.loadKey)) ||
+									(!!targetCanonical && inactiveNodeIds.has(targetCanonical)) ||
+									Boolean(targetNode?.inactive);
+								const grayDashed = isPrevious || sourceInactive || targetInactive;
+								// Selection only lights active/current spokes — never previous/inactive-endpoint lines.
 								const touchesSelection = Boolean(focusedNodeId) && (sourceId === focusedNodeId || targetId === focusedNodeId);
-								const isSelectedSpoke = touchesSelection && !isPrevious && !dimmed;
+								const isSelectedSpoke = touchesSelection && !grayDashed && !dimmed;
 								return (
 									<line
-										key={`${sourceId}-${targetId}-${link.label}-${isPrevious ? 'prev' : 'curr'}`}
-										className={`graph-link-glow${isPrevious ? ' previous' : ' current'}${dimmed ? ' dimmed' : ''}${isSelectedSpoke ? ' selected' : ''}${touchesSelection && isPrevious ? ' selection-muted' : ''}`}
+										key={`${sourceId}-${targetId}-${link.label}-${grayDashed ? 'gray' : 'curr'}`}
+										className={`graph-link-glow${grayDashed ? ' previous' : ' current'}${dimmed ? ' dimmed' : ''}${isSelectedSpoke ? ' selected' : ''}${touchesSelection && grayDashed ? ' selection-muted' : ''}`}
 										x1={sourcePos.x}
 										y1={sourcePos.y}
 										x2={targetPos.x}
@@ -2306,19 +2408,18 @@ export default function NodeGraphPage() {
 												/>
 											</>
 										)}
-										{nodeEntityType === 'firm' ? (
+										{nodeEntityType === 'firm' ?
 											<polygon
 												className={`graph-node firm${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
 												points={`0,${-radius} ${radius * 0.866},${-radius / 2} ${radius * 0.866},${radius / 2} 0,${radius} ${-radius * 0.866},${radius / 2} ${-radius * 0.866},${-radius / 2}`}
 											/>
-										) : (
-											<circle
+										:	<circle
 												className={`graph-node individual${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
 												cx={0}
 												cy={0}
 												r={radius}
 											/>
-										)}
+										}
 										{isPrimary && !isInactive && roleRows.includes('Investment Adviser') && (
 											<circle
 												className='graph-node-adviser-badge'
@@ -2819,34 +2920,36 @@ export default function NodeGraphPage() {
 					transition: opacity 150ms ease;
 					pointer-events: none;
 				}
-				/* Current relationships keep the cyan edge treatment. */
+				/* Current employment (both ends active): blue solid. */
 				.graph-link-glow.current {
-					stroke: #3b82f6;
+					stroke: rgba(30, 136, 255, 0.88);
 					stroke-width: 1.75;
 				}
-				/* Previous / former relationships: thinner light gray (never selection-highlighted). */
+				/* Previous OR inactive-endpoint: full gray dashed (reference app). */
 				.graph-link-glow.previous {
-					stroke: #ef4444;
-					stroke-width: 1.2;
+					stroke: rgba(135, 155, 183, 0.78);
+					stroke-width: 1.05;
+					stroke-dasharray: 2 3;
 					overflow: visible;
 				}
 				.theme-light .graph-link-glow.previous {
-					stroke: #ef4444;
+					stroke: rgba(113, 117, 123, 0.55);
 				}
-				/* Active spoke on selected node only (current edges). */
+				/* Active spoke on selected node only (current active edges). */
 				.graph-link-glow.current.selected {
 					stroke: #60a5fa;
 					stroke-width: 2.6;
 				}
-				/* Gray/previous edges that touch the selection stay muted — not blue. */
+				/* Gray edges that touch selection stay gray dashed — never blue. */
 				.graph-link-glow.previous.selection-muted {
-					stroke: rgba(148, 163, 184, 0.28);
-					stroke-width: 0.85;
-					opacity: 0.55;
+					stroke: rgba(148, 163, 184, 0.55);
+					stroke-width: 0.95;
+					stroke-dasharray: 2 3;
+					opacity: 0.85;
 				}
 				.theme-light .graph-link-glow.previous.selection-muted {
-					stroke: rgba(148, 163, 184, 0.4);
-					opacity: 0.5;
+					stroke: rgba(148, 163, 184, 0.5);
+					opacity: 0.8;
 				}
 				.graph-link-glow.dimmed {
 					opacity: 0.12;

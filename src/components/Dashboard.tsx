@@ -301,8 +301,9 @@ export default function Dashboard() {
 				return;
 			}
 
-			// Try SEC key first; backend fallback can resolve alternate source when needed.
-			selectKey(`sec:${normalizedType}:${crd}`);
+			// Prefer FINRA first — Redis primary for most individuals/firms.
+			// Backend /api/key still resolves the alternate source when needed.
+			selectKey(`finra:${normalizedType}:${crd}`);
 		},
 		[payloads, selectKey],
 	);

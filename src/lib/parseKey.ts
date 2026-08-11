@@ -34,10 +34,13 @@ function parseRequestedSelectionFromPathname(pathname: string): RequestedSelecti
 	const [typeRaw, crdRaw] = parts;
 	const type = typeRaw.toLowerCase();
 	if ((type !== 'individual' && type !== 'firm') || !/^[0-9]+$/.test(crdRaw)) return null;
+	// Prefer FINRA first for path deep-links: Redis primary snapshots for people
+	// are almost always finra:*; SEC is often missing or a stripped IA stub.
+	// (Query-param selection can still force SEC via ?source=sec / ?sec=1.)
 	return {
 		crd: crdRaw,
 		type,
-		preferredSources: ['sec', 'finra'],
+		preferredSources: ['finra', 'sec'],
 	};
 }
 

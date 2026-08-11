@@ -1,17 +1,13 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { promises as fs } from 'fs';
 import path from 'path';
-import {
-	formatErrorMessage,
-	hydrateFromUpstream,
-	loadCombinedSavedPayloadBundle,
-	normalizeRawPayload,
-	removeSavedPayload,
-} from './_lib';
+import { formatErrorMessage, hydrateFromUpstream, loadCombinedSavedPayloadBundle, normalizeRawPayload, removeSavedPayload } from './_lib';
 import { findOwnerReference, type OwnerReference } from './_graphIndex';
 
 function parseSavedKey(key: string) {
-	const raw = String(key || '').trim().replace(/^\/+|\/+$/g, '');
+	const raw = String(key || '')
+		.trim()
+		.replace(/^\/+|\/+$/g, '');
 	const matchWithSource = raw.match(/^(finra|sec)[:\/](individual|firm)[:\/](\d+)(?:\.json)?$/i);
 	if (matchWithSource) {
 		return {
@@ -143,40 +139,34 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 	const key = String(req.query.name || '').trim();
 	if (!key) return res.status(400).json({ error: 'Missing key name' });
 	const parsed = parseSavedKey(key);
+	// Always try FINRA first for combined loads when the caller only guessed a source
+	// (path deep-links prefer sec historically). Redis primary for people is usually FINRA.
+	const preferredLoadKey =
+		parsed ?
+			parsed.source === 'sec' ?
+				`finra:${parsed.type}:${parsed.crd}`
+			:	`${parsed.source}:${parsed.type}:${parsed.crd}`
+		:	key;
 	const canonicalKey = parsed ? `${parsed.source}:${parsed.type}:${parsed.crd}` : key;
-	if (parsed?.type === 'individual') {
-		const ownerReference = await findOwnerReference(parsed.crd).catch(() => null);
-		if (ownerReference) {
+	const loadKeysToTry = parsed ? Array.from(new Set([preferredLoadKey, canonicalKey, `finra:${parsed.type}:${parsed.crd}`, `sec:${parsed.type}:${parsed.crd}`])) : [key];
+
+	async function loadFirstAvailableBundle() {
+		let lastError: unknown = null;
+		for (const candidate of loadKeysToTry) {
 			try {
-				const bundle = await loadCombinedSavedPayloadBundle(canonicalKey);
-				const content = bundle.sources?.finra?.payload || bundle.sources?.sec?.payload;
-				const currentEmps = Array.isArray((content as any)?.currentEmployments) ? (content as any).currentEmployments : [];
-				const currentIaEmps = Array.isArray((content as any)?.currentIAEmployments) ? (content as any).currentIAEmployments : [];
-				if (!currentEmps.length && !currentIaEmps.length) {
-					const orphanBundle = buildOrphanBundle(parsed.type, parsed.crd, key, ownerReference);
-					return res.json({
-						rawPayload: JSON.stringify(orphanBundle, null, 2),
-						requestedKey: key,
-						resolvedKey: key,
-						fallbackUsed: true,
-						bundle: orphanBundle,
-					});
-				}
-			} catch {
-				const orphanBundle = buildOrphanBundle(parsed.type, parsed.crd, key, ownerReference);
-				return res.json({
-					rawPayload: JSON.stringify(orphanBundle, null, 2),
-					requestedKey: key,
-					resolvedKey: key,
-					fallbackUsed: true,
-					bundle: orphanBundle,
-				});
+				return await loadCombinedSavedPayloadBundle(candidate);
+			} catch (error) {
+				lastError = error;
+				if (!isMissingSavedPayloadError(error)) throw error;
 			}
 		}
+		throw lastError || new Error(`Saved payload not found in Redis for key: ${canonicalKey}`);
 	}
 
 	try {
-		const bundle = await loadCombinedSavedPayloadBundle(canonicalKey);
+		const bundle = await loadFirstAvailableBundle();
+		// Never surface an orphan card when Redis already has a live individual record,
+		// even if this CRD also appears as a firm owner reference.
 		return res.json({
 			rawPayload: JSON.stringify(bundle, null, 2),
 			requestedKey: key,
@@ -190,7 +180,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 			const hydrated = await hydrateFromUpstream(parsed.type, parsed.crd);
 			if (hydrated) {
 				try {
-					const hydratedBundle = await loadCombinedSavedPayloadBundle(canonicalKey);
+					const hydratedBundle = await loadFirstAvailableBundle();
 					return res.json({
 						rawPayload: JSON.stringify(hydratedBundle, null, 2),
 						requestedKey: key,
@@ -237,6 +227,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 				});
 			}
 
+			// Orphan only as last resort: no Redis/live/national payload at all,
+			// and the CRD only exists as a scraped owner reference on a firm.
 			if (parsed.type === 'individual') {
 				const ownerReference = await findOwnerReference(parsed.crd).catch(() => null);
 				if (ownerReference) {

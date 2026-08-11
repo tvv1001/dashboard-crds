@@ -1187,7 +1187,18 @@ function RecordInfoView({
 	const employeeConnections = useFirmEmployeeConnections(parsedKey?.crd || '', parsedKey?.type === 'firm');
 	const rawPayload = maybeParseJson(detailJson);
 	const combinedBundle = rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload) ? (rawPayload as Record<string, any>) : null;
-	if (combinedBundle?.orphan && typeof combinedBundle.orphan === 'object') {
+	// Only treat as orphan when there is no live FINRA/SEC source payload.
+	// Some records appear both as firm owner refs and as full BrokerCheck people;
+	// a stale/cached orphan flag must not hide the real Redis detail.
+	const hasLiveSourcePayload = Boolean(
+		combinedBundle?.sources?.finra?.found ||
+		combinedBundle?.sources?.sec?.found ||
+		combinedBundle?.sources?.finra?.payload ||
+		combinedBundle?.sources?.sec?.payload ||
+		(typeof combinedBundle?.sources?.finra?.rawPayload === 'string' && combinedBundle.sources.finra.rawPayload.trim()) ||
+		(typeof combinedBundle?.sources?.sec?.rawPayload === 'string' && combinedBundle.sources.sec.rawPayload.trim()),
+	);
+	if (combinedBundle?.orphan && typeof combinedBundle.orphan === 'object' && !hasLiveSourcePayload) {
 		const crd = typeof combinedBundle.crd === 'string' ? combinedBundle.crd : parsedKey?.crd || 'N/A';
 		return (
 			<OrphanRecordView
@@ -1202,6 +1213,8 @@ function RecordInfoView({
 		const secRaw = typeof combinedBundle.sources.sec?.rawPayload === 'string' ? combinedBundle.sources.sec.rawPayload : '';
 		const finraPayload = combinedBundle.sources.finra?.payload;
 		const secPayload = combinedBundle.sources.sec?.payload;
+		const finraFound = Boolean(combinedBundle.sources.finra?.found || finraPayload != null || finraRaw);
+		const secFound = Boolean(combinedBundle.sources.sec?.found || secPayload != null || secRaw);
 		const finraContent =
 			finraPayload != null ? unwrapRecordPayload(finraPayload)
 			: finraRaw ? unwrapRecordPayload(maybeParseJson(finraRaw))
@@ -1245,13 +1258,23 @@ function RecordInfoView({
 				return false;
 			}),
 		);
-		const sourceSummary = toSourceLabel(new Set<string>([finraRaw ? 'FINRA' : '', hasGenuineSecContent ? 'SEC' : ''].filter(Boolean)));
+		const sourceSummary = toSourceLabel(new Set<string>([finraFound || finraContent ? 'FINRA' : '', hasGenuineSecContent ? 'SEC' : ''].filter(Boolean)));
 		const crd = typeof combinedBundle.crd === 'string' ? combinedBundle.crd : parsedKey?.crd || 'N/A';
 		const type = typeof combinedBundle.type === 'string' ? combinedBundle.type : parsedKey?.type || 'firm';
 
+		const personNameFromParts = (...basics: Record<string, any>[]) => {
+			for (const basic of basics) {
+				const parts = [basic?.firstName, basic?.middleName, basic?.lastName, basic?.suffix].map((part) => String(part || '').trim()).filter(Boolean);
+				if (parts.length) return parts.join(' ');
+			}
+			return '';
+		};
+		// BrokerCheck individuals usually only have first/middle/last parts — not
+		// individualName/fullName. Falling back only to firm-style fields made
+		// legitimate people look like empty/orphan cards in the combined view.
 		const mergedNames = mergeSourceValues(
-			pickFirstNonEmpty(finraBasic.iaFirmName, finraBasic.firmName, finraBasic.fullName, finraBasic.individualName),
-			pickFirstNonEmpty(secBasic.iaFirmName, secBasic.firmName, secBasic.fullName, secBasic.individualName),
+			pickFirstNonEmpty(personNameFromParts(finraBasic), finraBasic.fullName, finraBasic.individualName, finraBasic.iaFirmName, finraBasic.firmName),
+			pickFirstNonEmpty(personNameFromParts(secBasic), secBasic.fullName, secBasic.individualName, secBasic.iaFirmName, secBasic.firmName),
 		);
 		const mergedSecNumber = mergeSourceValues(pickFirstNonEmpty(finraBasic.iaSECNumber, finraBasic.bdSECNumber), pickFirstNonEmpty(secBasic.iaSECNumber, secBasic.bdSECNumber));
 		const mergedFormedDate = mergeSourceValues(finraBasic.formedDate, secBasic.formedDate);
@@ -1428,7 +1451,7 @@ function RecordInfoView({
 					<section className='record-detail-section'>
 						<h4 className='record-detail-section-title'>Profile links</h4>
 						<div className='banner-context-links profile-links-section'>
-							{finraRaw && (
+							{(finraFound || finraContent) && (
 								<a
 									className='profile-link finra-link'
 									href={`https://brokercheck.finra.org/${type === 'individual' ? 'individual' : 'firm'}/summary/${crd}`}
@@ -1437,7 +1460,7 @@ function RecordInfoView({
 									FINRA profile ↗
 								</a>
 							)}
-							{!isFirmRecord && finraRaw && (
+							{!isFirmRecord && (finraFound || finraContent) && (
 								<a
 									className='profile-link finra-link'
 									href={`https://files.brokercheck.finra.org/individual/individual_${crd}.pdf`}
