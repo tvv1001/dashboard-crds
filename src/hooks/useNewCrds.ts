@@ -21,6 +21,24 @@ function parseIsoTime(value?: string | null) {
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
+const CACHE_KEY = 'new-crds-cache';
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
+function readStoredCache() {
+	if (typeof window === 'undefined') return null;
+	const str = window.localStorage.getItem(CACHE_KEY);
+	if (!str) return null;
+	try {
+		const parsed = JSON.parse(str);
+		if (parsed && typeof parsed === 'object' && parsed.timestamp) {
+			if (Date.now() - parsed.timestamp < CACHE_TTL_MS) {
+				return parsed.data;
+			}
+		}
+	} catch {}
+	return null;
+}
+
 export function useNewCrds() {
 	const [state, setState] = useState<NewCrdsState>({
 		items: [],
@@ -51,12 +69,37 @@ export function useNewCrds() {
 
 	const fetch_ = useCallback(
 		async (force = false) => {
+			if (!force) {
+				const cached = readStoredCache();
+				if (cached) {
+					const items =
+						Array.isArray(cached?.items) ? cached.items
+						: Array.isArray(cached) ? cached
+						: [];
+					setState((prev) => ({
+						...prev,
+						...cached,
+						items,
+						loading: false,
+						error: '',
+						visible: Boolean(cached?.redisHighWater) && !isHidden,
+					}));
+					if (!cached?.redisHighWater) setDismissedAt(null);
+					return;
+				}
+			}
+
 			setState((prev) => ({ ...prev, loading: true, error: '' }));
 			try {
 				const url = force ? '/api/new-crds?force=true' : '/api/new-crds';
 				const res = await fetch(url);
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);
 				const json = await res.json();
+				
+				if (typeof window !== 'undefined') {
+					window.localStorage.setItem(CACHE_KEY, JSON.stringify({ timestamp: Date.now(), data: json }));
+				}
+
 				const items =
 					Array.isArray(json?.items) ? json.items
 					: Array.isArray(json) ? json
