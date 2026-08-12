@@ -2759,10 +2759,12 @@ button:disabled {
 		height: calc(100vh - 620px);
 	}
 }
-.status-box {
-	height: 100%;
+@media (min-width: 901px) {
+	.status-box {
+		height: 100%;
+	}
 }
-/* Mobile: New CRDs is a collapsed strip fixed just under the app top-nav. */
+/* Mobile: New CRDs strip + panel stack (content → Redis search → history). */
 @media (max-width: 900px) {
 	main.dashboard-layout,
 	main.dashboard-layout.no-left-sidebar,
@@ -2773,9 +2775,8 @@ button:disabled {
 		grid-template-columns: none !important;
 		grid-template-areas: none !important;
 		height: auto;
+		min-height: calc(100dvh - var(--top-nav-height));
 		overflow: visible;
-		/* Room for the fixed New CRDs toggle under the top nav */
-		/* padding-top: var(--new-crds-mobile-bar-height, 48px); */
 	}
 
 	main.dashboard-layout > .panel {
@@ -2783,17 +2784,20 @@ button:disabled {
 		flex: 1 1 auto;
 		width: 100%;
 		min-width: 0;
-		height: auto;
+		height: auto !important;
+		min-height: 0 !important;
 		border-left: none;
 		border-right: none;
 		grid-area: auto;
+		overflow: visible;
+		padding: 12px 12px 20px;
 	}
 
 	main.dashboard-layout > .new-crds-sidebar {
 		order: 0;
 		display: flex !important;
 		flex-direction: column;
-		position: static;
+		position: sticky;
 		top: var(--top-nav-height);
 		left: 0;
 		right: 0;
@@ -2811,6 +2815,82 @@ button:disabled {
 		overflow: hidden;
 		z-index: 90;
 		grid-area: auto;
+	}
+
+	/* Flatten wrappers so we can order: content → Redis search → history */
+	.panel-scroll-shell {
+		display: flex;
+		flex-direction: column;
+		height: auto !important;
+		min-height: calc(100dvh - var(--top-nav-height) - var(--new-crds-mobile-bar-height, 48px));
+		overflow: visible !important;
+		gap: 12px;
+	}
+
+	.panel-scroll-content {
+		display: contents;
+	}
+
+	.record-workspace-wrapper {
+		display: contents;
+	}
+
+	.record-workspace {
+		display: contents;
+	}
+
+	/* Record details load above Redis search */
+	.panel .status-box {
+		order: 2;
+		flex: 0 1 auto;
+		height: auto !important;
+		min-height: 0 !important;
+		max-height: none;
+		overflow: visible;
+		padding: 12px;
+	}
+
+	.panel .status-box.is-empty {
+		display: none;
+	}
+
+	/* Redis search fills the former blank middle area */
+	.panel .local-name-search-resizable {
+		order: 3;
+		flex: 1 1 auto;
+		min-height: 220px !important;
+		height: auto !important;
+		max-height: none !important;
+		margin-top: 0;
+		overflow: visible;
+	}
+
+	.panel .local-name-search-resizable .local-name-search-panel {
+		height: auto;
+		min-height: 200px;
+		max-height: none;
+		flex: 1 1 auto;
+	}
+
+	.panel .local-name-search-resizable.has-results {
+		min-height: min(50vh, 420px) !important;
+	}
+
+	.panel .local-name-search-resizable .local-name-search-results {
+		max-height: min(40vh, 360px);
+		overflow-y: auto;
+	}
+
+	/* Selection history below search */
+	.panel .record-side-panel {
+		order: 4;
+		flex: 0 0 auto;
+		height: auto;
+		max-height: none;
+	}
+
+	.panel .record-side-history-list {
+		max-height: 280px;
 	}
 
 	.new-crds-desktop-header,

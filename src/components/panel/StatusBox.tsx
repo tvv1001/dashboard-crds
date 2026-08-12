@@ -2090,8 +2090,11 @@ export function StatusBox({
 		if (key) onSelectKey(key);
 	}
 
+	// Hide the empty details shell on mobile so Redis Search can sit in that space.
+	const isEmpty = !panelLoading && !detailJson && fetchLog.length === 0 && !hasSelectionLog;
+
 	return (
-		<div className='status-box'>
+		<div className={`status-box${isEmpty ? ' is-empty' : ''}`.trim()}>
 			<div className='status-box-header'>
 				<div className='status-box-header-left'>
 					{statusMsg && <div className='status-msg'>{statusMsg}</div>}
