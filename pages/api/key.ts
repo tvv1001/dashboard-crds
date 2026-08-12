@@ -2,7 +2,7 @@ import type { NextApiRequest, NextApiResponse } from 'next';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { formatErrorMessage, hydrateFromUpstream, loadCombinedSavedPayloadBundle, normalizeRawPayload, removeSavedPayload } from './_lib';
-import { findOwnerReference, type OwnerReference } from './_graphIndex';
+import { findOwnerReference, findEmploymentReference, type OwnerReference, type EmploymentReference } from './_graphIndex';
 
 function parseSavedKey(key: string) {
 	const raw = String(key || '')
@@ -113,7 +113,7 @@ async function buildNationalFallbackBundle(type: SavedKeyType, crd: string, requ
 // what src/components/panel/StatusBox.tsx checks to render a generic
 // name/position card with FINRA/SEC links pointing at the parent firm
 // instead of a dead-end record-not-found error.
-function buildOrphanBundle(type: SavedKeyType, crd: string, requestedKey: string, owner: OwnerReference) {
+function buildOrphanBundle(type: SavedKeyType, crd: string, requestedKey: string, reference: OwnerReference | EmploymentReference) {
 	const emptySource = (source: SavedKeySource) => ({
 		key: `${source}:${type}:${crd}`,
 		found: false,
@@ -127,7 +127,7 @@ function buildOrphanBundle(type: SavedKeyType, crd: string, requestedKey: string
 		resolvedKey: requestedKey,
 		crd,
 		type,
-		orphan: owner,
+		orphan: reference,
 		sources: {
 			finra: emptySource('finra'),
 			sec: emptySource('sec'),
@@ -233,6 +233,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 				const ownerReference = await findOwnerReference(parsed.crd).catch(() => null);
 				if (ownerReference) {
 					const orphanBundle = buildOrphanBundle(parsed.type, parsed.crd, key, ownerReference);
+					return res.json({
+						rawPayload: JSON.stringify(orphanBundle, null, 2),
+						requestedKey: key,
+						resolvedKey: key,
+						fallbackUsed: true,
+						bundle: orphanBundle,
+					});
+				}
+			} else if (parsed.type === 'firm') {
+				const employmentReference = await findEmploymentReference(parsed.crd).catch(() => null);
+				if (employmentReference) {
+					const orphanBundle = buildOrphanBundle(parsed.type, parsed.crd, key, employmentReference);
 					return res.json({
 						rawPayload: JSON.stringify(orphanBundle, null, 2),
 						requestedKey: key,

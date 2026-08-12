@@ -1059,18 +1059,23 @@ function OrphanRecordView({
 	onSelectKey,
 }: {
 	crd: string;
-	orphan: { name: string; position: string; parentType: 'firm'; parentCrd: string; firmName?: string; officeAddress?: unknown; mailingAddress?: unknown; phone?: string };
+	orphan: { name: string; position?: string; parentType: 'firm' | 'individual'; parentCrd: string; firmName?: string; officeAddress?: unknown; mailingAddress?: unknown; phone?: string; city?: string; state?: string; };
 	onSelectKey: (key: string) => void;
 }) {
-	const officeAddress = formatAddress(orphan.officeAddress);
+	const officeAddress = formatAddress(orphan.officeAddress) || (orphan.city && orphan.state ? `${orphan.city}, ${orphan.state}` : '');
 	const mailingAddress = formatAddress(orphan.mailingAddress);
 	const phone = String(orphan.phone || '').trim();
-	const employmentItems = [
+	const employmentItems = orphan.parentType === 'firm' ? [
 		{
 			firmName: orphan.firmName || `Firm CRD#${orphan.parentCrd}`,
 			crdNumber: orphan.parentCrd,
 			position: orphan.position,
 		},
+	] : [
+		{
+			individualName: orphan.name || `Individual CRD#${orphan.parentCrd}`,
+			crdNumber: orphan.parentCrd,
+		}
 	];
 	return (
 		<div className='record-detail-wrapper'>
@@ -1101,17 +1106,17 @@ function OrphanRecordView({
 					<div className='banner-context-links profile-links-section'>
 						<a
 							className='profile-link finra-link'
-							href={`https://brokercheck.finra.org/firm/summary/${orphan.parentCrd}`}
+							href={orphan.parentType === 'individual' ? `https://brokercheck.finra.org/individual/summary/${orphan.parentCrd}` : `https://brokercheck.finra.org/firm/summary/${orphan.parentCrd}`}
 							target='_blank'
 							rel='noopener noreferrer'>
-							Parent firm FINRA profile ↗
+							{orphan.parentType === 'individual' ? 'Parent individual FINRA profile ↗' : 'Parent firm FINRA profile ↗'}
 						</a>
 						<a
 							className='profile-link sec-link'
-							href={`https://adviserinfo.sec.gov/firm/summary/${orphan.parentCrd}`}
+							href={orphan.parentType === 'individual' ? `https://adviserinfo.sec.gov/individual/summary/${orphan.parentCrd}` : `https://adviserinfo.sec.gov/firm/summary/${orphan.parentCrd}`}
 							target='_blank'
 							rel='noopener noreferrer'>
-							Parent firm SEC profile ↗
+							{orphan.parentType === 'individual' ? 'Parent individual SEC profile ↗' : 'Parent firm SEC profile ↗'}
 						</a>
 					</div>
 				</section>
@@ -1120,11 +1125,11 @@ function OrphanRecordView({
 					<div className='record-detail-grid'>
 						{orphan.name ?
 							<div>
-								<strong>Name:</strong> {orphan.name}
+								<strong>{orphan.parentType === 'individual' ? 'Parent Name:' : 'Name:'}</strong> {orphan.name}
 							</div>
 						:	null}
 						<div>
-							<strong>Individual CRD:</strong> {crd}
+							<strong>{orphan.parentType === 'individual' ? 'Firm CRD:' : 'Individual CRD:'}</strong> {crd}
 						</div>
 						{orphan.position ?
 							<div>
@@ -1133,36 +1138,36 @@ function OrphanRecordView({
 						:	null}
 						{orphan.firmName ?
 							<div>
-								<strong>Affiliated Firm:</strong> {orphan.firmName}
+								<strong>{orphan.parentType === 'individual' ? 'Firm Name:' : 'Affiliated Firm:'}</strong> {orphan.firmName}
 							</div>
 						:	null}
 						{orphan.parentCrd ?
 							<div>
-								<strong>Parent Firm CRD:</strong>{' '}
+								<strong>{orphan.parentType === 'individual' ? 'Parent Individual CRD:' : 'Parent Firm CRD:'}</strong>{' '}
 								<button
 									type='button'
 									className='record-detail-inline-tag record-detail-inline-tag-button'
-									onClick={() => onSelectKey(`finra:firm:${orphan.parentCrd}`)}>
-									Firm #{orphan.parentCrd}
+									onClick={() => onSelectKey(`finra:${orphan.parentType}:${orphan.parentCrd}`)}>
+									{orphan.parentType === 'individual' ? `Individual #${orphan.parentCrd}` : `Firm #${orphan.parentCrd}`}
 								</button>
 							</div>
 						:	null}
 					</div>
 				</section>
 				<DetailList
-					title={`Current employment (${employmentItems.length})`}
+					title={orphan.parentType === 'individual' ? `Employment reference (1)` : `Current employment (1)`}
 					items={employmentItems}
 					onSelectKey={onSelectKey}
-					fallbackType='firm'
+					fallbackType={orphan.parentType === 'individual' ? 'individual' : 'firm'}
 				/>
 				<section className='record-detail-section'>
 					<div className='record-detail-empty'>
-						No independent BrokerCheck/SEC record exists for CRD {crd}. This person was scraped from{' '}
+						No independent BrokerCheck/SEC record exists for CRD {crd}. This {orphan.parentType === 'individual' ? 'firm' : 'person'} was scraped from{' '}
 						<button
 							type='button'
 							className='record-detail-inline-tag record-detail-inline-tag-button'
-							onClick={() => onSelectKey(`finra:firm:${orphan.parentCrd}`)}>
-							Firm CRD#{orphan.parentCrd}
+							onClick={() => onSelectKey(`finra:${orphan.parentType}:${orphan.parentCrd}`)}>
+							{orphan.parentType === 'individual' ? `Individual CRD#${orphan.parentCrd}` : `Firm CRD#${orphan.parentCrd}`}
 						</button>
 						's own detail record{orphan.position ? ` as "${orphan.position}"` : ''}, and has no live CRD of its own.
 					</div>

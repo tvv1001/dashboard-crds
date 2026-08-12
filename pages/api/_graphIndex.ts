@@ -227,7 +227,7 @@ function extractRowCityState(row: Record<string, unknown>): { city: string; stat
 // server instance. Follows the same signature-based caching pattern already
 // used by local-name-search.ts. This never writes to Redis.
 
-type EmploymentEdge = { personCrd: string; personName: string; isCurrent: boolean; city: string; state: string };
+type EmploymentEdge = { personCrd: string; personName: string; isCurrent: boolean; city: string; state: string; firmName?: string };
 
 let cachedSignature = '';
 let cachedIndex: Map<string, EmploymentEdge[]> | null = null;
@@ -270,7 +270,8 @@ async function buildFirmEmployeeIndex(): Promise<Map<string, EmploymentEdge[]>> 
 						seenPersonFirm.add(dedupeKey);
 						const list = index.get(firmCrd) || [];
 						const { city, state } = extractRowCityState(row);
-						list.push({ personCrd: crd, personName, isCurrent, city, state });
+						const firmName = String(row.firmName || row.organizationName || row.name || '').trim();
+						list.push({ personCrd: crd, personName, isCurrent, city, state, firmName });
 						index.set(firmCrd, list);
 					};
 
@@ -302,6 +303,32 @@ async function getFirmEmployeeIndex(): Promise<Map<string, EmploymentEdge[]>> {
 		});
 
 	return cachedIndexPromise;
+}
+
+export type EmploymentReference = {
+	parentType: 'individual';
+	parentCrd: string;
+	name: string;
+	firmName?: string;
+	city?: string;
+	state?: string;
+};
+
+export async function findEmploymentReference(crd: string): Promise<EmploymentReference | null> {
+	const normalized = String(crd || '').trim();
+	if (!normalized) return null;
+	const index = await getFirmEmployeeIndex();
+	const edges = index.get(normalized);
+	if (!edges || !edges.length) return null;
+	const edge = edges[0];
+	return {
+		parentType: 'individual',
+		parentCrd: edge.personCrd,
+		name: edge.personName,
+		firmName: edge.firmName,
+		city: edge.city,
+		state: edge.state,
+	};
 }
 
 // --- Owner-reference index (individual CRD -> parent firm) -------------------
