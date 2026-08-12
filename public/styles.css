@@ -2931,11 +2931,10 @@ button:disabled {
 	}
 
 	.new-crds-mobile-title {
-		font-size: 0.8rem;
+		font-size: 10px;
 		font-weight: 800;
 		letter-spacing: 0.08em;
-		text-transform: uppercase;
-		color: var(--text-accent);
+		color: #4db8fa;
 	}
 
 	.new-crds-count-badge {

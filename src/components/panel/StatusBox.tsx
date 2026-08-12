@@ -1566,23 +1566,6 @@ function RecordInfoView({
 						onSelectKey={onSelectKey}
 						fallbackType={linkedFallbackType}
 					/>
-					{isFirmRecord && employeeConnections ?
-						<>
-							<DetailList
-								title={`Current connections (${employeeConnections.current.length})`}
-								items={employeeConnections.current}
-								onSelectKey={onSelectKey}
-								fallbackType='individual'
-							/>
-							<DetailList
-								title={`Previous connections (${employeeConnections.previous.length})`}
-								items={employeeConnections.previous}
-								onSelectKey={onSelectKey}
-								fallbackType='individual'
-								muted
-							/>
-						</>
-					:	null}
 					<DisclosureDetailCards
 						title={`Disclosure details (${combinedDisclosures.length})`}
 						items={combinedDisclosures}
@@ -1634,6 +1617,29 @@ function RecordInfoView({
 							/>
 						</>
 					:	null}
+					{isFirmRecord && employeeConnections ? (
+						employeeConnections.loading ? (
+							<div className='record-detail-empty' style={{ marginTop: '1rem', color: '#888', fontStyle: 'italic' }}>
+								Loading connections...
+							</div>
+						) : (employeeConnections.current.length > 0 || employeeConnections.previous.length > 0) ? (
+							<>
+								<DetailList
+									title={`Current connections (${employeeConnections.current.length})`}
+									items={employeeConnections.current}
+									onSelectKey={onSelectKey}
+									fallbackType='individual'
+								/>
+								<DetailList
+									title={`Previous connections (${employeeConnections.previous.length})`}
+									items={employeeConnections.previous}
+									onSelectKey={onSelectKey}
+									fallbackType='individual'
+									muted
+								/>
+							</>
+						) : null
+					) : null}
 				</div>
 			</div>
 		);
@@ -1979,23 +1985,6 @@ function RecordInfoView({
 				onSelectKey={onSelectKey}
 				fallbackType={linkedFallbackType}
 			/>
-			{isFirmRecord && employeeConnections ?
-				<>
-					<DetailList
-						title={`Current connections (${employeeConnections.current.length})`}
-						items={employeeConnections.current}
-						onSelectKey={onSelectKey}
-						fallbackType='individual'
-					/>
-					<DetailList
-						title={`Previous connections (${employeeConnections.previous.length})`}
-						items={employeeConnections.previous}
-						onSelectKey={onSelectKey}
-						fallbackType='individual'
-						muted
-					/>
-				</>
-			:	null}
 			{/* Generic connection buckets only when employment arrays weren't present (firm/orphan shapes). */}
 			{(isFirmRecord || (!currentEmploymentRows.length && !previousEmploymentRows.length)) && (
 				<>
@@ -2024,6 +2013,29 @@ function RecordInfoView({
 				title='Additional details'
 				body={body}
 			/>
+			{isFirmRecord && employeeConnections ? (
+				employeeConnections.loading ? (
+					<div className='record-detail-empty' style={{ marginTop: '1rem', color: '#888', fontStyle: 'italic' }}>
+						Loading connections...
+					</div>
+				) : (employeeConnections.current.length > 0 || employeeConnections.previous.length > 0) ? (
+					<>
+						<DetailList
+							title={`Current connections (${employeeConnections.current.length})`}
+							items={employeeConnections.current}
+							onSelectKey={onSelectKey}
+							fallbackType='individual'
+						/>
+						<DetailList
+							title={`Previous connections (${employeeConnections.previous.length})`}
+							items={employeeConnections.previous}
+							onSelectKey={onSelectKey}
+							fallbackType='individual'
+							muted
+						/>
+					</>
+				) : null
+			) : null}
 		</div>
 	);
 }
