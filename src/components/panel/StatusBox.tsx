@@ -950,7 +950,7 @@ function DetailList({
 											if (!onSelectKey) return;
 											onSelectKey(selectionKey);
 										}}>
-										CRD#{crd}
+										{rowType === 'firm' ? 'Firm CRD#' : 'Individual CRD#'}{crd}
 									</button>
 								:	null}
 								{secNo ?
@@ -1155,7 +1155,7 @@ function OrphanRecordView({
 					</div>
 				</section>
 				<DetailList
-					title={orphan.parentType === 'individual' ? `Employment reference (1)` : `Current employment (1)`}
+					title={orphan.parentType === 'individual' ? `Employment reference (1)` : `Current registration (1)`}
 					items={employmentItems}
 					onSelectKey={onSelectKey}
 					fallbackType={orphan.parentType === 'individual' ? 'individual' : 'firm'}
@@ -1549,22 +1549,24 @@ function RecordInfoView({
 					:	null}
 
 					{!isFirmRecord ?
-						<DetailList
-							title={`Current Employment (${currentEmploymentDisplay.length})`}
-							items={currentEmploymentDisplay}
-							onSelectKey={onSelectKey}
-							fallbackType={linkedFallbackType}
-							hideSourceTag
-						/>
+						<>
+							<DetailList
+								title={`Current Registrations (${currentEmploymentDisplay.length})`}
+								items={currentEmploymentDisplay}
+								onSelectKey={onSelectKey}
+								fallbackType={linkedFallbackType}
+								hideSourceTag
+							/>
+							<DetailList
+								title={`Previous Registrations (${previousEmploymentDisplay.length})`}
+								items={previousEmploymentDisplay}
+								onSelectKey={onSelectKey}
+								fallbackType={linkedFallbackType}
+								hideSourceTag
+								muted
+							/>
+						</>
 					:	null}
-					<DetailList
-						title={`Previous Employment (${previousEmploymentDisplay.length})`}
-						items={previousEmploymentDisplay}
-						onSelectKey={onSelectKey}
-						fallbackType={linkedFallbackType}
-						hideSourceTag
-						muted
-					/>
 					<DetailList
 						title={`Direct owners & executive officers (${combinedOwners.length})`}
 						items={combinedOwners}
