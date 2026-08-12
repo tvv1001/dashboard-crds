@@ -1,5 +1,4 @@
 import Head from 'next/head';
-import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type Graph from 'graphology';
@@ -138,12 +137,44 @@ const INACTIVE_NODE_COLOR_DIM = '#4b5563';
 const INACTIVE_NODE_STROKE = '#9ca3af';
 /** People: sky-blue circles. Firms: /graph MS hex — dark fill + cyan stroke in shader. */
 const INDIVIDUAL_NODE_COLOR = '#0ea5e9';
-const FIRM_NODE_COLOR = '#22d3ee';
+const FIRM_NODE_COLOR = '#0f172a';
+/** Active click / multi-select — amber. */
+const SELECTED_NODE_COLOR = '#f59e0b';
+/**
+ * Connections already revealed (clicked/expanded) but not the active selection.
+ * Slightly shifted fills so opened hubs read as "done" while type stays recognizable.
+ */
+const REVEALED_INDIVIDUAL_COLOR = '#38bdf8';
+const REVEALED_FIRM_COLOR = '#164e63';
+const REVEALED_INACTIVE_COLOR = '#78716c';
+/** Canvas rings: selected (amber) vs revealed (violet person / teal firm). */
+const SELECTED_RING_COLOR = '#f59e0b';
+const SELECTED_RING_FILL = 'rgba(245, 158, 11, 0.16)';
+const REVEALED_RING_INDIVIDUAL = '#c084fc';
+const REVEALED_RING_FIRM = '#2dd4bf';
+const REVEALED_RING_FILL_INDIVIDUAL = 'rgba(192, 132, 252, 0.12)';
+const REVEALED_RING_FILL_FIRM = 'rgba(45, 212, 191, 0.12)';
 
 function nodeDisplayColor(type: string, inactive?: boolean, degree?: number): string {
+	void degree;
 	if (inactive) return INACTIVE_NODE_COLOR;
 	if (type === 'firm') return FIRM_NODE_COLOR;
 	return INDIVIDUAL_NODE_COLOR;
+}
+
+/** Stable type color for a node (never selection/revealed tint). */
+function nodeTypeBaseColor(type: string, inactive?: boolean): string {
+	return nodeDisplayColor(type, inactive);
+}
+
+/** Fill color for selected / revealed / default states. */
+function nodeStateColor(opts: { type: string; inactive?: boolean; selected?: boolean; revealed?: boolean }): string {
+	if (opts.selected) return SELECTED_NODE_COLOR;
+	if (opts.inactive) return opts.revealed ? REVEALED_INACTIVE_COLOR : INACTIVE_NODE_COLOR;
+	if (opts.revealed) {
+		return opts.type === 'firm' ? REVEALED_FIRM_COLOR : REVEALED_INDIVIDUAL_COLOR;
+	}
+	return nodeTypeBaseColor(opts.type, false);
 }
 
 function nodeRenderType(type: string): 'circle' | 'hexagon' {
@@ -467,7 +498,7 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 	}
 	const childRingIndex = new Map<string, number>();
 	const childSlotIndex = new Map<string, number>();
-	const hubOrbitMeta = new Map<string, { ringCount: number; kidCount: number; hubType: string }>();
+	const hubOrbitMeta = new Map<string, { ringCount: number; kidCount: number; hubType: string; ringSizes: number[] }>();
 	for (const [hub, kids] of childrenByHub) {
 		const unique = Array.from(new Set(kids)).sort((a, b) => a.localeCompare(b));
 		const hubNode = nodeById.get(hub);
@@ -479,11 +510,45 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 			childCount: unique.length,
 			preferSingleRing: preferSingle,
 		});
-		hubOrbitMeta.set(hub, { ringCount, kidCount: unique.length, hubType });
-		unique.forEach((child, i) => {
-			childRingIndex.set(`${hub}|${child}`, i % ringCount);
-			childSlotIndex.set(`${hub}|${child}`, i);
-		});
+		// Distribute children across rings proportional to each ring's radius (i.e. its
+		// available circumference), instead of an even round-robin split. A flat split
+		// gives the innermost ring the same node count as the outermost — but the inner
+		// ring has far less arc length, so those nodes end up crushed together right next
+		// to the hub while the outer ring has room to spare. Weighting by radius keeps
+		// on-screen spacing roughly consistent across every ring.
+		const ringRadii: number[] = [];
+		for (let r = 0; r < ringCount; r++) {
+			ringRadii.push(
+				orbitRadiusForHub({ hubType, childCount: unique.length, ringIndex: r, ringCount, preferSingleRing: preferSingle }).radius,
+			);
+		}
+		const radiusSum = ringRadii.reduce((s, r) => s + r, 0) || 1;
+		const ringSizes = ringRadii.map((r) => Math.max(1, Math.round((r / radiusSum) * unique.length)));
+		// Rounding can drift the total off unique.length — true it up, adjusting outer
+		// rings first since they have the most slack.
+		let drift = unique.length - ringSizes.reduce((s, n) => s + n, 0);
+		let adjustIdx = ringCount - 1;
+		while (drift !== 0 && ringCount > 0) {
+			if (drift > 0) {
+				ringSizes[adjustIdx] += 1;
+				drift -= 1;
+			} else if (ringSizes[adjustIdx] > 1) {
+				ringSizes[adjustIdx] -= 1;
+				drift += 1;
+			}
+			adjustIdx = (adjustIdx - 1 + ringCount) % ringCount;
+		}
+		hubOrbitMeta.set(hub, { ringCount, kidCount: unique.length, hubType, ringSizes });
+		let childIdx = 0;
+		for (let r = 0; r < ringCount; r++) {
+			for (let s = 0; s < ringSizes[r] && childIdx < unique.length; s++, childIdx++) {
+				const child = unique[childIdx];
+				childRingIndex.set(`${hub}|${child}`, r);
+				// Slot is now the index WITHIN this ring (not a global index), so angular
+				// placement below spaces nodes evenly around their own ring's circumference.
+				childSlotIndex.set(`${hub}|${child}`, s);
+			}
+		}
 	}
 
 	const staggeredChildDistance = (hubId: string, childId: string, hubDeg: number) => {
@@ -502,46 +567,50 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 		return radius + jitter;
 	};
 
-	// Force constants: spread hubs hard; keep leaves on private rings.
+	// Force constants: keep hubs near enough to read as one map, but far enough
+	// that private orbits don't interpenetrate. Prior values over-pushed clusters
+	// across the canvas while still allowing leaf piles on dense rings.
 	const baseCharge =
 		starEgo ?
-			egoIsPerson ? -2200
-			:	-2600
-		: dense ? -3200
-		: mid ? -2600
-		: -2000;
+			egoIsPerson ? -2000
+			:	-2400
+		: dense ? -3800
+		: mid ? -3000
+		: -2400;
 	const linkStrengthBase =
 		starEgo ?
-			egoIsPerson ? 0.42
-			:	0.34
-		: dense ? 0.12
-		: mid ? 0.18
-		: 0.26;
+			egoIsPerson ? 0.44
+			:	0.36
+		: dense ? 0.1
+		: mid ? 0.15
+		: 0.24;
 	const linkDistBase =
 		starEgo ?
-			egoIsPerson ? 520
-			:	460
-		: nCount > 1000 ? 720
-		: nCount > 300 ? 640
-		: nCount > 150 ? 580
-		: nCount > 80 ? 540
-		: 620;
+			egoIsPerson ? 480
+			:	420
+		: nCount > 1000 ? 820
+		: nCount > 300 ? 720
+		: nCount > 150 ? 640
+		: nCount > 80 ? 580
+		: 540;
+	// Leaf body padding in graph units — enough to stop disk stacks without
+	// inflating hub-to-hub distance (hubs use orbit-based collision below).
 	const collidePad =
 		starEgo ?
-			egoIsPerson ? 96
-			:	110
-		: nCount > 1000 ? 58
-		: nCount > 600 ? 68
-		: nCount > 300 ? 78
-		: nCount > 120 ? 90
-		: nCount > 60 ? 104
-		: 118;
+			egoIsPerson ? 72
+			:	84
+		: nCount > 1000 ? 48
+		: nCount > 600 ? 56
+		: nCount > 300 ? 64
+		: nCount > 120 ? 72
+		: nCount > 60 ? 84
+		: 96;
 	// Weak centering so multi-hub maps don't collapse back together.
 	const centerStrength =
-		starEgo ? 0.012
-		: dense ? 0.00025
-		: mid ? 0.0005
-		: 0.0012;
+		starEgo ? 0.014
+		: dense ? 0.0004
+		: mid ? 0.0007
+		: 0.0015;
 	// Full 2D (circular) — no Y squash.
 	const yFlatten = 1;
 
@@ -602,38 +671,93 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 				}
 				// Absolute graph-unit push (not only normalized) so stuck hubs break free.
 				const overlap = need - dist;
-				const push = (overlap / Math.max(need, 1)) * alpha * pushScale + overlap * alpha * 0.08;
+				const push = (overlap / Math.max(need, 1)) * alpha * pushScale + overlap * alpha * 0.06;
 				const ux = (dx / dist) * push;
 				const uy = (dy / dist) * push;
 				const aFixed = Boolean(a.pinned || (starEgo && a.id === egoHubId));
 				const bFixed = Boolean(b.pinned || (starEgo && b.id === egoHubId));
 				if (aFixed && bFixed) {
-					// Both fixed: nudge children will stay; still try slight drift if not fx-locked.
-					if (typeof a.fx !== 'number') {
-						a.vx = (a.vx ?? 0) - ux * 0.5;
-						a.vy = (a.vy ?? 0) - uy * 0.5;
+					// Both fixed: still separate by nudging positions slightly so pinned
+					// multi-select hubs don't stay stacked on top of each other.
+					const half = 0.55;
+					if (typeof a.fx === 'number') {
+						a.fx -= ux * half;
+						a.x = a.fx;
+					} else {
+						a.vx = (a.vx ?? 0) - ux * 0.8;
+						a.vy = (a.vy ?? 0) - uy * 0.8;
 					}
-					if (typeof b.fx !== 'number') {
-						b.vx = (b.vx ?? 0) + ux * 0.5;
-						b.vy = (b.vy ?? 0) + uy * 0.5;
+					if (typeof b.fx === 'number') {
+						b.fx += ux * half;
+						b.x = b.fx;
+					} else {
+						b.vx = (b.vx ?? 0) + ux * 0.8;
+						b.vy = (b.vy ?? 0) + uy * 0.8;
 					}
+					if (typeof a.fy === 'number') a.fy -= uy * half;
+					if (typeof b.fy === 'number') b.fy += uy * half;
+					if (typeof a.fy === 'number') a.y = a.fy;
+					if (typeof b.fy === 'number') b.y = b.fy;
 					continue;
 				}
 				if (aFixed && !bFixed) {
 					// Move free hub fully out of the pinned orbit.
-					b.vx = (b.vx ?? 0) + ux * 2;
-					b.vy = (b.vy ?? 0) + uy * 2;
+					b.vx = (b.vx ?? 0) + ux * 1.7;
+					b.vy = (b.vy ?? 0) + uy * 1.7;
 					continue;
 				}
 				if (!aFixed && bFixed) {
-					a.vx = (a.vx ?? 0) - ux * 2;
-					a.vy = (a.vy ?? 0) - uy * 2;
+					a.vx = (a.vx ?? 0) - ux * 1.7;
+					a.vy = (a.vy ?? 0) - uy * 1.7;
 					continue;
 				}
-				a.vx = (a.vx ?? 0) - ux;
-				a.vy = (a.vy ?? 0) - uy;
-				b.vx = (b.vx ?? 0) + ux;
-				b.vy = (b.vy ?? 0) + uy;
+				// Mass-weight the push by orbit size so a large freshly-expanded hub stays
+				// put while smaller neighboring hubs are the ones shoved clear of it.
+				const totalOrbit = Math.max(aOrbit + bOrbit, 1);
+				const aShare = bOrbit / totalOrbit;
+				const bShare = aOrbit / totalOrbit;
+				a.vx = (a.vx ?? 0) - ux * aShare * 1.6;
+				a.vy = (a.vy ?? 0) - uy * aShare * 1.6;
+				b.vx = (b.vx ?? 0) + ux * bShare * 1.6;
+				b.vy = (b.vy ?? 0) + uy * bShare * 1.6;
+			}
+		}
+	};
+
+	/** Pairwise leaf body separation — kills disk stacks without inflating hub gaps. */
+	const leafBodySeparate = (alpha: number) => {
+		const bodies = pts.filter((p) => {
+			const kids = childrenByHub.get(p.id)?.length || 0;
+			return kids < 2 && p.degree <= 4 && !(starEgo && p.id === egoHubId);
+		});
+		for (let i = 0; i < bodies.length; i++) {
+			const a = bodies[i];
+			const aBody = (a.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE) + collidePad * 0.55;
+			for (let j = i + 1; j < bodies.length; j++) {
+				const b = bodies[j];
+				const bBody = (b.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE) + collidePad * 0.55;
+				let dx = (b.x ?? 0) - (a.x ?? 0);
+				let dy = (b.y ?? 0) - (a.y ?? 0);
+				let dist = Math.hypot(dx, dy);
+				const need = aBody + bBody;
+				if (dist >= need) continue;
+				if (dist < 1e-6) {
+					const ang = ((hashString(`${a.id}|${b.id}|leaf`) % 1000) / 999) * Math.PI * 2;
+					dx = Math.cos(ang);
+					dy = Math.sin(ang);
+					dist = 1;
+				}
+				const push = ((need - dist) / need) * alpha * 1.15;
+				const ux = (dx / dist) * push;
+				const uy = (dy / dist) * push;
+				if (!a.pinned) {
+					a.vx = (a.vx ?? 0) - ux;
+					a.vy = (a.vy ?? 0) - uy;
+				}
+				if (!b.pinned) {
+					b.vx = (b.vx ?? 0) + ux;
+					b.vy = (b.vy ?? 0) + uy;
+				}
 			}
 		}
 	};
@@ -661,19 +785,27 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 			const slot = childSlotIndex.get(key) ?? 0;
 			const meta = hubOrbitMeta.get(hubId);
 			const ringCount = meta?.ringCount || 1;
-			// Even angular spacing per ring (not one global slot) — matches initial place.
-			const onRing = Math.max(1, Math.ceil(uniqueKids / ringCount));
-			const indexOnRing = Math.floor(slot / ringCount);
+			// slot is already the index within this specific ring (assigned proportionally
+			// to ring radius above), and onRing is that ring's own node count — not a flat
+			// childCount/ringCount split — so angular spacing matches each ring's actual capacity.
+			const onRing = Math.max(1, meta?.ringSizes?.[ring] ?? Math.ceil(uniqueKids / ringCount));
+			const indexOnRing = slot;
 			const angle = (indexOnRing / onRing) * Math.PI * 2 + ring * 0.21;
 			const tx = (hub.x ?? 0) + Math.cos(angle) * targetDist;
 			const ty = (hub.y ?? 0) + Math.sin(angle) * targetDist * yFlatten;
 			const strength =
 				(starEgo ?
-					egoIsPerson ? 0.48
-					:	0.42
-				: dense ? 0.22
-				: mid ? 0.28
-				: 0.34) * alpha;
+					egoIsPerson ? 0.55
+					:	0.48
+				: dense ? 0.32
+				: mid ? 0.38
+				: 0.44) * alpha;
+			// Direct position blend for leaves so they don't pile under competing forces.
+			const blend = starEgo ? 0.18 : 0.12;
+			if (!child.pinned) {
+				child.x = (child.x ?? 0) + (tx - (child.x ?? 0)) * blend * Math.min(1, alpha * 8);
+				child.y = (child.y ?? 0) + (ty - (child.y ?? 0)) * blend * Math.min(1, alpha * 8);
+			}
 			child.vx = (child.vx ?? 0) + (tx - (child.x ?? 0)) * strength;
 			child.vy = (child.vy ?? 0) + (ty - (child.y ?? 0)) * strength;
 		}
@@ -694,17 +826,112 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 	};
 	pinFixedHubs();
 
+	/** Final hard de-overlap after forces settle — resolves residual leaf stacks. */
+	const hardResolveOverlaps = () => {
+		for (let iter = 0; iter < 18; iter++) {
+			let moved = false;
+			for (let i = 0; i < pts.length; i++) {
+				const a = pts[i];
+				const aKids = childrenByHub.get(a.id)?.length || 0;
+				const aIsHub = aKids >= 2 || a.degree >= 4 || a.pinned || (starEgo && a.id === egoHubId);
+				const aR = aIsHub ? hubOuterOrbit(a.id, a.degree, a.firm) * 0.78 + ORBIT_HUB_GAP * 0.2 : (a.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE) + collidePad * 0.65;
+				for (let j = i + 1; j < pts.length; j++) {
+					const b = pts[j];
+					const bKids = childrenByHub.get(b.id)?.length || 0;
+					const bIsHub = bKids >= 2 || b.degree >= 4 || b.pinned || (starEgo && b.id === egoHubId);
+					// Hub↔hub handled by orbit packing; only force body-level here when at least one is a leaf.
+					if (aIsHub && bIsHub) {
+						let dx = (b.x ?? 0) - (a.x ?? 0);
+						let dy = (b.y ?? 0) - (a.y ?? 0);
+						let dist = Math.hypot(dx, dy);
+						const need = hubOuterOrbit(a.id, a.degree, a.firm) + hubOuterOrbit(b.id, b.degree, b.firm) + ORBIT_HUB_GAP;
+						if (dist >= need) continue;
+						if (dist < 1e-6) {
+							const ang = ((hashString(`${a.id}|${b.id}|hard`) % 1000) / 999) * Math.PI * 2;
+							dx = Math.cos(ang);
+							dy = Math.sin(ang);
+							dist = 1;
+						}
+						const push = (need - dist) * 0.52;
+						const ux = (dx / dist) * push;
+						const uy = (dy / dist) * push;
+						const aLock = a.pinned || (starEgo && a.id === egoHubId);
+						const bLock = b.pinned || (starEgo && b.id === egoHubId);
+						if (aLock && bLock) {
+							a.x = (a.x ?? 0) - ux * 0.5;
+							a.y = (a.y ?? 0) - uy * 0.5;
+							b.x = (b.x ?? 0) + ux * 0.5;
+							b.y = (b.y ?? 0) + uy * 0.5;
+							if (typeof a.fx === 'number') a.fx = a.x;
+							if (typeof a.fy === 'number') a.fy = a.y;
+							if (typeof b.fx === 'number') b.fx = b.x;
+							if (typeof b.fy === 'number') b.fy = b.y;
+						} else if (aLock) {
+							b.x = (b.x ?? 0) + ux;
+							b.y = (b.y ?? 0) + uy;
+						} else if (bLock) {
+							a.x = (a.x ?? 0) - ux;
+							a.y = (a.y ?? 0) - uy;
+						} else {
+							a.x = (a.x ?? 0) - ux * 0.5;
+							a.y = (a.y ?? 0) - uy * 0.5;
+							b.x = (b.x ?? 0) + ux * 0.5;
+							b.y = (b.y ?? 0) + uy * 0.5;
+						}
+						moved = true;
+						continue;
+					}
+					const bR = bIsHub ? hubOuterOrbit(b.id, b.degree, b.firm) * 0.78 + ORBIT_HUB_GAP * 0.2 : (b.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE) + collidePad * 0.65;
+					let dx = (b.x ?? 0) - (a.x ?? 0);
+					let dy = (b.y ?? 0) - (a.y ?? 0);
+					let dist = Math.hypot(dx, dy);
+					const need = aR + bR;
+					if (dist >= need) continue;
+					if (dist < 1e-6) {
+						const ang = ((hashString(`${a.id}|${b.id}|leafhard`) % 1000) / 999) * Math.PI * 2;
+						dx = Math.cos(ang);
+						dy = Math.sin(ang);
+						dist = 1;
+					}
+					const push = (need - dist) * 0.55;
+					const ux = (dx / dist) * push;
+					const uy = (dy / dist) * push;
+					// Prefer moving leaves over hubs / pinned.
+					if (aIsHub && !bIsHub) {
+						b.x = (b.x ?? 0) + ux;
+						b.y = (b.y ?? 0) + uy;
+					} else if (!aIsHub && bIsHub) {
+						a.x = (a.x ?? 0) - ux;
+						a.y = (a.y ?? 0) - uy;
+					} else {
+						if (!a.pinned) {
+							a.x = (a.x ?? 0) - ux * 0.5;
+							a.y = (a.y ?? 0) - uy * 0.5;
+						}
+						if (!b.pinned) {
+							b.x = (b.x ?? 0) + ux * 0.5;
+							b.y = (b.y ?? 0) + uy * 0.5;
+						}
+					}
+					moved = true;
+				}
+			}
+			if (!moved) break;
+		}
+		for (const p of pts) {
+			if (!graph.hasNode(p.id)) continue;
+			graph.setNodeAttribute(p.id, 'x', p.x);
+			graph.setNodeAttribute(p.id, 'y', p.y);
+		}
+	};
+
 	let tickCount = 0;
 	const sim = forceSimulation(pts)
-		// Hot start so expand immediately breaks overlapping clusters.
-		.alpha(dense ? 0.22 : 0.28)
-		.alphaMin(0.00035)
-		.alphaDecay(
-			dense ? 0.008
-			: mid ? 0.007
-			: 0.006,
-		)
-		.velocityDecay(dense || mid ? 0.62 : 0.58)
+		// Enough energy to unstack leaves, then settle cleanly (no endless drift).
+		.alpha(0.16)
+		.alphaMin(0.0025)
+		.alphaDecay(0.028)
+		.velocityDecay(0.8)
 		.force(
 			'charge',
 			forceManyBody()
@@ -713,21 +940,21 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 					const kids = childrenByHub.get(d.id)?.length || 0;
 					if (d.firm || kids >= 3) {
 						const hubMul =
-							deg > 80 || kids > 80 ? 4.2
-							: deg > 20 || kids > 20 ? 3.2
-							: 2.4;
+							deg > 80 || kids > 80 ? 2.8
+							: deg > 20 || kids > 20 ? 2.2
+							: 1.7;
 						return baseCharge * hubMul;
 					}
 					const leaf =
-						deg <= 2 ? 4.55
-						: deg <= 4 ? 6.25
-						: 3;
-					return (deg > 20 ? 2.1 * baseCharge : baseCharge) * leaf;
+						deg <= 2 ? 2.4
+						: deg <= 4 ? 3.0
+						: 1.8;
+					return (deg > 20 ? 1.6 * baseCharge : baseCharge) * leaf;
 				})
 				.distanceMax(
 					dense ? 4200
-					: mid ? 3200
-					: 2600,
+					: mid ? 3400
+					: 2800,
 				)
 				.theta(dense || mid ? 0.82 : 0.72),
 		)
@@ -745,29 +972,29 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 					const hubId = sDeg >= tDeg ? s.id : t.id;
 					const childId = sDeg >= tDeg ? t.id : s.id;
 
-					// Firm↔firm: stretch hard so hubs don't share a cloud.
+					// Firm↔firm: moderate stretch — avoid both clumping and map-wide gaps.
 					if (s.firm && t.firm) {
-						return (linkDistBase * 2.4 + Math.sqrt(Math.max(sDeg, 1)) * 48 + Math.sqrt(Math.max(tDeg, 1)) * 48) * 2.2;
+						return linkDistBase * 1.65 + Math.sqrt(Math.max(sDeg, 1)) * 28 + Math.sqrt(Math.max(tDeg, 1)) * 28;
 					}
 
 					const childKids = childrenByHub.get(childId)?.length || 0;
 					const childIsLeaf = Math.min(sDeg, tDeg) <= 4 && childKids < 3;
 					const stagger = childIsLeaf && hubDeg >= 3 ? staggeredChildDistance(hubId, childId, hubDeg) : 0;
 					const degScale =
-						hubDeg > 100 ? 2.1
-						: hubDeg > 50 ? 1.85
-						: hubDeg > 20 ? 1.55
-						: 1.3;
+						hubDeg > 100 ? 1.45
+						: hubDeg > 50 ? 1.3
+						: hubDeg > 20 ? 1.18
+						: 1.08;
 					const base = stagger > 0 ? stagger : linkDistBase * degScale;
-					return base * 2.15;
+					return base * 1.35;
 				})
 				.strength((d: any) => {
 					const s = typeof d.source === 'object' ? d.source : nodeById.get(d.source);
 					const t = typeof d.target === 'object' ? d.target : nodeById.get(d.target);
-					if (s?.firm && t?.firm) return linkStrengthBase * 0.22;
+					if (s?.firm && t?.firm) return linkStrengthBase * 0.28;
 					const deg = Math.max(s?.degree || 1, t?.degree || 1);
-					if (deg > 80) return linkStrengthBase * 0.38;
-					if (deg > 20) return linkStrengthBase * 0.55;
+					if (deg > 80) return linkStrengthBase * 0.42;
+					if (deg > 20) return linkStrengthBase * 0.58;
 					return linkStrengthBase;
 				}),
 		)
@@ -778,32 +1005,42 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 					const deg = d.degree || 1;
 					const body = d.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
 					const kids = childrenByHub.get(d.id)?.length || 0;
-					// Expanded hubs reserve near-full outer orbit so clouds don't interpenetrate.
+					// Expanded hubs reserve most of their outer orbit so rings don't interpenetrate,
+					// but not the full radius + huge gap (that flings clusters across the map).
 					if (kids >= 2 || deg >= 4 || d.pinned) {
 						const outer = hubOuterOrbit(d.id, deg, d.firm);
-						// Use a large fraction of outer radius as collision halo.
-						return Math.max(body + collidePad, outer * 0.72);
+						return Math.max(body + collidePad, outer * 0.8);
 					}
 					const leafBoost =
-						deg <= 2 ? body * 0.7
-						: deg <= 4 ? body * 0.45
-						: body * 0.2;
+						deg <= 2 ? body * 0.55
+						: deg <= 4 ? body * 0.35
+						: body * 0.15;
 					return body + collidePad + leafBoost;
 				})
-				.strength(0.95)
-				.iterations(dense || mid || starEgo ? 4 : 3),
+				.strength(0.98)
+				.iterations(dense || mid || starEgo ? 5 : 4),
 		)
 		.force('x', forceX(starEgo && egoHubId ? (nodeById.get(egoHubId)?.x ?? cx) : cx).strength(centerStrength))
 		// Equal X/Y centering keeps orbits circular in true 2D (no vertical squash).
 		.force('y', forceY(starEgo && egoHubId ? (nodeById.get(egoHubId)?.y ?? cy) : cy).strength(centerStrength))
 		.force('firm-separate', firmHubSeparation as any)
+		.force('leaf-separate', leafBodySeparate as any)
 		.force('ring-orbit', ringOrbitForce as any)
 		.on('tick', () => {
 			tickCount += 1;
 			pinFixedHubs();
+			// Soft early freeze: once alpha is nearly spent, kill residual velocity
+			// so custom forces can't keep nodes twitching.
+			if (sim.alpha() < 0.006) {
+				for (const p of pts) {
+					p.vx = 0;
+					p.vy = 0;
+				}
+			}
 			// While hot, skip every other paint (same cadence as /graph).
 			if (sim.alpha() > 0.12 && tickCount % 2 !== 0) return;
 			for (const p of pts) {
+				if (!graph.hasNode(p.id)) continue;
 				// Pinned selection never drifts — write fixed coords back.
 				if (p.pinned || (starEgo && egoHubId && p.id === egoHubId)) {
 					const fx = typeof p.fx === 'number' ? p.fx : p.x;
@@ -822,10 +1059,52 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 			}
 		})
 		.on('end', () => {
+			hardResolveOverlaps();
+			// Permanently freeze every node so custom forces can't nudge them again.
+			for (const p of pts) {
+				p.vx = 0;
+				p.vy = 0;
+				p.fx = p.x;
+				p.fy = p.y;
+				if (graph.hasNode(p.id)) {
+					graph.setNodeAttribute(p.id, 'x', p.x);
+					graph.setNodeAttribute(p.id, 'y', p.y);
+				}
+			}
 			globalLayoutAnimId = null;
+			try {
+				sigma.refresh();
+			} catch {
+				// ignore
+			}
 		});
 
 	globalLayoutAnimId = sim;
+
+	// Hard failsafe: competing custom forces can keep alpha above alphaMin.
+	// Stop after a short settle, run one hard de-overlap, then freeze.
+	window.setTimeout(() => {
+		if (globalLayoutAnimId !== sim) return;
+		hardResolveOverlaps();
+		for (const p of pts) {
+			p.vx = 0;
+			p.vy = 0;
+			p.fx = p.x;
+			p.fy = p.y;
+			if (graph.hasNode(p.id)) {
+				graph.setNodeAttribute(p.id, 'x', p.x);
+				graph.setNodeAttribute(p.id, 'y', p.y);
+			}
+		}
+		sim.alpha(0);
+		sim.stop();
+		globalLayoutAnimId = null;
+		try {
+			sigma.refresh();
+		} catch {
+			// ignore
+		}
+	}, 2600);
 }
 
 /**
@@ -845,14 +1124,14 @@ const STATIC_NODE_SIZE = 46;
 const COLLISION_GRAPH_RADIUS = 14;
 
 /** On-screen px: match finra-data-chart-next-02 reference (large hubs, tiny leaves) */
-const FIRM_NODE_SIZE = 22;
-const INDIVIDUAL_NODE_SIZE = 22;
+const FIRM_NODE_SIZE = 12;
+const INDIVIDUAL_NODE_SIZE = 10;
 
 function dynamicNodeSize(degree: number, type: string): number {
 	if (type === 'firm') return FIRM_NODE_SIZE;
 	if (degree <= 1) return INDIVIDUAL_NODE_SIZE;
 	// Grow size smoothly based on number of connections up to firm size
-	return Math.min(FIRM_NODE_SIZE, INDIVIDUAL_NODE_SIZE + (degree - 1) * 1.8);
+	return Math.min(FIRM_NODE_SIZE, INDIVIDUAL_NODE_SIZE + (degree - 1) * 1);
 }
 
 /**
@@ -995,8 +1274,9 @@ function packNewHubAwayFromOthers(hubX: number, hubY: number, myOuter: number, o
 	return { x: px, y: py };
 }
 
-/** Gap between outer edges of two expanded hub orbits — wide enough for legibility. */
-const ORBIT_HUB_GAP = Math.max(220, FIRM_NODE_SIZE * 4.5);
+/** Gap between outer edges of two expanded hub orbits.
+ *  Large enough that rings don't interpenetrate; small enough clusters stay nearby. */
+const ORBIT_HUB_GAP = Math.max(220, FIRM_NODE_SIZE * 14);
 
 /** Stamp display sizes onto layout nodes once (collision uses node size). */
 function bakeDisplaySizes(payload: LayoutPayload): LayoutPayload {
@@ -1105,6 +1385,11 @@ export default function GlobalGraphPage() {
 	const [theme, setTheme] = useState<'dark' | 'light'>('dark');
 	const [toolbarMinimized, setToolbarMinimized] = useState(false);
 	const [drawerOpen, setDrawerOpen] = useState(false);
+	/** Synchronous mirror of drawerOpen for camera math (avoids stale closures in useCallback). */
+	const drawerOpenRef = useRef(false);
+	useEffect(() => {
+		drawerOpenRef.current = drawerOpen;
+	}, [drawerOpen]);
 	const [searchLoading, setSearchLoading] = useState(false);
 	const [searchBanner, setSearchBanner] = useState<{ query: string; count: number } | null>(null);
 	/** Same Redis name-search path as dashboard bottom panel (`useLocalNameSearch` → `/api/redis-search`). */
@@ -1326,29 +1611,44 @@ export default function GlobalGraphPage() {
 			return `rgb(${r},${g},${b})`;
 		};
 
-		// Nodes: never gray out non-selected disks (/graph does not dim on select).
-		// Selection = ring via hover-layer style + forceLabel; colors stay type-true.
-		// Inactive hubs stay slate-gray (still selectable / expandable).
+		// Node states:
+		// - selected (active click / multi-select): amber fill + amber ring
+		// - revealed (connections expanded at least once): type-shifted fill + teal/violet ring
+		// - unrevealed: default type colors, no ring
+		// Never overwrite typeBaseColor with selection tint (keeps deselect correct).
 		graph.forEachNode((node, attrs) => {
 			const inactive = attrs.inactive === true;
 			const nodeType = String(attrs.nodeType || 'unknown');
-			const baseColor = inactive ? INACTIVE_NODE_COLOR : String(attrs.baseColor || nodeDisplayColor(nodeType, false));
-			// Do not darken visited nodes — /graph keeps full color for every node on the canvas.
-			void visited;
+			const typeBase =
+				typeof attrs.typeBaseColor === 'string' && attrs.typeBaseColor ?
+					String(attrs.typeBaseColor)
+				:	nodeTypeBaseColor(nodeType, inactive);
 
 			const isSelected = selected.has(node) || node === focusId;
+			const isRevealed = visited.has(node) || attrs.revealed === true;
 			const isHoverCenter = node === hoverId;
-			const highlight = isSelected || isHoverCenter;
+			const highlight = isSelected || isHoverCenter || isRevealed;
+
+			const displayColor = nodeStateColor({
+				type: nodeType,
+				inactive,
+				selected: isSelected,
+				revealed: isRevealed && !isSelected,
+			});
 
 			graph.setNodeAttribute(node, 'type', nodeRenderType(nodeType));
-			graph.setNodeAttribute(node, 'color', baseColor);
-			graph.setNodeAttribute(node, 'baseColor', baseColor);
+			graph.setNodeAttribute(node, 'typeBaseColor', typeBase);
+			// baseColor = stable type color (never selection amber) for unlock/restore paths.
+			graph.setNodeAttribute(node, 'baseColor', typeBase);
+			graph.setNodeAttribute(node, 'color', displayColor);
 			graph.setNodeAttribute(node, 'highlighted', isSelected);
+			graph.setNodeAttribute(node, 'revealed', isRevealed);
 			graph.setNodeAttribute(
 				node,
 				'zIndex',
 				isSelected ? 5
 				: isHoverCenter ? 4
+				: isRevealed ? 3
 				: 2,
 			);
 			graph.setNodeAttribute(node, 'forceLabel', highlight || graph.degree(node) > 8);
@@ -1411,7 +1711,6 @@ export default function GlobalGraphPage() {
 			graph.setEdgeAttribute(edge, 'baseSize', baseSize);
 		});
 
-		// darkenHex kept unused intentionally (visited dimming removed).
 		void darkenHex;
 
 		sigma.refresh();
@@ -1427,13 +1726,18 @@ export default function GlobalGraphPage() {
 				return;
 			}
 			graph.setNodeAttribute(nodeId, 'pinned', false);
-			// Restore base geometry if highlight isn't about to repaint.
+			// Restore type/revealed color if highlight isn't about to repaint.
 			const attrs = graph.getNodeAttributes(nodeId);
-			const baseColor = String(attrs.baseColor || attrs.color || '#94a3b8');
+			const nodeType = String(attrs.nodeType || 'unknown');
+			const inactive = attrs.inactive === true;
+			const revealed = visitedIdsRef.current.has(nodeId) || attrs.revealed === true;
+			const color = nodeStateColor({ type: nodeType, inactive, selected: false, revealed });
 			if (focusedIdRef.current !== nodeId && hoverIdRef.current !== nodeId && !selectedIdsRef.current.has(nodeId)) {
-				graph.setNodeAttribute(nodeId, 'color', baseColor);
-				graph.setNodeAttribute(nodeId, 'zIndex', 2);
-				graph.setNodeAttribute(nodeId, 'forceLabel', false);
+				graph.setNodeAttribute(nodeId, 'color', color);
+				graph.setNodeAttribute(nodeId, 'zIndex', revealed ? 3 : 2);
+				graph.setNodeAttribute(nodeId, 'forceLabel', revealed || graph.degree(nodeId) > 8);
+				graph.setNodeAttribute(nodeId, 'highlighted', false);
+				graph.setNodeAttribute(nodeId, 'revealed', revealed);
 			}
 		} catch {
 			// ignore
@@ -1516,6 +1820,28 @@ export default function GlobalGraphPage() {
 			return next;
 		};
 
+		/** Half the open detail-drawer width (see `.node-detail-drawer { width: 410px }`),
+		 *  plus a small buffer. The drawer auto-opens on focus and permanently occupies
+		 *  the right edge of the canvas; newly expanded neighbor orbits land all around
+		 *  the pinned hub, so anything centered dead-center of the *full* canvas can end
+		 *  up rendered directly behind (and hidden by) that panel. */
+		const drawerShiftPx = () => (drawerOpenRef.current ? 235 : 0);
+
+		/** Same as framedPosOf, but treats the hub as sitting `shiftPx` to the right of
+		 * true viewport center — reserving that much room on-screen for the drawer. */
+		const framedPosOfShifted = (s: Sigma, id: string, shiftPx: number): { x: number; y: number } | null => {
+			const pos = readGraphPos(s, id);
+			if (!pos || !shiftPx) return framedPosOf(s, id);
+			try {
+				const vp = s.graphToViewport(pos);
+				const framed = s.viewportToFramedGraph({ x: vp.x + shiftPx, y: vp.y });
+				if (Number.isFinite(framed.x) && Number.isFinite(framed.y)) return { x: framed.x, y: framed.y };
+			} catch {
+				// fall through
+			}
+			return framedPosOf(s, id);
+		};
+
 		const centerOnPinned = (animate: boolean) => {
 			const s = sigmaRef.current;
 			if (disposed || !s || pinnedIdRef.current !== nodeId) return;
@@ -1524,7 +1850,7 @@ export default function GlobalGraphPage() {
 			} catch {
 				// ignore
 			}
-			const framed = framedPosOf(s, nodeId);
+			const framed = framedPosOfShifted(s, nodeId, drawerShiftPx());
 			if (!framed) return;
 			const cam = s.getCamera();
 			const state = cam.getState();
@@ -1541,11 +1867,24 @@ export default function GlobalGraphPage() {
 			suppressing = true;
 			if (animate) {
 				animating = true;
-				// Very slow, constant-speed pan so association to the new focus is obvious.
-				cam.animate(next, { duration: 14000, easing: 'linear' }, () => {
+				// Snappy pan (was a 14s linear glide — read as "nodes still drifting" and
+				// only visibly stopped when a zoom action canceled it). Freeze quickly instead.
+				cam.animate(next, { duration: 900, easing: 'quadraticOut' }, () => {
 					animating = false;
 					suppressing = false;
 				});
+				// Hard failsafe: guarantee the camera lands exactly on target and fully
+				// stops, even if the tween gets interrupted/cancelled elsewhere.
+				window.setTimeout(() => {
+					if (disposed || pinnedIdRef.current !== nodeId) return;
+					try {
+						cam.setState(next);
+					} catch {
+						// ignore
+					}
+					animating = false;
+					suppressing = false;
+				}, 1000);
 			} else {
 				cam.setState(next);
 				requestAnimationFrame(() => {
@@ -1567,12 +1906,15 @@ export default function GlobalGraphPage() {
 			if (!dims.width || !dims.height) return;
 
 			const vp = viewportOfPinned(s);
-			const framed = framedPosOf(s, nodeId);
+			const shiftPx = drawerShiftPx();
+			const framed = framedPosOfShifted(s, nodeId, shiftPx);
 			if (!framed) return;
 
 			const marginX = Math.max(48, dims.width * 0.1);
 			const marginY = Math.max(48, dims.height * 0.1);
-			const out = forceCenter || !vp || vp.x < marginX || vp.x > dims.width - marginX || vp.y < marginY || vp.y > dims.height - marginY;
+			// Treat the drawer-occupied strip as outside the usable viewport too.
+			const rightBound = dims.width - marginX - shiftPx;
+			const out = forceCenter || !vp || vp.x < marginX || vp.x > rightBound || vp.y < marginY || vp.y > dims.height - marginY;
 			if (!out) return;
 
 			const cam = s.getCamera();
@@ -1634,14 +1976,18 @@ export default function GlobalGraphPage() {
 			if (n.label) graph.setNodeAttribute(n.id, 'label', n.label);
 			graph.setNodeAttribute(n.id, 'type', nodeRenderType(n.type));
 			graph.setNodeAttribute(n.id, 'nodeType', n.type);
+			const revealed = visitedIdsRef.current.has(n.id) || graph.getNodeAttribute(n.id, 'revealed') === true;
+			const selected = selectedIdsRef.current.has(n.id) || focusedIdRef.current === n.id;
 			if (inactive) {
 				graph.setNodeAttribute(n.id, 'inactive', true);
-				graph.setNodeAttribute(n.id, 'color', finalColor);
-				graph.setNodeAttribute(n.id, 'baseColor', finalColor);
+				graph.setNodeAttribute(n.id, 'typeBaseColor', INACTIVE_NODE_COLOR);
+				graph.setNodeAttribute(n.id, 'baseColor', INACTIVE_NODE_COLOR);
+				graph.setNodeAttribute(n.id, 'color', nodeStateColor({ type: n.type, inactive: true, selected, revealed }));
 			} else if (graph.getNodeAttribute(n.id, 'inactive') !== true) {
 				graph.setNodeAttribute(n.id, 'inactive', false);
-				graph.setNodeAttribute(n.id, 'color', finalColor);
+				graph.setNodeAttribute(n.id, 'typeBaseColor', finalColor);
 				graph.setNodeAttribute(n.id, 'baseColor', finalColor);
+				graph.setNodeAttribute(n.id, 'color', nodeStateColor({ type: n.type, inactive: false, selected, revealed }));
 			}
 			if (typeof n.degree === 'number') graph.setNodeAttribute(n.id, 'degree', n.degree);
 			visibleIdsRef.current.add(n.id);
@@ -1658,6 +2004,7 @@ export default function GlobalGraphPage() {
 			type: nodeRenderType(n.type),
 			color: finalColor,
 			baseColor: finalColor,
+			typeBaseColor: finalColor,
 			nodeType: n.type,
 			degree: n.degree,
 			weight: n.weight ?? n.degree,
@@ -1671,6 +2018,7 @@ export default function GlobalGraphPage() {
 			forceLabel: false,
 			pinned: false,
 			highlighted: false,
+			revealed: false,
 		});
 		visibleIdsRef.current.add(n.id);
 		return true;
@@ -1895,11 +2243,8 @@ export default function GlobalGraphPage() {
 						const dims = sigma.getDimensions();
 						const w = Math.max(Number(dims.width) || 0, 800);
 						const h = Math.max(Number(dims.height) || 0, 600);
-						const pad = 0.82;
-						const spanX = Math.max(120, maxX - minX);
-						const spanY = Math.max(120, maxY - minY);
-						const ratio = Math.max(spanX / Math.max(w * pad, 1), spanY / Math.max(h * pad, 1), 0.15);
-						sigma.getCamera().setState({ x: cx, y: cy, ratio: Math.min(Math.max(ratio, 0.2), 80), angle: 0 });
+						const ratio = 1.25;
+						sigma.getCamera().setState({ x: cx, y: cy, ratio: ratio, angle: 0 });
 						window.setTimeout(() => {
 							try {
 								if (cancelled() || sigmaRef.current !== sigma) return;
@@ -1910,10 +2255,8 @@ export default function GlobalGraphPage() {
 								const vpTL = sigma.graphToViewport({ x: minX, y: minY });
 								const vpBR = sigma.graphToViewport({ x: maxX, y: maxY });
 								const framed = sigma.viewportToFramedGraph(sigma.graphToViewport({ x: cx, y: cy }));
-								const sx = Math.max(80, Math.abs(vpBR.x - vpTL.x));
-								const sy = Math.max(80, Math.abs(vpBR.y - vpTL.y));
-								const r2 = Math.max(sx / Math.max(w2 * pad, 1), sy / Math.max(h2 * pad, 1), 0.15);
-								sigma.getCamera().animate({ x: framed.x, y: framed.y, ratio: Math.min(Math.max(r2, 0.2), 80), angle: 0 }, { duration: 700, easing: 'quadraticInOut' });
+								const r2 = 1.25;
+								sigma.getCamera().animate({ x: framed.x, y: framed.y, ratio: r2, angle: 0 }, { duration: 700, easing: 'quadraticInOut' });
 								sigma.refresh();
 							} catch {
 								// ignore
@@ -2017,13 +2360,53 @@ export default function GlobalGraphPage() {
 				candidates.push(...ranked);
 				const seen = new Set<string>();
 				const placeCap = Math.min(candidates.length, neighborLimit);
+				const preferSingleRingForCap = starEgoSeed || (firmStarSeed && placeCap <= 18) || placeCap <= 18;
 				// Same private-orbit seating as /graph expand merge.
 				const { ringCount: sizedRings } = orbitRadiusForHub({
 					hubType: seed.type,
 					childCount: Math.max(1, placeCap),
-					preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 18) || placeCap <= 18,
+					preferSingleRing: preferSingleRingForCap,
 				});
 				const ringCount = sizedRings;
+				// Distribute nodes across rings proportional to each ring's radius (arc
+				// capacity) instead of an even split — otherwise the innermost ring (least
+				// circumference) gets crushed together right on top of the hub while outer
+				// rings have room to spare. Mirrors the same fix in runFluidLayout.
+				const placeRingRadii: number[] = [];
+				for (let r = 0; r < ringCount; r++) {
+					placeRingRadii.push(
+						orbitRadiusForHub({
+							hubType: seed.type,
+							childCount: Math.max(1, placeCap),
+							ringIndex: r,
+							ringCount,
+							preferSingleRing: preferSingleRingForCap,
+						}).radius,
+					);
+				}
+				const placeRadiusSum = placeRingRadii.reduce((s, r) => s + r, 0) || 1;
+				const placeRingSizes = placeRingRadii.map((r) => Math.max(1, Math.round((r / placeRadiusSum) * placeCap)));
+				let placeDrift = placeCap - placeRingSizes.reduce((s, n) => s + n, 0);
+				let placeAdjustIdx = ringCount - 1;
+				while (placeDrift !== 0 && ringCount > 0) {
+					if (placeDrift > 0) {
+						placeRingSizes[placeAdjustIdx] += 1;
+						placeDrift -= 1;
+					} else if (placeRingSizes[placeAdjustIdx] > 1) {
+						placeRingSizes[placeAdjustIdx] -= 1;
+						placeDrift += 1;
+					}
+					placeAdjustIdx = (placeAdjustIdx - 1 + ringCount) % ringCount;
+				}
+				// Cumulative offsets so we can map a flat slot index -> (ring, indexOnRing).
+				const placeRingStart: number[] = [];
+				{
+					let acc = 0;
+					for (let r = 0; r < ringCount; r++) {
+						placeRingStart.push(acc);
+						acc += placeRingSizes[r];
+					}
+				}
 				// Always circular 2D placement (no Y squash).
 				const yScale = 1;
 				let hubX = seed.x * LAYOUT_SPREAD;
@@ -2078,10 +2461,18 @@ export default function GlobalGraphPage() {
 					if (seen.size > neighborLimit) break;
 					const meta = nodeIndexRef.current.get(c.id);
 					if (!meta) continue;
-					const ring = slot % ringCount;
-					// Even angular slots per ring (not one global slot) so dense rings stay spaced.
-					const onRing = Math.max(1, Math.ceil(placeCap / ringCount));
-					const indexOnRing = Math.floor(slot / ringCount);
+					// Map the flat slot index into (ring, indexOnRing) using the proportional
+					// per-ring sizes computed above, so angular spacing matches each ring's
+					// actual arc capacity instead of an even flat split.
+					let ring = ringCount - 1;
+					for (let r = 0; r < ringCount; r++) {
+						if (slot < placeRingStart[r] + placeRingSizes[r]) {
+							ring = r;
+							break;
+						}
+					}
+					const onRing = Math.max(1, placeRingSizes[ring] || 1);
+					const indexOnRing = slot - placeRingStart[ring];
 					const angle = (indexOnRing / onRing) * Math.PI * 2 + ring * 0.21;
 					const { radius } = orbitRadiusForHub({
 						hubType: seed.type,
@@ -2091,7 +2482,7 @@ export default function GlobalGraphPage() {
 						preferSingleRing: starEgoSeed || (firmStarSeed && placeCap <= 22) || placeCap <= 22,
 					});
 					// Tiny jitter only — large jitter caused leaf piles on dense rings.
-					const jitter = ((hashString(`${nodeId}:${c.id}`) % 1000) / 999 - 0.5) * 12;
+					const jitter = ((hashString(`${nodeId}:${c.id}`) % 1000) / 999 - 0.5) * 1;
 					const dist = radius + jitter;
 					const pos = {
 						x: hubX + Math.cos(angle) * dist,
@@ -2133,7 +2524,8 @@ export default function GlobalGraphPage() {
 				}
 			}
 
-			// Automatically mark visited if all catalog neighbors are already visible
+			// Mark visited/revealed when all catalog neighbors are already visible,
+			// and stamp graph attrs so rings/fills update without a re-click.
 			for (const id of visibleIdsRef.current) {
 				const list = edgesByNodeRef.current.get(id) || [];
 				const hasUnrevealed = list.some((e) => {
@@ -2142,6 +2534,13 @@ export default function GlobalGraphPage() {
 				});
 				if (!hasUnrevealed) {
 					visitedIdsRef.current.add(id);
+					if (graph.hasNode(id)) {
+						try {
+							graph.setNodeAttribute(id, 'revealed', true);
+						} catch {
+							// ignore
+						}
+					}
 				}
 			}
 
@@ -2177,6 +2576,10 @@ export default function GlobalGraphPage() {
 	);
 
 	const clearCanvas = useCallback(() => {
+		if (globalLayoutAnimId !== null) {
+			globalLayoutAnimId.stop();
+			globalLayoutAnimId = null;
+		}
 		const graph = graphRef.current;
 		const sigma = sigmaRef.current;
 		if (!graph || !sigma) return;
@@ -2255,8 +2658,8 @@ export default function GlobalGraphPage() {
 					degree: 1,
 					weight: 1,
 					size: dynamicNodeSize(1, typeHint),
-					x: basex / LAYOUT_SPREAD + (Math.random() - 0.5) * 8,
-					y: basey / LAYOUT_SPREAD + (Math.random() - 0.5) * 8,
+					x: basex / LAYOUT_SPREAD + (Math.random() - 0.15) * 50,
+					y: basey / LAYOUT_SPREAD + (Math.random() - 0.15) * 30,
 					color: nodeDisplayColor(typeHint, false),
 					inactive: false,
 				});
@@ -2320,9 +2723,14 @@ export default function GlobalGraphPage() {
 			focusedIdRef.current = nodeId;
 			pinnedIdRef.current = nodeId;
 			selectedIdsRef.current.add(nodeId);
+			// Click = connections are being revealed for this hub.
 			visitedIdsRef.current.add(nodeId);
 			setSelectionCount(1);
-			if (graph.hasNode(nodeId)) graph.setNodeAttribute(nodeId, 'pinned', true);
+			if (graph.hasNode(nodeId)) {
+				graph.setNodeAttribute(nodeId, 'pinned', true);
+				graph.setNodeAttribute(nodeId, 'revealed', true);
+				graph.setNodeAttribute(nodeId, 'highlighted', true);
+			}
 			setFocus({
 				id: nodeId,
 				label: String(attrs.label || nodeId),
@@ -2396,8 +2804,8 @@ export default function GlobalGraphPage() {
 								degree: Number(n.degree) || 1,
 								weight: Number(n.weight) || 1,
 								size: dynamicNodeSize(Number(n.degree) || 1, type),
-								x: basex / LAYOUT_SPREAD + (Math.random() - 0.5) * 10,
-								y: basey / LAYOUT_SPREAD + (Math.random() - 0.5) * 10,
+								x: basex / LAYOUT_SPREAD + (Math.random() - 0.5) * 100,
+								y: basey / LAYOUT_SPREAD + (Math.random() - 0.5) * 100,
 								color: nodeDisplayColor(type, inactive),
 								inactive,
 							});
@@ -2413,9 +2821,21 @@ export default function GlobalGraphPage() {
 
 						// Mark seed itself inactive when expand reports it.
 						if (crd === nodeId && g?.hasNode(nodeId) && inactive) {
+							const selected = selectedIdsRef.current.has(nodeId) || focusedIdRef.current === nodeId;
+							const revealed = visitedIdsRef.current.has(nodeId);
 							g.setNodeAttribute(nodeId, 'inactive', true);
+							g.setNodeAttribute(nodeId, 'typeBaseColor', INACTIVE_NODE_COLOR);
 							g.setNodeAttribute(nodeId, 'baseColor', INACTIVE_NODE_COLOR);
-							g.setNodeAttribute(nodeId, 'color', INACTIVE_NODE_COLOR);
+							g.setNodeAttribute(
+								nodeId,
+								'color',
+								nodeStateColor({
+									type: String(g.getNodeAttribute(nodeId, 'nodeType') || 'unknown'),
+									inactive: true,
+									selected,
+									revealed,
+								}),
+							);
 							if (n.label) g.setNodeAttribute(nodeId, 'label', n.label);
 							changed = true;
 						}
@@ -2439,8 +2859,8 @@ export default function GlobalGraphPage() {
 					addNodeToCanvasRef.current(nodeId, {
 						withNeighbors: expandNeighborMode,
 						neighborLimit:
-							expandNeighborMode === 'firms' ? 200
-							: expandNeighborMode === 'all' ? 280
+							expandNeighborMode === 'firms' ? 500
+							: expandNeighborMode === 'all' ? 500
 							: 64,
 					});
 					if (changed || expandNeighborMode !== 'none') {
@@ -2734,8 +3154,9 @@ export default function GlobalGraphPage() {
 						drawLabelAbove(context, data as any, settings as any, { hover: false, recordHit: true });
 					},
 					defaultDrawNodeHover: (context: CanvasRenderingContext2D, data: any, settings: any) => {
-						// /graph selection: outer halo + cyan ring (does not change fill).
-						const size = Number((data as any).size) || 11;
+						// Sigma already passes scaleSize()'d size (viewport px). Keep rings
+						// proportional so they don't dwarf tiny zoomed-out disks.
+						const size = Math.max(2.5, Number((data as any).size) || 11);
 						const x = Number((data as any).x);
 						const y = Number((data as any).y);
 						// Never fall back to (0,0) — that paints a stuck ring in the canvas top-left.
@@ -2744,27 +3165,45 @@ export default function GlobalGraphPage() {
 							return;
 						}
 						const selected = Boolean((data as any).highlighted);
+						const revealed = Boolean((data as any).revealed);
+						const nodeType = String((data as any).nodeType || '');
+						const isFirm = nodeType === 'firm' || (data as any).type === 'hexagon';
 
 						if (selected) {
+							const outer = Math.max(3, size * 0.42);
 							context.beginPath();
-							context.arc(x, y, size + 10, 0, Math.PI * 2);
+							context.arc(x, y, size + outer, 0, Math.PI * 2);
 							context.closePath();
-							context.fillStyle = 'rgba(34, 211, 238, 0.16)';
+							context.fillStyle = SELECTED_RING_FILL;
 							context.fill();
 
 							context.beginPath();
-							context.arc(x, y, size + 5, 0, Math.PI * 2);
+							context.arc(x, y, size + outer * 0.55, 0, Math.PI * 2);
 							context.closePath();
-							context.lineWidth = 2.75;
-							context.strokeStyle = '#22d3ee';
+							context.lineWidth = Math.max(1.5, Math.min(2.75, size * 0.22));
+							context.strokeStyle = SELECTED_RING_COLOR;
+							context.stroke();
+						} else if (revealed) {
+							const outer = Math.max(2.5, size * 0.38);
+							context.beginPath();
+							context.arc(x, y, size + outer, 0, Math.PI * 2);
+							context.closePath();
+							context.fillStyle = isFirm ? REVEALED_RING_FILL_FIRM : REVEALED_RING_FILL_INDIVIDUAL;
+							context.fill();
+
+							context.beginPath();
+							context.arc(x, y, size + outer * 0.55, 0, Math.PI * 2);
+							context.closePath();
+							context.lineWidth = Math.max(1.25, Math.min(2.4, size * 0.2));
+							context.strokeStyle = isFirm ? REVEALED_RING_FIRM : REVEALED_RING_INDIVIDUAL;
 							context.stroke();
 						} else {
 							// Hover-only: thin ring
 							context.beginPath();
-							context.arc(x, y, size + 3.5, 0, Math.PI * 2);
+							context.arc(x, y, size + Math.max(2, size * 0.28), 0, Math.PI * 2);
 							context.closePath();
-							context.lineWidth = 2;
-							context.strokeStyle = 'rgba(34, 211, 238, 0.85)';
+							context.lineWidth = Math.max(1.25, Math.min(2, size * 0.18));
+							context.strokeStyle = 'rgba(245, 158, 11, 0.85)';
 							context.stroke();
 						}
 
@@ -2778,8 +3217,8 @@ export default function GlobalGraphPage() {
 					nodeProgramClasses,
 					edgeProgramClasses,
 					defaultNodeColor: INDIVIDUAL_NODE_COLOR,
-					minCameraRatio: 0.004,
-					maxCameraRatio: 40,
+					minCameraRatio: 0.025,
+					maxCameraRatio: 8,
 					zIndex: true,
 				});
 				// Re-assert after construct — some Sigma paths re-merge defaults once.
@@ -2853,7 +3292,7 @@ export default function GlobalGraphPage() {
 				};
 				sigma.on('beforeRender', clearLabelHits);
 
-				// Selection rings when node is not under the hover layer (/graph halo + cyan ring).
+				// Selected + revealed rings when node is not under the hover layer.
 				sigma.on('afterRender', () => {
 					const host = containerRef.current;
 					if (!host) return;
@@ -2863,24 +3302,28 @@ export default function GlobalGraphPage() {
 					if (!ctx) return;
 
 					const selected = selectedIdsRef.current;
+					const visited = visitedIdsRef.current;
 					const focusId = focusedIdRef.current;
 					const hoverId = hoverIdRef.current;
 
 					const toDraw = new Set<string>();
 					for (const id of selected) toDraw.add(id);
 					if (focusId) toDraw.add(focusId);
-					// Hover path already draws the full selection treatment in defaultDrawNodeHover.
+					for (const id of visited) toDraw.add(id);
+					// Hover path already draws ring treatment in defaultDrawNodeHover.
 					if (hoverId) toDraw.delete(hoverId);
 
-					for (const id of toDraw) {
-						if (!graph.hasNode(id)) continue;
-
-						// Prefer live viewport projection so rings track the node during
-						// camera pan/layout. Display-data alone can be 0/undefined briefly
-						// and used to paint a stuck circle at the canvas origin (top-left).
+					/**
+					 * Viewport position + on-screen radius matching WebGL nodes.
+					 * getNodeDisplayData().size is raw graph size; Sigma's canvas hover/labels
+					 * apply scaleSize() — without that, rings stay fixed while disks shrink
+					 * when zoomed out (and grow when zoomed in).
+					 */
+					const projectNode = (id: string): { x: number; y: number; size: number } | null => {
+						if (!graph.hasNode(id)) return null;
 						let x = NaN;
 						let y = NaN;
-						let size = 11;
+						let rawSize = 11;
 						try {
 							const g = sigma.getGraph();
 							const gx = Number(g.getNodeAttribute(id, 'x'));
@@ -2893,11 +3336,11 @@ export default function GlobalGraphPage() {
 								}
 							}
 						} catch {
-							// fall through to display data
+							// fall through
 						}
 						const display = sigma.getNodeDisplayData(id);
 						if (display) {
-							size = Number(display.size) || size;
+							rawSize = Number(display.size) || rawSize;
 							if (!Number.isFinite(x) || !Number.isFinite(y)) {
 								const dx = Number(display.x);
 								const dy = Number(display.y);
@@ -2907,31 +3350,84 @@ export default function GlobalGraphPage() {
 								}
 							}
 						}
-						if (!Number.isFinite(x) || !Number.isFinite(y)) continue;
-						// Skip degenerate off-screen / origin ghost rings.
+						if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
 						if (Math.abs(x) < 0.5 && Math.abs(y) < 0.5) {
-							// Only allow true origin if the node graph-pos really projects there.
 							try {
 								const g = sigma.getGraph();
 								const gx = Number(g.getNodeAttribute(id, 'x'));
 								const gy = Number(g.getNodeAttribute(id, 'y'));
-								if (!(Number.isFinite(gx) && Number.isFinite(gy) && Math.hypot(gx, gy) < 1)) continue;
+								if (!(Number.isFinite(gx) && Number.isFinite(gy) && Math.hypot(gx, gy) < 1)) return null;
 							} catch {
-								continue;
+								return null;
 							}
 						}
+						// Same scaleSize Sigma uses for labels/hover (tracks camera.ratio).
+						let size = rawSize;
+						try {
+							if (typeof (sigma as any).scaleSize === 'function') {
+								size = Number((sigma as any).scaleSize(rawSize));
+							} else {
+								const ratio = Number(sigma.getCamera().ratio) || 1;
+								const zoomFn = sigma.getSetting('zoomToSizeRatioFunction') as ((r: number) => number) | undefined;
+								const z = typeof zoomFn === 'function' ? zoomFn(ratio) : Math.sqrt(ratio);
+								size = rawSize / Math.max(z, 1e-6);
+							}
+						} catch {
+							// keep rawSize fallback
+						}
+						// Floor so tiny zoomed-out disks still get a visible ring halo.
+						size = Math.max(2.5, size);
+						return { x, y, size };
+					};
 
+					/** Ring pad/stroke in screen px relative to on-screen disk radius. */
+					const ringPad = (r: number, kind: 'selected' | 'revealed') => {
+						// Keep a tight halo (~30–45% beyond disk) at every zoom.
+						const outer = kind === 'selected' ? Math.max(3, r * 0.42) : Math.max(2.5, r * 0.38);
+						const stroke = kind === 'selected' ? Math.max(1.5, Math.min(2.75, r * 0.22)) : Math.max(1.25, Math.min(2.4, r * 0.2));
+						const fillR = r + outer;
+						const strokeR = r + outer * 0.55;
+						return { fillR, strokeR, stroke };
+					};
+
+					// Revealed first (under), selected on top.
+					for (const id of toDraw) {
+						const isSelected = selected.has(id) || id === focusId;
+						const isRevealed = visited.has(id) || (graph.hasNode(id) && graph.getNodeAttribute(id, 'revealed') === true);
+						if (isSelected || !isRevealed) continue;
+						const p = projectNode(id);
+						if (!p) continue;
+						const nt = String(graph.getNodeAttribute(id, 'nodeType') || '');
+						const isFirm = nt === 'firm';
+						const { fillR, strokeR, stroke } = ringPad(p.size, 'revealed');
 						ctx.beginPath();
-						ctx.arc(x, y, size + 10, 0, Math.PI * 2);
+						ctx.arc(p.x, p.y, fillR, 0, Math.PI * 2);
 						ctx.closePath();
-						ctx.fillStyle = 'rgba(34, 211, 238, 0.16)';
+						ctx.fillStyle = isFirm ? REVEALED_RING_FILL_FIRM : REVEALED_RING_FILL_INDIVIDUAL;
 						ctx.fill();
-
 						ctx.beginPath();
-						ctx.arc(x, y, size + 5, 0, Math.PI * 2);
+						ctx.arc(p.x, p.y, strokeR, 0, Math.PI * 2);
 						ctx.closePath();
-						ctx.lineWidth = 2.75;
-						ctx.strokeStyle = '#22d3ee';
+						ctx.lineWidth = stroke;
+						ctx.strokeStyle = isFirm ? REVEALED_RING_FIRM : REVEALED_RING_INDIVIDUAL;
+						ctx.stroke();
+					}
+					for (const id of toDraw) {
+						const isSelected = selected.has(id) || id === focusId;
+						if (!isSelected) continue;
+						const p = projectNode(id);
+						if (!p) continue;
+						const { fillR, strokeR, stroke } = ringPad(p.size, 'selected');
+						ctx.beginPath();
+						ctx.arc(p.x, p.y, fillR, 0, Math.PI * 2);
+						ctx.closePath();
+						ctx.fillStyle = SELECTED_RING_FILL;
+						ctx.fill();
+						ctx.beginPath();
+						ctx.arc(p.x, p.y, strokeR, 0, Math.PI * 2);
+						ctx.closePath();
+						ctx.lineWidth = stroke;
+						ctx.strokeStyle = SELECTED_RING_COLOR;
 						ctx.stroke();
 					}
 				});
@@ -3432,7 +3928,6 @@ export default function GlobalGraphPage() {
 				lastRouteKeyRef.current = key;
 			}
 			setErrorMessage(null);
-			setQuery(meta.label || meta.id);
 			routeBootstrapDoneRef.current = true;
 		};
 
@@ -3755,15 +4250,6 @@ export default function GlobalGraphPage() {
 		[runFocusSearch],
 	);
 
-	const dashboardHref = useMemo(() => {
-		if (focus && /^\d+$/.test(focus.id)) {
-			const t = focus.type === 'firm' ? 'firm' : 'individual';
-			return `/${t}/${focus.id}`;
-		}
-		if (routeParams) return `/${routeParams.type}/${routeParams.crd}`;
-		return '/';
-	}, [focus, routeParams]);
-
 	const panelActiveKey = panelSnapshot?.resolvedKey || panelSnapshot?.key || '';
 	const panelDetailJson = panelSnapshot?.detailJson ?? null;
 	const panelLoading = Boolean(panelSnapshot?.loading);
@@ -3824,12 +4310,9 @@ export default function GlobalGraphPage() {
 			<div
 				className={`node-graph-page fullscreen-mode theme-${theme} global-graph-webgl`}
 				data-theme={theme}>
+				{/* Page toolbar under the shared app top-nav (brand + primary links live in _app). */}
 				<header className='fg-header'>
 					<div className='fg-header-bar'>
-						<div className='fg-header-brand'>
-							<span className='fg-logo'>FINRA</span>
-						</div>
-
 						<div className='fg-header-controls'>
 							<form
 								className='fg-search fg-search--header'
@@ -3869,12 +4352,6 @@ export default function GlobalGraphPage() {
 						</div>
 
 						<div className='fg-header-right-controls'>
-							<Link
-								href={dashboardHref}
-								className='fg-btn'
-								title={dashboardHref === '/' ? 'Open dashboard' : `Open ${dashboardHref.replace(/^\//, '')} on dashboard`}>
-								Dashboard
-							</Link>
 							{(focus || panelSnapshot) && (
 								<button
 									type='button'
@@ -3943,65 +4420,81 @@ export default function GlobalGraphPage() {
 								☰
 							</button>
 						:	<>
-								<button
-									type='button'
-									className='fg-toolbar-minimize-btn'
-									onClick={() => setToolbarMinimized(true)}
-									aria-label='Minimize toolbar'>
-									◀
-								</button>
-								<div className='fg-toolbar fg-toolbar-row'>
+								<div className='fg-toolbar-controls'>
 									<button
 										type='button'
-										className='fg-toolbar-btn'
-										onClick={() => {
-											// Refresh catalog positions stay; re-focus current if any.
-											if (focus) focusNode(focus.id, { animate: true, addIfMissing: true });
-											else handleCenter();
-										}}>
-										Refresh ⟳
+										className='fg-toolbar-minimize-btn'
+										onClick={() => setToolbarMinimized(true)}
+										aria-label='Minimize toolbar'>
+										◀
 									</button>
-									<button
-										type='button'
-										className='fg-toolbar-btn'
-										onClick={runOpenEgo}
-										disabled={!focus && !query.trim()}>
-										Open ego
-									</button>
-									<button
-										type='button'
-										className='fg-toolbar-btn danger'
-										onClick={handleResetSession}>
-										Reset Session
-									</button>
-									<button
-										type='button'
-										className='fg-toolbar-btn'
-										onClick={clearCanvas}
-										disabled={visibleCount === 0}>
-										Clear map
-									</button>
-									<button
-										type='button'
-										className='fg-toolbar-btn'
-										onClick={clearFocus}
-										disabled={!focus && selectionCount === 0}
-										title={selectionCount > 1 ? `Clear ${selectionCount} highlighted nodes` : 'Clear highlight'}>
-										Clear Highlight{selectionCount > 1 ? ` (${selectionCount})` : ''}
-									</button>
-									<button
-										type='button'
-										className='fg-toolbar-btn fg-center-btn'
-										onClick={handleCenter}>
-										Center ✦
-									</button>
-									<button
-										type='button'
-										className='fg-theme-toggle'
-										onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
-										aria-label='Toggle theme'>
-										{theme === 'dark' ? '☀️' : '🌙'}
-									</button>
+									<div className='fg-toolbar fg-toolbar-row'>
+										<button
+											type='button'
+											className='fg-toolbar-btn'
+											onClick={() => {
+												// Refresh catalog positions stay; re-focus current if any.
+												if (focus) focusNode(focus.id, { animate: true, addIfMissing: true });
+												else handleCenter();
+											}}>
+											Refresh ⟳
+										</button>
+										<button
+											type='button'
+											className='fg-toolbar-btn'
+											onClick={runOpenEgo}
+											disabled={!focus && !query.trim()}>
+											Open ego
+										</button>
+										<button
+											type='button'
+											className='fg-toolbar-btn danger'
+											onClick={handleResetSession}>
+											Reset Session
+										</button>
+										<button
+											type='button'
+											className='fg-toolbar-btn'
+											onClick={clearCanvas}
+											disabled={visibleCount === 0}>
+											Clear map
+										</button>
+										<button
+											type='button'
+											className='fg-toolbar-btn'
+											onClick={clearFocus}
+											disabled={!focus && selectionCount === 0}
+											title={selectionCount > 1 ? `Clear ${selectionCount} highlighted nodes` : 'Clear highlight'}>
+											Clear Highlight{selectionCount > 1 ? ` (${selectionCount})` : ''}
+										</button>
+										<button
+											type='button'
+											className='fg-toolbar-btn fg-center-btn'
+											onClick={handleCenter}>
+											Center ✦
+										</button>
+										<button
+											type='button'
+											className='fg-theme-toggle'
+											onClick={() => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))}
+											aria-label='Toggle theme'>
+											{theme === 'dark' ? '☀️' : '🌙'}
+										</button>
+									</div>
+								</div>
+								<div className='fg-state-legend' aria-label='Node state legend'>
+									<span className='fg-state-legend-item'>
+										<span className='fg-state-dot selected' />
+										Selected
+									</span>
+									<span className='fg-state-legend-item'>
+										<span className='fg-state-dot revealed-firm' />
+										Firm opened
+									</span>
+									<span className='fg-state-legend-item'>
+										<span className='fg-state-dot revealed-person' />
+										Person opened
+									</span>
 								</div>
 							</>
 						}
@@ -4090,28 +4583,24 @@ export default function GlobalGraphPage() {
 					padding: 0;
 					overflow: hidden;
 				}
-				/* Hide app top-nav while global map is fullscreen (same as node graph). */
-				.app-shell:has(.global-graph-webgl) > .top-nav {
-					display: none;
-				}
+				/* Fill the app-page under the shared top-nav (do not cover the shell). */
 				.node-graph-page.fullscreen-mode {
 					display: flex;
 					flex-direction: column;
-					width: 100vw;
-					height: 100vh;
+					width: 100%;
+					height: 100%;
 					background: #040810;
 					color: #ffffff;
 					font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
-					position: absolute;
-					top: 0;
-					left: 0;
-					z-index: 9999;
+					position: relative;
+					overflow: hidden;
 				}
 				.node-graph-page.theme-light {
 					background: #f3f4f6;
 					color: #111827;
 				}
 
+				/* Page toolbar — same midnight-red chrome as app .top-nav */
 				.fg-header {
 					position: relative;
 					display: flex;
@@ -4119,15 +4608,13 @@ export default function GlobalGraphPage() {
 					flex-shrink: 0;
 					padding: 0;
 					width: 100%;
-					background: #0b1220;
-					border-bottom: 1px solid rgba(148, 163, 184, 0.14);
-					box-shadow: 0 2px 8px rgba(15, 23, 42, 0.35);
+					background: rgba(6, 0, 4, 0.98);
+					border-bottom: 1px solid rgba(120, 20, 45, 0.28);
 					z-index: 20;
 				}
 				.theme-light .fg-header {
 					background: #ffffff;
 					border-bottom-color: rgba(15, 23, 42, 0.1);
-					box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
 				}
 				.fg-header-bar {
 					display: flex;
@@ -4528,7 +5015,10 @@ export default function GlobalGraphPage() {
 					left: 16px;
 					bottom: 16px;
 					display: flex;
-					align-items: center;
+					flex-direction: column;
+					align-items: stretch;
+					gap: 6px;
+					padding: 6px 8px 8px;
 				}
 				.theme-light .fg-toolbar-dock {
 					background: #ffffff;
@@ -4539,6 +5029,50 @@ export default function GlobalGraphPage() {
 					background: transparent;
 					border: none;
 					box-shadow: none;
+					padding: 0;
+				}
+				.fg-toolbar-controls {
+					display: flex;
+					align-items: center;
+					gap: 0;
+				}
+				.fg-state-legend {
+					display: flex;
+					flex-wrap: wrap;
+					gap: 10px 14px;
+					padding: 2px 6px 0;
+					font-size: 0.68rem;
+					font-weight: 600;
+					letter-spacing: 0.02em;
+					color: #94a3b8;
+					user-select: none;
+				}
+				.theme-light .fg-state-legend {
+					color: #64748b;
+				}
+				.fg-state-legend-item {
+					display: inline-flex;
+					align-items: center;
+					gap: 5px;
+				}
+				.fg-state-dot {
+					width: 9px;
+					height: 9px;
+					border-radius: 50%;
+					box-sizing: border-box;
+					flex-shrink: 0;
+				}
+				.fg-state-dot.selected {
+					background: #f59e0b;
+					box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.35);
+				}
+				.fg-state-dot.revealed-firm {
+					background: #164e63;
+					box-shadow: 0 0 0 2px #2dd4bf;
+				}
+				.fg-state-dot.revealed-person {
+					background: #38bdf8;
+					box-shadow: 0 0 0 2px #c084fc;
 				}
 				.node-detail-drawer {
 					width: 410px;

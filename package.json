@@ -4,8 +4,8 @@
 	"main": "src/server.mjs",
 	"scripts": {
 		"start": "node src/server.mjs",
-		"dev": "pnpm run kill-ports && next dev -p 3001",
-		"kill-ports": "lsof -iTCP:3000 -sTCP:LISTEN -t | xargs -r kill -9 || true && lsof -iTCP:3001 -sTCP:LISTEN -t | xargs -r kill -9 || true",
+		"dev": "bash /home/lenny/Dev/db/redis/start-redis.sh && pnpm run kill-ports && next dev -p 3001",
+		"kill-ports": "fuser -k 3000/tcp 3001/tcp 2>/dev/null || true; sleep 0.2",
 		"build": "next build",
 		"start:web": "next start",
 		"type-check": "tsc --noEmit",

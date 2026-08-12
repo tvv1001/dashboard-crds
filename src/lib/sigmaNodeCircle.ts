@@ -1,5 +1,6 @@
 /**
- * Sigma 3 node program: solid circle with a soft outer glow matching /graph people nodes.
+ * Sigma 3 node program: solid circle with a bright blue outline + soft outer glow,
+ * mirroring the firm hexagon's cyan rim/glow treatment (see sigmaNodeHexagon.ts).
  *
  * Sizing follows Sigma's NodeCircleProgram:
  *   size = a_size * u_correctionRatio / u_sizeRatio * 4.0
@@ -61,8 +62,9 @@ varying float v_radius;
 uniform float u_correctionRatio;
 
 const vec4 transparent = vec4(0.0, 0.0, 0.0, 0.0);
-// /graph .graph-node.individual fill/stroke #0ea5e9
-const vec3 BLUE_GLOW = vec3(0.05, 0.65, 0.91);
+// Bright blue outline + glow (analogous to the firm hexagon's cyan rim/glow).
+const vec3 BRIGHT_BLUE = vec3(0.15, 0.39, 1.0);
+const vec3 BRIGHT_BLUE_GLOW = vec3(0.35, 0.55, 1.0);
 
 void main(void) {
   vec2 p = v_diffVector / max(v_radius, 1e-5);
@@ -84,12 +86,14 @@ void main(void) {
     float t = 0.0;
     if (dist > 0.0) t = dist / border;
 
-    // Solid body + soft outer glow
+    // Solid body + bright blue rim (outline) + soft outer glow — same structure as
+    // the firm hexagon program, just recolored bright blue for people nodes.
     vec3 fill = v_color.rgb;
-    float glow = smoothstep(0.70, 1.08, inside) * (1.0 - t);
-    
-    vec3 rgb = fill;
-    rgb = mix(rgb, BLUE_GLOW, glow * 0.4);
+    float rim = smoothstep(0.78, 0.90, inside) * (1.0 - smoothstep(0.985, 1.02, inside));
+    float glow = smoothstep(0.90, 1.08, inside) * (1.0 - t);
+
+    vec3 rgb = mix(fill, BRIGHT_BLUE, clamp(rim * 1.15, 0.0, 1.0));
+    rgb = mix(rgb, BRIGHT_BLUE_GLOW, glow * 0.4);
 
     gl_FragColor = mix(vec4(rgb, min(1.0, v_color.a)), transparent, t);
   }

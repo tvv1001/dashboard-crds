@@ -1,5 +1,4 @@
 import Head from 'next/head';
-import Link from 'next/link';
 import { useRouter } from 'next/router';
 import { useMemo, useState, useEffect, useRef, useCallback } from 'react';
 import * as d3 from 'd3';
@@ -384,7 +383,7 @@ function graphOrbitRadiusForHub(opts: { hubIsFirm: boolean; childCount: number; 
 	const base = Math.max(minClear, fromArc, opts.hubIsFirm ? 360 : 440);
 	const ring = Math.max(0, opts.ringIndex ?? 0);
 	const ringStep = Math.max(childSize * 3 + 48, 160 + Math.min(100, Math.sqrt(childCount) * 11));
-	return { radius: (base + ring * ringStep) * 5, ringCount };
+	return { radius: base + ring * ringStep, ringCount };
 }
 
 function entityTypeFromLoadKey(loadKey?: string): GraphEntityType | undefined {
@@ -529,6 +528,9 @@ function buildGraphData(
 
 	return { nodes, links };
 }
+
+const DEFAULT_SCALE = 0.8;
+const DEFAULT_TRANSFORM = d3.zoomIdentity.translate(600 * (1 - DEFAULT_SCALE), 400 * (1 - DEFAULT_SCALE)).scale(DEFAULT_SCALE);
 
 export default function NodeGraphPage() {
 	const router = useRouter();
@@ -1338,7 +1340,7 @@ export default function NodeGraphPage() {
 
 	const svgRef = useRef<SVGSVGElement>(null);
 	const zoomBehaviorRef = useRef<d3.ZoomBehavior<SVGSVGElement, unknown> | null>(null);
-	const [transform, setTransform] = useState<d3.ZoomTransform>(d3.zoomIdentity);
+	const [transform, setTransform] = useState<d3.ZoomTransform>(DEFAULT_TRANSFORM);
 	const [graphPositions, setGraphPositions] = useState<Record<string, { x: number; y: number }>>({});
 
 	// Latest node positions, kept in sync so the force-simulation effect
@@ -1494,8 +1496,8 @@ export default function NodeGraphPage() {
 	);
 
 	// Graph dimensions
-	const width = 1200;
-	const height = 800;
+	const width = 10000;
+	const height = 8000;
 
 	// D3 Zoom Setup — pan/zoom only via wheel + background drag.
 	// Node clicks must not start a zoom gesture or change transform.
@@ -1503,7 +1505,7 @@ export default function NodeGraphPage() {
 		if (!svgRef.current) return;
 		const zoom = d3
 			.zoom<SVGSVGElement, unknown>()
-			.scaleExtent([0.1, 4])
+			.scaleExtent([0.1, 40])
 			.filter((event) => {
 				// Never zoom/pan from interactions on nodes or labels.
 				const target = event.target as Element | null;
@@ -1523,6 +1525,8 @@ export default function NodeGraphPage() {
 		zoomBehaviorRef.current = zoom;
 		const selection = d3.select(svgRef.current);
 		selection.call(zoom);
+		// Initialize the zoom behavior with our default transform so the first pan/zoom doesn't snap to 1.0
+		selection.call(zoom.transform, DEFAULT_TRANSFORM);
 		// Double-click zoom steals node double-clicks and changes scale on select-ish gestures.
 		selection.on('dblclick.zoom', null);
 		return () => {
@@ -1533,9 +1537,9 @@ export default function NodeGraphPage() {
 
 	const handleCenter = useCallback(() => {
 		if (svgRef.current && zoomBehaviorRef.current) {
-			d3.select(svgRef.current).transition().duration(4000).ease(d3.easeLinear).call(zoomBehaviorRef.current.transform, d3.zoomIdentity);
+			d3.select(svgRef.current).transition().duration(4000).ease(d3.easeLinear).call(zoomBehaviorRef.current.transform, DEFAULT_TRANSFORM);
 		} else {
-			setTransform(d3.zoomIdentity);
+			setTransform(DEFAULT_TRANSFORM);
 		}
 	}, []);
 
@@ -1685,22 +1689,20 @@ export default function NodeGraphPage() {
 			dense ? 0.0008
 			: mid ? 0.0014
 			: 0.0035;
-		const baseCharge = (
-			dense ? -2200
+		const baseCharge =
+			(dense ? -2200
 			: mid ? -1750
-			: -1200
-		) * 5;
+			: -1200) * 5;
 		const linkStrengthBase =
 			dense ? 0.16
 			: mid ? 0.22
 			: 0.32;
-		const linkDistBase = (
-			nCount > 1000 ? 560
+		const linkDistBase =
+			(nCount > 1000 ? 560
 			: nCount > 300 ? 480
 			: nCount > 150 ? 420
 			: nCount > 80 ? 460
-			: 560
-		) * 5;
+			: 560) * 5;
 		const collidePad =
 			nCount > 1000 ? 36
 			: nCount > 600 ? 44
@@ -1931,7 +1933,7 @@ export default function NodeGraphPage() {
 
 						// Firm↔firm edges: stretch far so clouds don't fuse.
 						if (sFirm && tFirm) {
-							return (linkDistBase * 1.9 + scatter * 2.1 + Math.sqrt(Math.max(sDeg, 1)) * 36 + Math.sqrt(Math.max(tDeg, 1)) * 36 + (former ? 40 : 0)) * 2;
+							return linkDistBase * 1.9 + scatter * 2.1 + Math.sqrt(Math.max(sDeg, 1)) * 36 + Math.sqrt(Math.max(tDeg, 1)) * 36 + (former ? 40 : 0);
 						}
 
 						// Stagger leaf spokes off hubs; keep hub–hub edges longer but uniform.
@@ -1940,11 +1942,10 @@ export default function NodeGraphPage() {
 						const base = stagger > 0 ? stagger : linkDistBase * degScale + scatter * 1.7;
 
 						return (
-							(base +
-								(controls ? 50
-								: former ? 34
-								: 0)) *
-							2
+							base +
+							(controls ? 50
+							: former ? 34
+							: 0)
 						);
 					})
 					// Softer springs on high-degree hubs so stagger distances can stick.
@@ -2223,27 +2224,6 @@ export default function NodeGraphPage() {
 		}
 	}, [panelDetailJson, focusedNode, roleRows, panelSnapshot, activeSnapshot, panelActiveKey]);
 
-	// Dashboard deep-link for the currently focused node (falls back to hub / home).
-	const dashboardHref = useMemo(() => {
-		const fromCanonical = (canonical: string | null | undefined) => {
-			if (!canonical) return null;
-			const [type, crd] = canonical.split(':');
-			if ((type === 'individual' || type === 'firm') && crd && /^\d+$/.test(crd)) {
-				return `/${type}/${crd}`;
-			}
-			return null;
-		};
-		const focusedHref = fromCanonical(focusedNode ? canonicalIdForNode(focusedNode) : null);
-		if (focusedHref) return focusedHref;
-		if (parsedKeyInfo?.crd && (entityType === 'individual' || entityType === 'firm')) {
-			return `/${entityType}/${parsedKeyInfo.crd}`;
-		}
-		if (routeParams?.type && routeParams?.crd) {
-			return `/${routeParams.type}/${routeParams.crd}`;
-		}
-		return '/';
-	}, [focusedNode, canonicalIdForNode, parsedKeyInfo?.crd, entityType, routeParams]);
-
 	return (
 		<>
 			<Head>
@@ -2253,12 +2233,9 @@ export default function NodeGraphPage() {
 			<div
 				className={`node-graph-page fullscreen-mode theme-${theme}`}
 				data-theme={theme}>
+				{/* Page toolbar under the shared app top-nav (brand + primary links live in _app). */}
 				<header className='fg-header'>
 					<div className='fg-header-bar'>
-						<div className='fg-header-brand'>
-							<span className='fg-logo'>FINRA</span>
-						</div>
-
 						{/* Left controls: compact search + send (reference layout) */}
 						<div className='fg-header-controls'>
 							<form
@@ -2297,14 +2274,8 @@ export default function NodeGraphPage() {
 							:	null}
 						</div>
 
-						{/* Right controls: Dashboard + panel toggle */}
+						{/* Right controls: details panel toggle */}
 						<div className='fg-header-right-controls'>
-							<Link
-								href={dashboardHref}
-								className='fg-btn'
-								title={dashboardHref === '/' ? 'Open dashboard' : `Open ${dashboardHref.replace(/^\//, '')} on dashboard`}>
-								Dashboard
-							</Link>
 							{activeSnapshot && (
 								<button
 									type='button'
@@ -2464,19 +2435,18 @@ export default function NodeGraphPage() {
 												/>
 											</>
 										)}
-										{nodeEntityType === 'firm' ? (
+										{nodeEntityType === 'firm' ?
 											<polygon
 												className={`graph-node firm${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
 												points={`0,${-radius} ${radius * 0.866},${-radius / 2} ${radius * 0.866},${radius / 2} 0,${radius} ${-radius * 0.866},${radius / 2} ${-radius * 0.866},${-radius / 2}`}
 											/>
-										) : (
-											<circle
+										:	<circle
 												className={`graph-node individual${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
 												cx={0}
 												cy={0}
 												r={radius}
 											/>
-										)}
+										}
 										{isPrimary && !isInactive && roleRows.includes('Investment Adviser') && (
 											<circle
 												className='graph-node-adviser-badge'
@@ -2640,25 +2610,24 @@ export default function NodeGraphPage() {
 					padding: 0;
 					overflow: hidden;
 				}
+				/* Fill the app-page under the shared top-nav (do not cover the shell). */
 				.node-graph-page.fullscreen-mode {
 					display: flex;
 					flex-direction: column;
-					width: 100vw;
-					height: 100vh;
+					width: 100%;
+					height: 100%;
 					background: #040810;
 					color: #ffffff;
 					font-family: var(--font-sans, system-ui, -apple-system, sans-serif);
-					position: absolute;
-					top: 0;
-					left: 0;
-					z-index: 9999;
+					position: relative;
+					overflow: hidden;
 				}
 				.node-graph-page.theme-light {
 					background: #f3f4f6;
 					color: #111827;
 				}
 
-				/* Top header — visual layout aligned with finra-data-chart-next-02 */
+				/* Page toolbar — same midnight-red chrome as app .top-nav */
 				.fg-header {
 					position: relative;
 					display: flex;
@@ -2666,15 +2635,13 @@ export default function NodeGraphPage() {
 					flex-shrink: 0;
 					padding: 0;
 					width: 100%;
-					background: #0b1220;
-					border-bottom: 1px solid rgba(148, 163, 184, 0.14);
-					box-shadow: 0 2px 8px rgba(15, 23, 42, 0.35);
+					background: rgba(6, 0, 4, 0.98);
+					border-bottom: 1px solid rgba(120, 20, 45, 0.28);
 					z-index: 20;
 				}
 				.theme-light .fg-header {
 					background: #ffffff;
 					border-bottom-color: rgba(15, 23, 42, 0.1);
-					box-shadow: 0 2px 8px rgba(15, 23, 42, 0.08);
 				}
 				.fg-header-bar {
 					display: flex;
@@ -3077,16 +3044,23 @@ export default function NodeGraphPage() {
 				}
 				/* Selection: outer halo + ring (does not change fill/type color). */
 				.graph-node-select-halo {
-					fill: rgba(34, 211, 238, 0.16);
+					fill: rgba(245, 158, 11, 0.16);
 					stroke: none;
 					pointer-events: none;
 				}
 				.graph-node-select-ring {
 					fill: none;
-					stroke: #22d3ee;
-					stroke-width: 2.75;
+					stroke: #f59e0b;
+					stroke-width: 2.75px;
 					pointer-events: none;
-					filter: drop-shadow(0 0 8px rgba(34, 211, 238, 0.95));
+					filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.95));
+				}
+				.graph-node.active {
+					stroke: #f59e0b !important;
+				}
+				.graph-node.firm.active {
+					fill: #f59e0b !important;
+					stroke: #f59e0b !important;
 				}
 				.theme-light .graph-node-select-halo {
 					fill: rgba(8, 145, 178, 0.14);

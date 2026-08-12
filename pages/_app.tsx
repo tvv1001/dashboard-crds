@@ -185,12 +185,11 @@ export default function MyApp({ Component, pageProps }: AppProps) {
 		{ href: graphHref, activePrefix: '/graph', label: 'Node Graph' },
 		{ href: globalGraphHref, activePrefix: '/chart', label: 'Global Map' },
 		{ href: dashboardHref, activePrefix: '/', label: 'Dashboard' },
-		{ href: '/insights', activePrefix: '/insights', label: 'Insights' },
 	] as const;
 
 	return (
 		<div className='app-shell'>
-			<nav className='top-nav'>
+			<nav className='top-nav' aria-label='Primary'>
 				<div className='top-nav-brand'>FINRA / SEC</div>
 				<div className='top-nav-links'>
 					{navItems.map((item) => {
