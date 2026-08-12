@@ -241,6 +241,17 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 						bundle: orphanBundle,
 					});
 				}
+				const employmentReference = await findEmploymentReference(parsed.crd).catch(() => null);
+				if (employmentReference) {
+					const orphanBundle = buildOrphanBundle(parsed.type, parsed.crd, key, employmentReference);
+					return res.json({
+						rawPayload: JSON.stringify(orphanBundle, null, 2),
+						requestedKey: key,
+						resolvedKey: key,
+						fallbackUsed: true,
+						bundle: orphanBundle,
+					});
+				}
 			} else if (parsed.type === 'firm') {
 				const employmentReference = await findEmploymentReference(parsed.crd).catch(() => null);
 				if (employmentReference) {
