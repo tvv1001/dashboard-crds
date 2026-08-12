@@ -51,6 +51,7 @@
 	--r-xl: 0px;
 	--r-pill: 0px;
 	--top-nav-height: 56px;
+	--new-crds-mobile-bar-height: 48px;
 }
 
 /* ── Reset & Base ──────────────────────────────────────────── */
@@ -271,11 +272,22 @@ main.no-new-crds-sidebar {
 }
 
 main.no-left-sidebar {
+	/* New CRDs is first in the DOM (mobile source order); pin it to the right column on desktop. */
 	grid-template-columns: minmax(0, 1fr) minmax(260px, 300px);
+	grid-template-areas: 'panel newcrds';
+}
+
+main.no-left-sidebar > .panel {
+	grid-area: panel;
+}
+
+main.no-left-sidebar > .new-crds-sidebar {
+	grid-area: newcrds;
 }
 
 main.no-left-sidebar.no-new-crds-sidebar {
 	grid-template-columns: minmax(0, 1fr);
+	grid-template-areas: 'panel';
 }
 
 main.no-left-sidebar .panel {
@@ -2211,6 +2223,10 @@ button:disabled {
 	.disclosure-detail-list-compact {
 		grid-template-columns: 1fr;
 	}
+
+	main.dashboard-layout {
+		padding-top: 0;
+	}
 }
 
 .disclosure-detail-card {
@@ -2746,15 +2762,160 @@ button:disabled {
 .status-box {
 	height: 100%;
 }
-/* Auto-hide the "New CRDs" side panel on narrow/mobile viewports — it takes
-   up half the screen and crowds out the main record content there. The
-   floating "New CRDs" notice badge stays available to reopen it manually. */
+/* Mobile: New CRDs is a collapsed strip fixed just under the app top-nav. */
 @media (max-width: 900px) {
-	main.dashboard-layout {
-		grid-template-columns: minmax(0, 1fr) !important;
+	main.dashboard-layout,
+	main.dashboard-layout.no-left-sidebar,
+	main.dashboard-layout.no-new-crds-sidebar,
+	main.dashboard-layout.no-left-sidebar.no-new-crds-sidebar {
+		display: flex !important;
+		flex-direction: column;
+		grid-template-columns: none !important;
+		grid-template-areas: none !important;
+		height: auto;
+		overflow: visible;
+		/* Room for the fixed New CRDs toggle under the top nav */
+		/* padding-top: var(--new-crds-mobile-bar-height, 48px); */
 	}
 
-	.new-crds-sidebar {
+	main.dashboard-layout > .panel {
+		order: 1;
+		flex: 1 1 auto;
+		width: 100%;
+		min-width: 0;
+		height: auto;
+		border-left: none;
+		border-right: none;
+		grid-area: auto;
+	}
+
+	main.dashboard-layout > .new-crds-sidebar {
+		order: 0;
+		display: flex !important;
+		flex-direction: column;
+		position: static;
+		top: var(--top-nav-height);
+		left: 0;
+		right: 0;
+		width: 100%;
+		height: auto !important;
+		max-height: none;
+		min-height: 0;
+		padding: 0;
+		gap: 0;
+		margin: 0;
+		border-left: none;
+		border-bottom: 1px solid var(--border);
+		background: rgba(6, 0, 4, 0.98);
+		box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+		overflow: hidden;
+		z-index: 90;
+		grid-area: auto;
+	}
+
+	.new-crds-desktop-header,
+	.new-crds-dismiss-btn {
+		display: none !important;
+	}
+
+	.new-crds-mobile-toggle {
+		display: flex !important;
+		width: 100%;
+		align-items: center;
+		justify-content: space-between;
+		gap: 12px;
+		min-height: var(--new-crds-mobile-bar-height, 48px);
+		padding: 12px 14px;
+		margin: 0;
+		border: none;
+		border-radius: 0;
+		background: transparent;
+		color: var(--text-primary);
+		cursor: pointer;
+		text-align: left;
+		font: inherit;
+		-webkit-tap-highlight-color: transparent;
+	}
+
+	.new-crds-mobile-toggle:hover,
+	.new-crds-mobile-toggle:focus-visible {
+		background: var(--surface-2);
+		outline: none;
+	}
+
+	.new-crds-mobile-toggle-label {
+		display: inline-flex;
+		align-items: center;
+		gap: 10px;
+		min-width: 0;
+	}
+
+	.new-crds-mobile-title {
+		font-size: 0.8rem;
+		font-weight: 800;
+		letter-spacing: 0.08em;
+		text-transform: uppercase;
+		color: var(--text-accent);
+	}
+
+	.new-crds-count-badge {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		min-width: 1.5rem;
+		padding: 2px 7px;
+		border: 1px solid rgba(6, 182, 212, 0.35);
+		background: rgba(6, 182, 212, 0.12);
+		color: var(--cyan);
+		font-size: 0.72rem;
+		font-weight: 700;
+		line-height: 1.2;
+	}
+
+	.new-crds-loading-hint {
+		font-size: 0.72rem;
+		font-weight: 600;
+		color: var(--text-muted);
+		letter-spacing: 0.02em;
+		text-transform: none;
+	}
+
+	.new-crds-chevron {
+		flex-shrink: 0;
+		font-size: 0.7rem;
+		color: var(--text-muted);
+		line-height: 1;
+	}
+
+	/* Collapsed by default — body only when .open is set from the toggle */
+	.new-crds-sidebar:not(.open) .new-crds-body {
+		display: none !important;
+	}
+
+	.new-crds-sidebar.open .new-crds-body {
+		display: flex !important;
+		padding: 0 14px 14px;
+		max-height: min(55vh, 420px);
+		overflow-y: auto;
+		overflow-x: hidden;
+		border-top: 1px solid var(--border);
+		-webkit-overflow-scrolling: touch;
+		background: rgba(6, 0, 4, 0.98);
+	}
+
+	/* Floating notice is redundant on mobile — the top strip is always there */
+	.new-crds-notice {
+		display: none !important;
+	}
+}
+
+/* Desktop: hide the column when dismissed; mobile keeps the accordion strip */
+@media (min-width: 901px) {
+	main.no-new-crds-sidebar .new-crds-sidebar {
+		display: none !important;
+	}
+
+	.new-crds-mobile-toggle {
 		display: none !important;
 	}
 }
@@ -3378,7 +3539,16 @@ button:disabled {
 	gap: 12px;
 }
 
-.new-crds-header h2 {
+.new-crds-desktop-header {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 12px;
+	width: 100%;
+}
+
+.new-crds-header h2,
+.new-crds-desktop-header h2 {
 	margin: 0;
 	font-size: 1rem;
 	font-weight: 800;
@@ -3387,6 +3557,11 @@ button:disabled {
 	background: linear-gradient(135deg, var(--cyan-bright), var(--violet-bright));
 	-webkit-background-clip: text;
 	-webkit-text-fill-color: transparent;
+}
+
+/* Mobile toggle is only shown inside the max-width: 900px block */
+.new-crds-mobile-toggle {
+	display: none;
 }
 
 .new-crds-sidebar .button-secondary {

@@ -446,7 +446,16 @@ export default function Dashboard() {
 
 	return (
 		<>
+			{/* Always mounted: mobile CSS pins this as a collapsed strip under the top nav;
+			    desktop CSS keeps it as the right column (or hides it when dismissed). */}
 			<main className={`dashboard-layout no-left-sidebar ${newCrds.showSidebar ? '' : 'no-new-crds-sidebar'}`.trim()}>
+				<NewCrdsSidebar
+					state={newCrds.state}
+					activeKey={activeKey}
+					onToggle={newCrds.toggle}
+					onDismiss={newCrds.dismiss}
+					onSelect={handleNewCrdSelect}
+				/>
 				<Panel
 					activeKey={activeKey}
 					payloads={payloads}
@@ -484,16 +493,6 @@ export default function Dashboard() {
 					onCopyNameResults={nameSearch.copyToClipboard}
 					onSelectKey={selectKey}
 				/>
-
-				{newCrds.showSidebar && (
-					<NewCrdsSidebar
-						state={newCrds.state}
-						activeKey={activeKey}
-						onToggle={newCrds.toggle}
-						onDismiss={newCrds.dismiss}
-						onSelect={handleNewCrdSelect}
-					/>
-				)}
 			</main>
 			<NewCrdsNotice
 				count={newCrds.notificationCount}
