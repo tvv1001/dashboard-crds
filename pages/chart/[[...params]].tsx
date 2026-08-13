@@ -13,6 +13,8 @@ import { toProperCaseName } from '../../src/lib/format';
 import { parseCrdKey } from '../../src/lib/parseKey';
 import { readLastCrdSelection } from '../../src/lib/lastCrdSelection';
 import { CHART_PRELOAD_SEEDS } from '../../src/lib/chartPreloadSeeds';
+import { FgHeader } from '../../src/components/graph/FgHeader';
+import { FgDrawer } from '../../src/components/graph/FgDrawer';
 import type { LocalNameSearchResult } from '../../src/types';
 
 /** Sigma rendering touches WebGL globals — never import it at module top-level (SSR/Turbopack). */
@@ -4311,75 +4313,17 @@ export default function GlobalGraphPage() {
 				className={`node-graph-page fullscreen-mode theme-${theme} global-graph-webgl`}
 				data-theme={theme}>
 				{/* Page toolbar under the shared app top-nav (brand + primary links live in _app). */}
-				<header className='fg-header'>
-					<div className='fg-header-bar'>
-						<div className='fg-header-controls'>
-							<form
-								className='fg-search fg-search--header'
-								onSubmit={handleSearchSubmit}>
-								<input
-									className='fg-search-input'
-									type='search'
-									placeholder='firm, person, CRD/SEC#'
-									value={query}
-									onChange={(e) => setQuery(e.target.value)}
-									aria-label='Search firm, person, or CRD'
-									autoComplete='off'
-									disabled={status !== 'ready' && status !== 'loading'}
-								/>
-								<button
-									type='submit'
-									className='fg-send-btn'
-									aria-label='Search'
-									disabled={status !== 'ready' || searchLoading}>
-									➤
-								</button>
-							</form>
-						</div>
-
-						<div className={`fg-focus-readout${focus || hover ? ' fg-focus-readout--visible' : ''}`}>
-							{focus ?
-								<>
-									<span className='fg-focus-readout__name'>{focus.label}</span>
-									<span className='fg-focus-readout__crd'>CRD {focus.id}</span>
-								</>
-							: hover ?
-								<>
-									<span className='fg-focus-readout__name'>{hover.label}</span>
-									<span className='fg-focus-readout__crd'>CRD {hover.id}</span>
-								</>
-							:	null}
-						</div>
-
-						<div className='fg-header-right-controls'>
-							{(focus || panelSnapshot) && (
-								<button
-									type='button'
-									onClick={() => setDrawerOpen((open) => !open)}
-									className={`fg-hamburger-btn${drawerOpen ? ' active' : ''}`}
-									aria-label='Toggle details panel'
-									aria-expanded={drawerOpen}>
-									☰
-								</button>
-							)}
-						</div>
-					</div>
-					{(errorMessage || status === 'error') && status !== 'loading' && <div className='fg-search-error'>{errorMessage || 'Failed to load global layout'}</div>}
-					{searchBanner && (
-						<div className='fg-search-banner'>
-							<span>
-								Added {searchBanner.count} node{searchBanner.count === 1 ? '' : 's'} for &quot;{searchBanner.query}&quot;
-							</span>
-							<button
-								type='button'
-								className='fg-search-banner-close'
-								onClick={() => setSearchBanner(null)}
-								aria-label='Dismiss'>
-								✕
-							</button>
-						</div>
-					)}
-				</header>
+				<FgHeader
+					focusLabel={focus?.label || hover?.label || null}
+					focusCrd={focus?.id || hover?.id || null}
+					showFocusReadout={!!(focus || hover)}
+					showDrawerToggle={true}
+					drawerOpen={drawerOpen}
+					setDrawerOpen={setDrawerOpen}
+					errorMessage={(errorMessage || status === 'error') && status !== 'loading' ? (errorMessage || 'Failed to load global layout') : null}
+					searchBanner={searchBanner}
+					setSearchBanner={setSearchBanner as any}
+				/>
 
 				<main className='graph-main-canvas'>
 					{(status === 'loading' || searchLoading) && (
@@ -4501,73 +4445,38 @@ export default function GlobalGraphPage() {
 					</div>
 				)}
 
-				{(focus || panelSnapshot) && (
-					<aside className={`node-detail-drawer${drawerOpen ? ' open' : ''}`}>
-						<div className='sidebar-header'>
-							<button
-								type='button'
-								className='drawer-close-btn'
-								onClick={() => setDrawerOpen(false)}
-								aria-label='Close details panel'>
-								✕
-							</button>
-							<h1>{panelTitle}</h1>
-							{panelRoleRows.length > 0 && (
-								<div className='role-rows'>
-									{panelRoleRows.map((row) => (
-										<div
-											key={row}
-											className='role-row'>
-											<span className='role-dot' />
-											{row}
-										</div>
-									))}
-								</div>
-							)}
-							{panelSnapshot?.error ?
-								<p className='fg-panel-error'>{panelSnapshot.error}</p>
-							:	null}
-						</div>
-
-						<div className='sidebar-content'>
-							{/* Same PanelHeader + StatusBox as /graph and the main dashboard. */}
-							<PanelHeader
-								activeKey={panelActiveKey}
-								payloads={[]}
-								detailJson={panelDetailJson}
-								onSelectKey={(key) => {
-									// Connection / owner rows → focus+fetch on the map (person brings firms).
-									void activateKeyOnMap(key);
-								}}
-							/>
-							<StatusBox
-								statusMsg={panelSnapshot?.error || ''}
-								statusHtml=''
-								detailJson={panelDetailJson}
-								panelLoading={panelLoading}
-								activeKey={panelActiveKey}
-								fetchLog={[]}
-								onClearLog={() => {}}
-								selectionLog={selectionLog}
-								onClearSelectionLog={() => {
-									setSelectionLog([]);
-									lastLoggedFocusIdRef.current = null;
-								}}
-								onFocusSelectionLogEntry={(entry) => {
-									const crd = entry.crd || entry.id;
-									const type =
-										entry.type === 'firm' ? 'firm'
-										: entry.type === 'individual' ? 'individual'
-										: undefined;
-									if (crd) void activateKeyOnMap(entry.key || crd, type);
-								}}
-								onSelectKey={(key) => {
-									void activateKeyOnMap(key);
-								}}
-							/>
-						</div>
-					</aside>
-				)}
+				<FgDrawer
+					drawerOpen={drawerOpen}
+					setDrawerOpen={setDrawerOpen}
+					searchQuery={query}
+					onSearchQueryChange={setQuery}
+					onSearchSubmit={handleSearchSubmit}
+					searchDisabled={status !== 'ready' && status !== 'loading'}
+					searchLoading={searchLoading}
+					showTitleAndRoles={!!(focus || panelSnapshot)}
+					panelTitle={panelTitle}
+					panelRoleRows={panelRoleRows}
+					panelError={panelSnapshot?.error}
+					panelActiveKey={panelActiveKey}
+					panelDetailJson={panelDetailJson}
+					panelLoading={panelLoading}
+					onSelectKey={(key) => {
+						void activateKeyOnMap(key);
+					}}
+					selectionLog={selectionLog}
+					onClearSelectionLog={() => {
+						setSelectionLog([]);
+						lastLoggedFocusIdRef.current = null;
+					}}
+					onFocusSelectionLogEntry={(entry) => {
+						const crd = entry.crd || entry.id;
+						const type =
+							entry.type === 'firm' ? 'firm'
+							: entry.type === 'individual' ? 'individual'
+							: undefined;
+						if (crd) void activateKeyOnMap(entry.key || crd, type);
+					}}
+				/>
 			</div>
 
 			<style
@@ -4912,16 +4821,7 @@ export default function GlobalGraphPage() {
 					font-size: 0.72rem;
 					color: #94a3b8;
 				}
-				@media (max-width: 720px) {
-					.fg-focus-readout {
-						display: none;
-					}
-					.fg-search-input {
-						width: min(180px, 42vw);
-						max-width: 180px;
-						flex-basis: 180px;
-					}
-				}
+
 
 				.graph-main-canvas {
 					display: block;
@@ -5074,40 +4974,6 @@ export default function GlobalGraphPage() {
 					background: #38bdf8;
 					box-shadow: 0 0 0 2px #c084fc;
 				}
-				.node-detail-drawer {
-					width: 410px;
-					max-width: min(410px, 100vw);
-					background: #0d131f;
-					border-left: 1px solid rgba(255, 255, 255, 0.08);
-					display: flex;
-					flex-direction: column;
-					box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
-					z-index: 10;
-					position: absolute;
-					right: 0;
-					top: 0;
-					bottom: 0;
-					overflow-y: auto;
-					overflow-x: hidden;
-					transform: translateX(100%);
-					transition: transform 220ms ease;
-					visibility: hidden;
-				}
-				.node-detail-drawer.open {
-					transform: translateX(0);
-					visibility: visible;
-				}
-				.theme-light .node-detail-drawer {
-					background: #ffffff;
-					border-left-color: rgba(0, 0, 0, 0.08);
-					box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
-				}
-				.node-detail-drawer .sidebar-content {
-					padding: 16px 18px 20px;
-				}
-				.node-detail-drawer .sidebar-header {
-					padding: 16px 18px;
-				}
 				.fg-toolbar-minimize-btn,
 				.fg-toolbar-expand-btn {
 					flex-shrink: 0;
@@ -5175,77 +5041,6 @@ export default function GlobalGraphPage() {
 					background: rgba(255, 255, 255, 0.04);
 					cursor: pointer;
 					font-size: 0.9rem;
-				}
-				.sidebar-header {
-					position: relative;
-					padding: 16px;
-					border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-				}
-				.drawer-close-btn {
-					position: absolute;
-					top: 12px;
-					right: 12px;
-					width: 28px;
-					height: 28px;
-					border-radius: 6px;
-					border: 1px solid rgba(255, 255, 255, 0.15);
-					background: rgba(255, 255, 255, 0.04);
-					color: inherit;
-					cursor: pointer;
-					font-size: 0.85rem;
-				}
-				.theme-light .drawer-close-btn {
-					border-color: rgba(0, 0, 0, 0.15);
-				}
-				.sidebar-header h1 {
-					margin: 0 24px 4px 0;
-					font-size: 1.2rem;
-					font-weight: 700;
-					color: #f3f4f6;
-				}
-				.theme-light .sidebar-header h1 {
-					color: #111827;
-				}
-				.fg-panel-error {
-					margin: 8px 0 0;
-					color: #f87171;
-					font-size: 0.8rem;
-				}
-				.role-rows {
-					display: flex;
-					flex-direction: column;
-					gap: 4px;
-					margin-bottom: 10px;
-				}
-				.role-row {
-					display: flex;
-					align-items: center;
-					gap: 6px;
-					font-size: 0.8rem;
-					color: #d1d5db;
-				}
-				.theme-light .role-row {
-					color: #374151;
-				}
-				.role-dot {
-					width: 8px;
-					height: 8px;
-					border-radius: 50%;
-					background: #06b6d4;
-					flex-shrink: 0;
-				}
-				.gg-drawer-links {
-					display: flex;
-					flex-wrap: wrap;
-					gap: 8px;
-					margin-top: 10px;
-				}
-				.sidebar-content {
-					padding: 16px;
-					overflow-y: auto;
-					flex: 1;
-					background: #0d131f;
-					color: #f1f1ff;
 				}
 			`}</style>
 		</>

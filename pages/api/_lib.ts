@@ -7,8 +7,9 @@ import { toProperCaseName } from '../../src/lib/format';
 
 const redisUrl = process.env.REDIS_URL;
 const redisPassword = process.env.REDIS_PASSWORD;
-const upstashRedisRestUrl = process.env.UPSTASH_REDIS_REST_URL;
-const upstashRedisRestToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+const isDev = process.env.NODE_ENV === 'development';
+const upstashRedisRestUrl = isDev ? undefined : process.env.UPSTASH_REDIS_REST_URL;
+const upstashRedisRestToken = isDev ? undefined : process.env.UPSTASH_REDIS_REST_TOKEN;
 const cacheTtlSeconds = Number(process.env.CACHE_TTL_SECONDS) || 3600;
 // The local `data/raw` disk cache/fallback has been removed entirely (deleted
 // from disk) — Redis is now the single source of truth for saved payloads.

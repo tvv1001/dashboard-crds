@@ -4455,3 +4455,138 @@ button:disabled {
 		0 6px 20px rgba(6, 182, 212, 0.15),
 		0 2px 6px rgba(0, 0, 0, 0.4);
 }
+
+/* FgDrawer Shared CSS */
+.node-detail-drawer {
+	width: 410px;
+	max-width: min(410px, 100vw);
+	background: #0d131f;
+	border-left: 1px solid rgba(255, 255, 255, 0.08);
+	display: flex;
+	flex-direction: column;
+	box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
+	z-index: 10;
+	position: absolute;
+	right: 0;
+	top: 58px;
+	overflow-y: auto;
+	overflow-x: hidden;
+	transform: translateX(100%);
+	transition: transform 220ms ease;
+	visibility: hidden;
+}
+.node-detail-drawer.open {
+	transform: translateX(0);
+	visibility: visible;
+}
+.theme-light .node-detail-drawer {
+	background: #ffffff;
+	border-left-color: rgba(0, 0, 0, 0.08);
+	box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
+}
+.sidebar-header {
+	position: relative;
+	padding: 16px;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.drawer-close-btn {
+	position: absolute;
+	top: 12px;
+	right: 12px;
+	width: 28px;
+	height: 28px;
+	border-radius: 6px;
+	border: 1px solid rgba(255, 255, 255, 0.15);
+	background: rgba(255, 255, 255, 0.04);
+	color: inherit;
+	cursor: pointer;
+	font-size: 0.85rem;
+}
+.theme-light .drawer-close-btn {
+	border-color: rgba(0, 0, 0, 0.15);
+}
+.sidebar-header h1 {
+	margin: 0 24px 4px 0;
+	font-size: 1.2rem;
+	font-weight: 700;
+	color: #f3f4f6;
+}
+.theme-light .sidebar-header h1 {
+	color: #111827;
+}
+.fg-panel-error {
+	margin: 8px 0 0;
+	color: #f87171;
+	font-size: 0.8rem;
+}
+.role-rows {
+	display: flex;
+	flex-direction: column;
+	gap: 4px;
+	margin-bottom: 10px;
+}
+.role-row {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	font-size: 0.8rem;
+	color: #d1d5db;
+}
+.theme-light .role-row {
+	color: #374151;
+}
+.role-dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	background: #06b6d4;
+	flex-shrink: 0;
+}
+.sidebar-content {
+	padding: 16px;
+	overflow-y: auto;
+	flex: 1;
+	background: #0d131f;
+	color: #f1f1ff;
+}
+
+.node-detail-drawer .current-crd-banner,
+.node-detail-drawer .status-box,
+.node-detail-drawer .record-detail-section {
+	max-width: 100%;
+}
+
+.drawer-status-toggle {
+	margin-top: 16px;
+	border-top: 1px solid rgba(255, 255, 255, 0.08);
+	padding-top: 12px;
+}
+.theme-light .drawer-status-toggle {
+	border-top-color: rgba(0, 0, 0, 0.08);
+}
+.drawer-status-toggle-btn {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	width: 100%;
+	background: transparent;
+	border: none;
+	color: #f3f4f6;
+	font-size: 0.9rem;
+	font-weight: 600;
+	padding: 8px 0;
+	cursor: pointer;
+}
+.theme-light .drawer-status-toggle-btn {
+	color: #111827;
+}
+.drawer-status-toggle-btn .toggle-icon {
+	font-size: 0.75rem;
+	color: #9ca3af;
+}
+.theme-light .drawer-status-toggle-btn .toggle-icon {
+	color: #6b7280;
+}
+.drawer-status-content {
+	margin-top: 8px;
+}

@@ -9,6 +9,8 @@ import { toProperCaseName } from '../../src/lib/format';
 import { PanelHeader } from '../../src/components/panel/PanelHeader';
 import { StatusBox } from '../../src/components/panel/StatusBox';
 import { deriveStatusBadge, deriveTerminatedBadge } from '../../src/lib/statusBadge';
+import { FgHeader } from '../../src/components/graph/FgHeader';
+import { FgDrawer } from '../../src/components/graph/FgDrawer';
 
 function stringValue(value: unknown): string | undefined {
 	if (typeof value === 'string' && value.trim()) return value.trim();
@@ -2234,76 +2236,17 @@ export default function NodeGraphPage() {
 				className={`node-graph-page fullscreen-mode theme-${theme}`}
 				data-theme={theme}>
 				{/* Page toolbar under the shared app top-nav (brand + primary links live in _app). */}
-				<header className='fg-header'>
-					<div className='fg-header-bar'>
-						{/* Left controls: compact search + send (reference layout) */}
-						<div className='fg-header-controls'>
-							<form
-								className='fg-search fg-search--header'
-								onSubmit={handleSearch}>
-								<input
-									className='fg-search-input'
-									type='search'
-									placeholder='firm, person, CRD/SEC#'
-									value={searchInput}
-									onChange={(e) => setSearchInput(e.target.value)}
-									aria-label='Search firm, person, or CRD'
-								/>
-								<button
-									type='submit'
-									className='fg-send-btn'
-									aria-label='Search'
-									disabled={searchLoading}>
-									➤
-								</button>
-							</form>
-						</div>
-
-						{/* Center focus readout — entity name + CRD when a node is loaded */}
-						<div className={`fg-focus-readout${entityTitle || focusedNode ? ' fg-focus-readout--visible' : ''}`}>
-							{entityTitle || focusedNode?.label ?
-								<>
-									<span className='fg-focus-readout__name'>{entityTitle || focusedNode?.label}</span>
-									{focusedNode &&
-										(() => {
-											const canonical = canonicalIdForNode(focusedNode);
-											const crd = canonical?.split(':')[1];
-											return crd ? <span className='fg-focus-readout__crd'>CRD {crd}</span> : null;
-										})()}
-								</>
-							:	null}
-						</div>
-
-						{/* Right controls: details panel toggle */}
-						<div className='fg-header-right-controls'>
-							{activeSnapshot && (
-								<button
-									type='button'
-									onClick={() => setDrawerOpen((open) => !open)}
-									className={`fg-hamburger-btn${drawerOpen ? ' active' : ''}`}
-									aria-label='Toggle details panel'
-									aria-expanded={drawerOpen}>
-									☰
-								</button>
-							)}
-						</div>
-					</div>
-					{searchError && <div className='fg-search-error'>{searchError}</div>}
-					{searchBanner && (
-						<div className='fg-search-banner'>
-							<span>
-								Added {searchBanner.count} node{searchBanner.count === 1 ? '' : 's'} for &quot;{searchBanner.query}&quot;
-							</span>
-							<button
-								type='button'
-								className='fg-search-banner-close'
-								onClick={() => setSearchBanner(null)}
-								aria-label='Dismiss'>
-								✕
-							</button>
-						</div>
-					)}
-				</header>
+				<FgHeader
+					focusLabel={entityTitle || focusedNode?.label || null}
+					focusCrd={focusedNode ? canonicalIdForNode(focusedNode)?.split(':')[1] || null : null}
+					showFocusReadout={!!(entityTitle || focusedNode)}
+					showDrawerToggle={true}
+					drawerOpen={drawerOpen}
+					setDrawerOpen={setDrawerOpen}
+					errorMessage={searchError}
+					searchBanner={searchBanner}
+					setSearchBanner={setSearchBanner as any}
+				/>
 
 				<main className='graph-main-canvas'>
 					{searchLoading && (
@@ -2543,58 +2486,23 @@ export default function NodeGraphPage() {
 					</div>
 				)}
 
-				{(activeSnapshot || panelSnapshot) && (
-					<aside className={`node-detail-drawer${drawerOpen ? ' open' : ''}`}>
-						<div className='sidebar-header'>
-							<button
-								type='button'
-								className='drawer-close-btn'
-								onClick={() => setDrawerOpen(false)}
-								aria-label='Close details panel'>
-								✕
-							</button>
-							<h1>{panelTitle}</h1>
-							{panelRoleRows.length > 0 && (
-								<div className='role-rows'>
-									{panelRoleRows.map((row) => (
-										<div
-											key={row}
-											className='role-row'>
-											<span className='role-dot' />
-											{row}
-										</div>
-									))}
-								</div>
-							)}
-							{panelSnapshot?.error ?
-								<p className='fg-panel-error'>{panelSnapshot.error}</p>
-							:	null}
-						</div>
-
-						<div className='sidebar-content'>
-							{/* Reuse the exact same header + detail components as the main
-							    dashboard so this panel shows identical content (name/status
-							    badges, profile links, general info, registration,
-							    disclosures, employment, exams, owners, etc.). */}
-							<PanelHeader
-								activeKey={panelActiveKey}
-								payloads={[]}
-								detailJson={panelDetailJson}
-								onSelectKey={loadKey}
-							/>
-							<StatusBox
-								statusMsg={panelSnapshot?.error || ''}
-								statusHtml=''
-								detailJson={panelDetailJson}
-								panelLoading={panelLoading}
-								activeKey={panelActiveKey}
-								fetchLog={[]}
-								onClearLog={() => {}}
-								onSelectKey={loadKey}
-							/>
-						</div>
-					</aside>
-				)}
+				<FgDrawer
+					drawerOpen={drawerOpen}
+					setDrawerOpen={setDrawerOpen}
+					searchQuery={searchInput}
+					onSearchQueryChange={setSearchInput}
+					onSearchSubmit={handleSearch}
+					searchDisabled={false}
+					searchLoading={searchLoading}
+					showTitleAndRoles={!!(activeSnapshot || panelSnapshot)}
+					panelTitle={panelTitle}
+					panelRoleRows={panelRoleRows}
+					panelError={panelSnapshot?.error}
+					panelActiveKey={panelActiveKey}
+					panelDetailJson={panelDetailJson}
+					panelLoading={panelLoading}
+					onSelectKey={loadKey}
+				/>
 			</div>
 
 			<style
@@ -2893,16 +2801,7 @@ export default function NodeGraphPage() {
 					font-size: 0.75rem;
 					line-height: 1;
 				}
-				@media (max-width: 720px) {
-					.fg-focus-readout {
-						display: none;
-					}
-					.fg-search-input {
-						width: min(180px, 42vw);
-						max-width: 180px;
-						flex-basis: 180px;
-					}
-				}
+
 
 				.graph-main-canvas {
 					display: block;
@@ -3189,48 +3088,6 @@ export default function NodeGraphPage() {
 					box-shadow: none;
 				}
 
-				/* Detail panel drawer — same app style, 70px wider for panel column. */
-				.node-detail-drawer {
-					width: 410px; /* was 340px; +70px for side panel column */
-					max-width: min(410px, 100vw);
-					background: #0d131f;
-					border-left: 1px solid rgba(255, 255, 255, 0.08);
-					display: flex;
-					flex-direction: column;
-					box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
-					z-index: 10;
-					position: absolute;
-					right: 0;
-					top: 0;
-					bottom: 0;
-					overflow-y: auto;
-					overflow-x: hidden;
-					transform: translateX(100%);
-					transition: transform 220ms ease;
-					visibility: hidden;
-				}
-				.node-detail-drawer.open {
-					transform: translateX(0);
-					visibility: visible;
-				}
-				.theme-light .node-detail-drawer {
-					background: #ffffff;
-					border-left-color: rgba(0, 0, 0, 0.08);
-					box-shadow: -8px 0 24px rgba(0, 0, 0, 0.08);
-				}
-				/* Keep reused dashboard panel components readable in the wider column */
-				.node-detail-drawer .sidebar-content {
-					padding: 16px 18px 20px;
-				}
-				.node-detail-drawer .sidebar-header {
-					padding: 16px 18px;
-				}
-				.node-detail-drawer .current-crd-banner,
-				.node-detail-drawer .status-box,
-				.node-detail-drawer .record-detail-section {
-					max-width: 100%;
-				}
-
 				.fg-toolbar-minimize-btn,
 				.fg-toolbar-expand-btn {
 					flex-shrink: 0;
@@ -3295,79 +3152,6 @@ export default function NodeGraphPage() {
 					background: rgba(255, 255, 255, 0.04);
 					cursor: pointer;
 					font-size: 0.9rem;
-				}
-
-				.sidebar-header {
-					position: relative;
-					padding: 16px;
-					border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-				}
-				.drawer-close-btn {
-					position: absolute;
-					top: 12px;
-					right: 12px;
-					width: 28px;
-					height: 28px;
-					border-radius: 6px;
-					border: 1px solid rgba(255, 255, 255, 0.15);
-					background: rgba(255, 255, 255, 0.04);
-					color: inherit;
-					cursor: pointer;
-					font-size: 0.85rem;
-				}
-				.theme-light .drawer-close-btn {
-					border-color: rgba(0, 0, 0, 0.15);
-				}
-				.sidebar-header h1 {
-					margin: 0 24px 4px 0;
-					font-size: 1.2rem;
-					font-weight: 700;
-					color: #f3f4f6;
-				}
-				.theme-light .sidebar-header h1 {
-					color: #111827;
-				}
-				.fg-panel-error {
-					margin: 8px 0 0;
-					color: #f87171;
-					font-size: 0.8rem;
-				}
-				.role-rows {
-					display: flex;
-					flex-direction: column;
-					gap: 4px;
-					margin-bottom: 10px;
-				}
-				.role-row {
-					display: flex;
-					align-items: center;
-					gap: 6px;
-					font-size: 0.8rem;
-					color: #d1d5db;
-				}
-				.theme-light .role-row {
-					color: #374151;
-				}
-				.role-dot {
-					width: 8px;
-					height: 8px;
-					border-radius: 50%;
-					background: #06b6d4;
-					flex-shrink: 0;
-				}
-
-				/* PanelHeader/StatusBox are the exact same dashboard components used
-				   on the main "/" page, which only has a single dark palette (their
-				   CSS relies on --text-primary etc. being near-white). Force this
-				   area to always render on a dark background — even when the graph
-				   canvas itself is switched to the light theme — so that reused
-				   text stays legible instead of rendering near-white-on-white. */
-				.sidebar-content {
-					padding: 16px;
-					overflow-y: auto;
-					flex: 1;
-					background: #0d131f;
-					color: #f1f1ff;
 				}
 			`}</style>
 		</>

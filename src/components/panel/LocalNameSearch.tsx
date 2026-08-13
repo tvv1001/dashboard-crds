@@ -62,7 +62,8 @@ export function LocalNameSearch({
 		redisHeaderStatus.mode === 'upstash-rest' ? 'Upstash REST'
 		: redisHeaderStatus.mode === 'redis-url' ? 'Redis URL'
 		: 'Not Configured';
-	const redisBadgeText = redisHeaderStatus.connected ? 'Redis Connected' : 'Redis Disconnected';
+	const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+	const redisBadgeText = redisHeaderStatus.connected ? (isLocalhost ? 'Local Redis Connected' : 'Redis Connected') : 'Redis Disconnected';
 	const redisBadgeTitle = `${redisModeLabel}${redisHeaderStatus.latencyMs != null ? ` • ${Math.round(redisHeaderStatus.latencyMs)}ms` : ''}`;
 	const redisBadgeClass = `redis-health-badge ${redisHeaderStatus.connected ? 'connected' : 'disconnected'}`;
 
