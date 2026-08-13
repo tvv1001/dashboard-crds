@@ -15,6 +15,7 @@ import { readLastCrdSelection } from '../../src/lib/lastCrdSelection';
 import { CHART_PRELOAD_SEEDS } from '../../src/lib/chartPreloadSeeds';
 import { FgHeader } from '../../src/components/graph/FgHeader';
 import { FgDrawer } from '../../src/components/graph/FgDrawer';
+import { useSelectionLog } from '../../src/hooks/useSelectionLog';
 import type { LocalNameSearchResult } from '../../src/types';
 
 /** Sigma rendering touches WebGL globals — never import it at module top-level (SSR/Turbopack). */
@@ -110,7 +111,6 @@ function formatSelectionLogDisplay(label: string, crd: string, secNumber?: strin
 		.trim();
 	const generic = !raw || /^(individual|firm|person|crd)(\s+#?\d+)?$/i.test(raw) || raw.toLowerCase() === `crd ${crd}`.toLowerCase();
 	const name = generic ? String(crd || '').trim() || raw : raw;
-	if (secNumber) return `${name} :: CRD# ${crd} / SEC# ${secNumber}`;
 	return `${name} :: CRD# ${crd}`;
 }
 
@@ -1403,7 +1403,7 @@ export default function GlobalGraphPage() {
 		loading: boolean;
 		error: string;
 	} | null>(null);
-	const [selectionLog, setSelectionLog] = useState<SelectionLogEntry[]>([]);
+	const { selectionLog, setSelectionLog, clearSelectionLog } = useSelectionLog();
 	const panelRequestRef = useRef(0);
 	const lastLoggedFocusIdRef = useRef<string | null>(null);
 	const { cache, setSnapshot, clear: clearSharedCache } = useSharedGraphState();
@@ -4191,7 +4191,7 @@ export default function GlobalGraphPage() {
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [focus?.id]);
 
-	// Enrich the latest log row with SEC# once panel payload arrives.
+	// Enrich the latest log row with SEC# once panel payload arrives so it is searchable.
 	useEffect(() => {
 		if (!panelSnapshot?.detailJson || panelSnapshot.loading) return;
 		const sec = pickSecNumberFromDetailJson(panelSnapshot.detailJson);
@@ -4204,12 +4204,11 @@ export default function GlobalGraphPage() {
 			let changed = false;
 			const next = prev.map((row) => {
 				if (row.crd !== crdFromKey && row.id !== crdFromKey) return row;
-				if (row.secNumber === sec && row.display.includes(`SEC# ${sec}`)) return row;
+				if (row.secNumber === sec) return row;
 				changed = true;
 				return {
 					...row,
 					secNumber: sec,
-					display: formatSelectionLogDisplay(row.label, row.crd || crdFromKey, sec),
 				};
 			});
 			return changed ? next : prev;
@@ -4235,7 +4234,7 @@ export default function GlobalGraphPage() {
 		clearCanvas();
 		clearSharedCache();
 		setPanelSnapshot(null);
-		setSelectionLog([]);
+		clearSelectionLog();
 		lastLoggedFocusIdRef.current = null;
 		setDrawerOpen(false);
 		setSearchBanner(null);
@@ -4465,7 +4464,7 @@ export default function GlobalGraphPage() {
 					}}
 					selectionLog={selectionLog}
 					onClearSelectionLog={() => {
-						setSelectionLog([]);
+						clearSelectionLog();
 						lastLoggedFocusIdRef.current = null;
 					}}
 					onFocusSelectionLogEntry={(entry) => {

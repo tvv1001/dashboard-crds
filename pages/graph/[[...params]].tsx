@@ -11,6 +11,7 @@ import { StatusBox } from '../../src/components/panel/StatusBox';
 import { deriveStatusBadge, deriveTerminatedBadge } from '../../src/lib/statusBadge';
 import { FgHeader } from '../../src/components/graph/FgHeader';
 import { FgDrawer } from '../../src/components/graph/FgDrawer';
+import { useSelectionLog } from '../../src/hooks/useSelectionLog';
 
 function stringValue(value: unknown): string | undefined {
 	if (typeof value === 'string' && value.trim()) return value.trim();
@@ -537,6 +538,7 @@ const DEFAULT_TRANSFORM = d3.zoomIdentity.translate(600 * (1 - DEFAULT_SCALE), 4
 export default function NodeGraphPage() {
 	const router = useRouter();
 	const { cache, setSnapshot, clear } = useSharedGraphState();
+	const { selectionLog, clearSelectionLog } = useSelectionLog();
 
 	// Parses the optional /graph/individual/8303401 (or /graph/firm/<crd>)
 	// path segments this page is also mounted at (see the catch-all route
@@ -2502,6 +2504,8 @@ export default function NodeGraphPage() {
 					panelDetailJson={panelDetailJson}
 					panelLoading={panelLoading}
 					onSelectKey={loadKey}
+					selectionLog={selectionLog}
+					onClearSelectionLog={clearSelectionLog}
 				/>
 			</div>
 

@@ -78,54 +78,12 @@ export default function Dashboard() {
 	const [typeFilter, setTypeFilter] = useState('all');
 	const [dismissedSync, setDismissedSync] = useState(false);
 	const [pendingSelection, setPendingSelection] = useState<import('../types').RequestedSelection | null>(null);
-	const [selectionHistory, setSelectionHistory] = useState<string[]>([]);
-	// Selection history is loaded from localStorage post-mount (not in the
-	// useState initializer) to avoid SSR/CSR hydration mismatches — the server
-	// always renders with an empty history since it has no access to
-	// localStorage. `historyLoaded` guards the persist effect below so it
-	// doesn't stomp the stored value with `[]` before the load effect runs.
-	const [historyLoaded, setHistoryLoaded] = useState(false);
-	useEffect(() => {
-		if (typeof window === 'undefined') return;
-		try {
-			const stored = window.localStorage.getItem(SELECTION_HISTORY_STORAGE_KEY);
-			const parsed = stored ? JSON.parse(stored) : [];
-			if (Array.isArray(parsed)) {
-				setSelectionHistory(parsed.filter((k): k is string => typeof k === 'string'));
-			}
-		} catch {
-			// ignore malformed/unavailable storage
-		} finally {
-			setHistoryLoaded(true);
-		}
-	}, []);
 	const [redisHeaderStatus, setRedisHeaderStatus] = useState<RedisHeaderStatus>({
 		connected: false,
 		configured: false,
 		mode: 'none',
 		latencyMs: null,
 	});
-
-	// Persist selection history to localStorage on every change so it survives
-	// reloads/navigation; only cleared explicitly via clearSelectionHistory.
-	useEffect(() => {
-		if (!historyLoaded || typeof window === 'undefined') return;
-		try {
-			window.localStorage.setItem(SELECTION_HISTORY_STORAGE_KEY, JSON.stringify(selectionHistory));
-		} catch {
-			// ignore storage quota/availability errors
-		}
-	}, [selectionHistory, historyLoaded]);
-
-	const clearSelectionHistory = useCallback(() => {
-		setSelectionHistory([]);
-		if (typeof window === 'undefined') return;
-		try {
-			window.localStorage.removeItem(SELECTION_HISTORY_STORAGE_KEY);
-		} catch {
-			// ignore storage errors
-		}
-	}, []);
 
 	// ── Derived ───────────────────────────────────────────────────────────────
 	const groups = useMemo(() => buildGroups(payloads, sortOrder, typeFilter), [payloads, sortOrder, typeFilter]);
@@ -134,24 +92,6 @@ export default function Dashboard() {
 	const displayedSyncBanner = dismissedSync ? createDefaultSyncBanner() : syncBanner;
 
 	// ── Select a key from the sidebar ────────────────────────────────────────
-	const pushSelectionHistory = useCallback((key: string) => {
-		if (!key) return;
-		const parsed = parseCrdKey(key);
-		// Dedupe by CRD+type (not the exact finra/sec key) so switching between
-		// a record's FINRA and SEC snapshot doesn't create two history entries.
-		const signature = parsed ? `${parsed.type}:${parsed.crd}` : key;
-		setSelectionHistory((prev) =>
-			[
-				key,
-				...prev.filter((k) => {
-					const p = parseCrdKey(k);
-					const s = p ? `${p.type}:${p.crd}` : k;
-					return s !== signature;
-				}),
-			].slice(0, 30),
-		);
-	}, []);
-
 	const selectKey = useCallback(
 		(key: string) => {
 			const cached = sharedGraphState.getSnapshot(key);
@@ -184,7 +124,6 @@ export default function Dashboard() {
 				setGeminiAnalysis(null);
 				markSeen(key);
 				syncPathForSelection(resolvedKey);
-				pushSelectionHistory(resolvedKey);
 				return;
 			}
 
@@ -194,7 +133,6 @@ export default function Dashboard() {
 			setGeminiAnalysis(null);
 			markSeen(key);
 			syncPathForSelection(key);
-			pushSelectionHistory(key);
 			fetch(`/api/key?name=${encodeURIComponent(key)}`)
 				.then(async (r) => {
 					const data = await r.json();
@@ -209,7 +147,6 @@ export default function Dashboard() {
 						setActiveKey(resolvedKey);
 						markSeen(resolvedKey);
 						syncPathForSelection(resolvedKey);
-						pushSelectionHistory(resolvedKey);
 					}
 					const detailValue = typeof data?.rawPayload === 'string' ? data.rawPayload : JSON.stringify(data?.payload ?? data ?? null, null, 2);
 					setDetailJson(detailValue);
@@ -459,8 +396,6 @@ export default function Dashboard() {
 				<Panel
 					activeKey={activeKey}
 					payloads={payloads}
-					selectionHistory={selectionHistory}
-					onClearSelectionHistory={clearSelectionHistory}
 					statusConsole={statusConsole}
 					syncBanner={displayedSyncBanner}
 					statusHtml={statusHtml}

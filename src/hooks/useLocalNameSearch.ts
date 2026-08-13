@@ -1,5 +1,5 @@
 'use client';
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import type { LocalNameSearchResult } from '../types';
 
 export function useLocalNameSearch() {
@@ -12,6 +12,7 @@ export function useLocalNameSearch() {
 	const [loading, setLoading] = useState(false);
 	const [error, setError] = useState('');
 	const [searched, setSearched] = useState(false);
+	const externalSearchTimeout = useRef<NodeJS.Timeout | null>(null);
 
 	useEffect(() => {
 		let mounted = true;
@@ -57,6 +58,38 @@ export function useLocalNameSearch() {
 				setSourceMode(json?.sourceMode === 'redis' ? 'redis' : 'local');
 				setResults(found);
 				setSearched(true);
+				
+				// Automatically check external APIs with a debounce to prevent bottlenecking
+				if (externalSearchTimeout.current) clearTimeout(externalSearchTimeout.current);
+				externalSearchTimeout.current = setTimeout(async () => {
+					try {
+						// Wait for chart/graph interaction or rapid typing to settle
+						const externalRes = await fetch('/api/search-and-crawl', {
+							method: 'POST',
+							headers: { 'Content-Type': 'application/json' },
+							body: JSON.stringify({ query: searchQ.trim(), maxDepth: 1, maxVisits: 5 })
+						});
+						if (externalRes.ok) {
+							// After the external search saves payloads to Redis, update the UI
+							const recheckRes = await fetch(`/api/redis-search?${params.toString()}`);
+							if (recheckRes.ok) {
+								const recheckJson = await recheckRes.json();
+								const recheckFound: LocalNameSearchResult[] =
+									Array.isArray(recheckJson?.matches) ? recheckJson.matches
+									: Array.isArray(recheckJson?.results) ? recheckJson.results
+									: Array.isArray(recheckJson) ? recheckJson
+									: [];
+								setTotalIndexed(Number(recheckJson?.totalIndexed) || 0);
+								setTotalMatches(Number(recheckJson?.totalMatches) || recheckFound.length);
+								setTruncated(Boolean(recheckJson?.truncated));
+								setResults(recheckFound);
+							}
+						}
+					} catch (e) {
+						// Silently ignore external fallback failures
+					}
+				}, 1500);
+
 				return found;
 			} catch (err: unknown) {
 				setError(err instanceof Error ? err.message : 'Search failed');

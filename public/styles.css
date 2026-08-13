@@ -1826,8 +1826,7 @@ button:disabled {
 .record-detail-hero {
 	padding: 12px;
 	border-radius: var(--r-md);
-	border: 1px solid rgba(56, 189, 248, 0.28);
-	background: rgba(14, 116, 144, 0.2);
+	border: 1px solid #f4a9d882;
 	display: grid;
 	gap: 8px;
 }
@@ -2006,8 +2005,6 @@ button:disabled {
 }
 
 .record-detail-grid {
-	display: grid;
-	gap: 7px;
 	font-size: 0.82rem;
 	line-height: 1.45;
 	color: #d6dee8;
@@ -2027,7 +2024,6 @@ button:disabled {
 
 .record-detail-grid > div {
 	background: #090105;
-	border: 1px solid rgba(146, 34, 70, 0.28);
 	border-radius: var(--r-sm, 6px);
 	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.26);
 	padding: 7px 10px;
@@ -4476,7 +4472,7 @@ button:disabled {
 	transform: translateX(100%);
 	transition: transform 220ms ease;
 	visibility: hidden;
-	height: 75vh;
+	max-height: 75vh;
 }
 .node-detail-drawer.open {
 	transform: translateX(0);

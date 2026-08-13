@@ -9,12 +9,11 @@ import { StatusBox } from './StatusBox';
 import { LocalNameSearch } from './LocalNameSearch';
 import { parseCrdKey } from '../../lib/parseKey';
 import { extractNamesFromPayload, getContentBlock, resolveEntityDisplayName } from '../../lib/extractNames';
+import { useSelectionLog } from '../../hooks/useSelectionLog';
 
 interface Props {
 	activeKey: string;
 	payloads: SavedPayload[];
-	selectionHistory: string[];
-	onClearSelectionHistory: () => void;
 	statusConsole: StatusConsoleState;
 	syncBanner: SyncBannerState;
 	statusHtml: string;
@@ -56,8 +55,6 @@ interface Props {
 export function Panel({
 	activeKey,
 	payloads,
-	selectionHistory,
-	onClearSelectionHistory,
 	statusConsole,
 	syncBanner,
 	statusHtml,
@@ -117,31 +114,10 @@ export function Panel({
 	const hasSecSource =
 		bundleSources ? Boolean(bundleSources.sec?.found) : Boolean(parsed && payloads.some((p) => p.key === `sec:${parsed.type}:${parsed.crd}`)) || parsed?.source === 'sec';
 
-	// Cache the resolved display name per CRD+type signature as records load,
-	// so the selection history panel can show a name instead of just the CRD
-	// (SavedPayload entries don't carry a name, so it's derived from the
-	// fetched detail JSON the first time each record is viewed). Persisted to
-	// localStorage so names survive a browser refresh — otherwise only the
-	// currently active key's name would be known and every other history
-	// entry would fall back to "Individual/Firm <crd>" until re-visited.
-	const HISTORY_NAME_CACHE_STORAGE_KEY = 'finra-sec-history-name-cache';
-	const [historyNameCache, setHistoryNameCache] = useState<Record<string, string>>({});
-	useEffect(() => {
-		if (typeof window === 'undefined') return;
-		try {
-			const stored = window.localStorage.getItem(HISTORY_NAME_CACHE_STORAGE_KEY);
-			const parsed = stored ? JSON.parse(stored) : null;
-			if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-				setHistoryNameCache(parsed);
-			}
-		} catch {
-			// ignore malformed/unavailable storage
-		}
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, []);
+	const { selectionLog, pushSelectionLogEntry, clearSelectionLog } = useSelectionLog();
+
 	useEffect(() => {
 		if (!parsed || !detailJson) return;
-		const signature = `${parsed.type}:${parsed.crd}`;
 		try {
 			const payload = JSON.parse(detailJson);
 			const name = resolveEntityDisplayName({
@@ -150,45 +126,21 @@ export function Panel({
 				crd: parsed.crd,
 				source: parsed.source,
 			});
-			// Skip bare-CRD-only values so history keeps waiting for a real name.
 			if (name && name !== parsed.crd) {
-				setHistoryNameCache((prev) => {
-					if (prev[signature] === name) return prev;
-					const next = { ...prev, [signature]: name };
-					if (typeof window !== 'undefined') {
-						try {
-							window.localStorage.setItem(HISTORY_NAME_CACHE_STORAGE_KEY, JSON.stringify(next));
-						} catch {
-							// ignore storage quota/availability errors
-						}
-					}
-					return next;
+				pushSelectionLogEntry({
+					id: parsed.crd,
+					label: name,
+					type: parsed.type as 'individual' | 'firm',
+					display: `${name} :: CRD# ${parsed.crd}`,
+					crd: parsed.crd,
+					key: activeKey,
+					ts: Date.now()
 				});
 			}
 		} catch {
 			// ignore unparsable detail JSON
 		}
-	}, [parsed?.type, parsed?.crd, parsed?.source, detailJson]);
-
-	const historyEntries = useMemo(
-		() =>
-			selectionHistory
-				.map((key) => {
-					const entryParsed = parseCrdKey(key);
-					if (!entryParsed) return null;
-					const finraMatch = payloads.find((p) => p.key === `finra:${entryParsed.type}:${entryParsed.crd}`) as (SavedPayload & { displayName?: string }) | undefined;
-					const secMatch = payloads.find((p) => p.key === `sec:${entryParsed.type}:${entryParsed.crd}`) as (SavedPayload & { displayName?: string }) | undefined;
-					const signature = `${entryParsed.type}:${entryParsed.crd}`;
-					const label = resolveEntityDisplayName({
-						type: entryParsed.type as 'individual' | 'firm',
-						crd: entryParsed.crd,
-						candidates: [historyNameCache[signature], finraMatch?.displayName, secMatch?.displayName],
-					});
-					return { key, label, hasFinra: Boolean(finraMatch), hasSec: Boolean(secMatch), ...entryParsed };
-				})
-				.filter((entry): entry is NonNullable<typeof entry> => entry != null),
-		[selectionHistory, payloads, historyNameCache],
-	);
+	}, [parsed?.type, parsed?.crd, parsed?.source, detailJson, activeKey, pushSelectionLogEntry]);
 
 	// Draggable resize handle between the details pane and the Redis Search box.
 	// The box starts small (just header + input + button) and slides up to the
@@ -308,22 +260,14 @@ export function Panel({
 							<aside className='record-side-panel'>
 								<div className='record-side-header'>
 									<h3 className='record-side-title'>Selection history</h3>
-									{historyEntries.length > 0 && (
+									{selectionLog.length > 0 && (
 										<span className='record-side-header-actions'>
-											<span className='record-side-badges'>{historyEntries.length}</span>
+											<span className='record-side-badges'>{selectionLog.length}</span>
 											<button
 												type='button'
 												className='record-side-history-clear'
 												onClick={() => {
-													onClearSelectionHistory();
-													setHistoryNameCache({});
-													if (typeof window !== 'undefined') {
-														try {
-															window.localStorage.removeItem(HISTORY_NAME_CACHE_STORAGE_KEY);
-														} catch {
-															// ignore storage errors
-														}
-													}
+													clearSelectionLog();
 												}}
 												title='Clear selection history'>
 												Clear
@@ -331,20 +275,23 @@ export function Panel({
 										</span>
 									)}
 								</div>
-								{historyEntries.length > 0 ?
+								{selectionLog.length > 0 ?
 									<div className='record-side-history-list'>
-										{historyEntries.map((entry) => (
-											<button
-												type='button'
-												key={entry.key}
-												className={`record-side-history-item ${entry.key === activeKey ? 'active' : ''}`.trim()}
-												onClick={() => onSelectKey(entry.key)}
-												title={entry.key}>
-												<span className={`record-side-badge ${entry.type === 'firm' ? 'firm' : 'individual'}`}>{entry.type === 'firm' ? 'FIRM' : 'IND'}</span>
-												<span className='record-side-history-label'>{entry.label}</span>
-												<span className='record-side-history-crd'>{entry.crd}</span>
-											</button>
-										))}
+										{selectionLog.map((entry, idx) => {
+											const isActive = Boolean(entry.crd && activeKey && activeKey.endsWith(`:${entry.crd}`)) || entry.id === activeKey.split(':').pop();
+											return (
+												<button
+													type='button'
+													key={`${entry.id}-${entry.ts || idx}-${idx}`}
+													className={`record-side-history-item ${isActive ? 'active' : ''}`.trim()}
+													onClick={() => entry.key && onSelectKey(entry.key)}
+													title={entry.display}>
+													<span className={`record-side-badge ${entry.type === 'firm' ? 'firm' : 'individual'}`}>{entry.type === 'firm' ? 'FIRM' : 'IND'}</span>
+													<span className='record-side-history-label'>{entry.label}</span>
+													<span className='record-side-history-crd'>{entry.crd}</span>
+												</button>
+											);
+										})}
 									</div>
 								:	<div className='record-side-empty'>Selected CRDs will appear here.</div>}
 							</aside>

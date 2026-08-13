@@ -33,7 +33,7 @@ interface Props {
 	onFocusSelectionLogEntry?: (entry: SelectionLogEntry) => void;
 }
 
-type DetailTab = 'info' | 'log';
+type DetailTab = 'info' | 'json' | 'log';
 
 function maybeParseJson(value: unknown): unknown {
 	if (typeof value !== 'string') return value;
@@ -1421,6 +1421,11 @@ function RecordInfoView({
 			<div className='record-detail-wrapper'>
 				<div className='record-detail-view combined-record-detail-view'>
 					<section className='record-detail-hero'>
+						<div className='record-detail-subline'>
+							{mergedSecNumber[0]?.value ?
+								<span>CRD#: {crd}/SEC#: {mergedSecNumber[0].value}</span>
+							:	<span>CRD#: {crd}</span>}
+						</div>
 						{!isFirmRecord ?
 							<div className='record-detail-grid record-detail-hero-stats'>
 								{yearsExperience ?
@@ -1775,8 +1780,8 @@ function RecordInfoView({
 				</div>
 				<div className='record-detail-subline'>
 					{secNumber ?
-						<span>SEC#: {secNumber}</span>
-					:	null}
+						<span>CRD#: {crd}/SEC#: {secNumber}</span>
+					:	<span>CRD#: {crd}</span>}
 				</div>
 				{!isFirmRecord ?
 					<div className='record-detail-grid record-detail-hero-stats'>
@@ -2149,6 +2154,12 @@ export function StatusBox({
 							</button>
 							<button
 								type='button'
+								className={`record-detail-tab ${activeTab === 'json' ? 'active' : ''}`}
+								onClick={() => setActiveTab('json')}>
+								JSON
+							</button>
+							<button
+								type='button'
 								className={`record-detail-tab ${activeTab === 'log' ? 'active' : ''}`}
 								onClick={() => setActiveTab('log')}>
 								Log{hasSelectionLog ? ` (${selectionLog.length})` : ''}
@@ -2166,7 +2177,7 @@ export function StatusBox({
 							Clear
 						</button>
 					)}
-					{activeTab !== 'log' && fetchLog.length > 0 && (
+					{activeTab === 'json' && fetchLog.length > 0 && (
 						<button
 							className='clear-log-btn'
 							onClick={onClearLog}
@@ -2177,7 +2188,7 @@ export function StatusBox({
 				</div>
 			</div>
 
-			{activeTab === 'log' && !hasSelectionLog && fetchLog.length > 0 && <pre className='terminal-output'>{[...fetchLog].reverse().join('\n')}</pre>}
+			{activeTab === 'json' && fetchLog.length > 0 && <pre className='terminal-output'>{[...fetchLog].reverse().join('\n')}</pre>}
 
 			{panelLoading && activeTab === 'info' && (
 				<div
@@ -2278,26 +2289,10 @@ export function StatusBox({
 							})
 						}
 					</ul>
-					{detailJson && !panelLoading ?
-						<details className='selection-log-raw'>
-							<summary>Raw payload JSON</summary>
-							<div className='code-sample-wrap'>
-								<button
-									type='button'
-									className={`code-copy-btn ${jsonCopied ? 'is-copied' : ''}`}
-									onClick={handleCopyJson}
-									title={jsonCopied ? 'Copied!' : 'Copy code sample'}
-									aria-label={jsonCopied ? 'Code sample copied' : 'Copy code sample'}>
-									{jsonCopied ? '✓' : '⧉'}
-								</button>
-								<pre className='terminal-output json-detail'>{detailJson}</pre>
-							</div>
-						</details>
-					:	null}
 				</div>
 			)}
 
-			{detailJson && activeTab === 'log' && !hasSelectionLog && !panelLoading && (
+			{detailJson && activeTab === 'json' && !panelLoading && (
 				<div className='code-sample-wrap'>
 					<button
 						type='button'
