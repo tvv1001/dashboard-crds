@@ -2,7 +2,7 @@
  * Publish data/derived/global-graph-layout.json to Upstash Redis so Vercel
  * /api/global-graph can serve the chart page without a local disk artifact.
  *
- * Stores gzip+base64 payload split into chunks under:
+ * Stores brotli+base64 payload split into chunks under:
  *   dashboard:global-graph-layout:meta
  *   dashboard:global-graph-layout:chunk:0..n-1
  * and also attempts a single-key write when small enough.
@@ -13,7 +13,7 @@
  */
 import { promises as fs } from 'fs';
 import path from 'path';
-import { gzipSync } from 'zlib';
+import { brotliCompressSync } from 'zlib';
 import { config as loadEnv } from 'dotenv';
 import { Redis } from '@upstash/redis';
 
@@ -46,14 +46,14 @@ async function main() {
 
 	const raw = await fs.readFile(inPath);
 	const parsed = JSON.parse(raw.toString('utf-8')) as { stats?: unknown; generatedAt?: string; version?: number };
-	const gzipped = gzipSync(raw, { level: 9 });
-	const b64 = gzipped.toString('base64');
+	const compressed = brotliCompressSync(raw);
+	const b64 = compressed.toString('base64');
 	console.log(
 		JSON.stringify(
 			{
 				inPath,
 				rawBytes: raw.length,
-				gzipBytes: gzipped.length,
+				brBytes: compressed.length,
 				base64Chars: b64.length,
 				generatedAt: parsed.generatedAt,
 				version: parsed.version,
@@ -73,9 +73,9 @@ async function main() {
 	}
 	const meta = {
 		chunks: chunks.length,
-		encoding: 'gzip-base64',
+		encoding: 'br-base64',
 		bytes: raw.length,
-		gzipBytes: gzipped.length,
+		brBytes: compressed.length,
 		generatedAt: parsed.generatedAt || null,
 		version: parsed.version || null,
 		sourcePath: inPath,
@@ -88,8 +88,8 @@ async function main() {
 		process.stdout.write(`wrote chunk ${i + 1}/${chunks.length}\n`);
 	}
 
-	// Also try single-key gzip wrapper for simpler reads when REST allows it.
-	const single = `gzip:base64:${b64}`;
+	// Also try single-key br wrapper for simpler reads when REST allows it.
+	const single = `br:base64:${b64}`;
 	try {
 		await redis.set(layoutRedisKey, single);
 		console.log(`also wrote single key ${layoutRedisKey} (${single.length} chars)`);

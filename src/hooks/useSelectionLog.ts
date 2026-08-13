@@ -4,17 +4,7 @@ import type { SelectionLogEntry } from '../components/panel/StatusBox';
 const STORAGE_KEY = 'global-selection-log';
 
 export function useSelectionLog() {
-	const [selectionLog, setSelectionLogState] = useState<SelectionLogEntry[]>(() => {
-		if (typeof window === 'undefined') return [];
-		try {
-			const stored = window.localStorage.getItem(STORAGE_KEY);
-			if (stored) {
-				const parsed = JSON.parse(stored);
-				if (Array.isArray(parsed)) return parsed;
-			}
-		} catch {}
-		return [];
-	});
+	const [selectionLog, setSelectionLogState] = useState<SelectionLogEntry[]>([]);
 	const [loaded, setLoaded] = useState(false);
 	const loadedRef = useRef(false);
 	const queuedUpdates = useRef<Array<(prev: SelectionLogEntry[]) => SelectionLogEntry[]>>([]);

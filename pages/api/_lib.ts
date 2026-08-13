@@ -215,6 +215,18 @@ async function deleteCacheKey(key: string) {
 	await client.del(key);
 }
 
+export async function trackFirmConnections(firmIds: string[]) {
+	if (!firmIds || firmIds.length === 0) return;
+	const key = 'dashboard:collected_firms';
+	if (upstashRedisClient) {
+		await upstashRedisClient.sadd(key, ...(firmIds as [string, ...string[]]));
+		return;
+	}
+	const client = await getRedisClient();
+	if (!client) return;
+	await client.sAdd(key, firmIds);
+}
+
 async function scanKeysByPatterns(patterns: string[]) {
 	const normalizedPatterns = Array.from(new Set(patterns.filter(Boolean)));
 	const keys = new Set<string>();

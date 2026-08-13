@@ -1,7 +1,7 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
 import { promises as fs } from 'fs';
 import path from 'path';
-import { formatErrorMessage, hydrateFromUpstream, loadCombinedSavedPayloadBundle, normalizeRawPayload, removeSavedPayload } from './_lib';
+import { formatErrorMessage, hydrateFromUpstream, loadCombinedSavedPayloadBundle, normalizeRawPayload, removeSavedPayload, discoverFirmIdsFromPayload, trackFirmConnections } from './_lib';
 import { findOwnerReference, findEmploymentReference, type OwnerReference, type EmploymentReference } from './_graphIndex';
 
 function parseSavedKey(key: string) {
@@ -165,6 +165,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
 	try {
 		const bundle = await loadFirstAvailableBundle();
+		
+		// In the background, extract firm connections to reference later
+		if (bundle) {
+			const firmIds = discoverFirmIdsFromPayload(bundle);
+			if (firmIds.length > 0) {
+				trackFirmConnections(firmIds).catch(() => {});
+			}
+			// If it's a firm profile, check external APIs to see if data is new or changed
+			if (parsed && parsed.type === 'firm') {
+				hydrateFromUpstream('firm', parsed.crd).catch(() => {});
+			}
+		}
+
 		// Never surface an orphan card when Redis already has a live individual record,
 		// even if this CRD also appears as a firm owner reference.
 		return res.json({

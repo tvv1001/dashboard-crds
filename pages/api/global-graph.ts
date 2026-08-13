@@ -50,18 +50,18 @@ async function readLayoutFromDisk(): Promise<string | null> {
 async function readLayoutFromRedis(): Promise<{ body: string; source: string } | null> {
 	if (getRedisConnectionMode() === 'none') return null;
 
-	// Preferred: single-key full JSON (or gzip base64 wrapper).
+	// Preferred: single-key full JSON (or br base64 wrapper).
 	try {
 		const direct = await getCacheValue(layoutRedisKey);
 		if (direct && direct.length > 2) {
 			if (direct.trimStart().startsWith('{')) {
 				return { body: direct, source: `redis:${layoutRedisKey}` };
 			}
-			// gzip:base64:<payload>
-			if (direct.startsWith('gzip:base64:')) {
-				const { gunzipSync } = await import('zlib');
-				const raw = Buffer.from(direct.slice('gzip:base64:'.length), 'base64');
-				return { body: gunzipSync(raw).toString('utf-8'), source: `redis:${layoutRedisKey}:gzip` };
+			// br:base64:<payload>
+			if (direct.startsWith('br:base64:')) {
+				const { brotliDecompressSync } = await import('zlib');
+				const raw = Buffer.from(direct.slice('br:base64:'.length), 'base64');
+				return { body: brotliDecompressSync(raw).toString('utf-8'), source: `redis:${layoutRedisKey}:br` };
 			}
 		}
 	} catch (error) {
@@ -85,10 +85,10 @@ async function readLayoutFromRedis(): Promise<{ body: string; source: string } |
 			parts.push(part);
 		}
 		const joined = parts.join('');
-		if (meta.encoding === 'gzip-base64' || joined.startsWith('H4sI') || !joined.trimStart().startsWith('{')) {
-			const { gunzipSync } = await import('zlib');
-			const body = gunzipSync(Buffer.from(joined, 'base64')).toString('utf-8');
-			return { body, source: `redis:${layoutRedisMetaKey}:gzip-chunks` };
+		if (meta.encoding === 'br-base64' || !joined.trimStart().startsWith('{')) {
+			const { brotliDecompressSync } = await import('zlib');
+			const body = brotliDecompressSync(Buffer.from(joined, 'base64')).toString('utf-8');
+			return { body, source: `redis:${layoutRedisMetaKey}:br-chunks` };
 		}
 		return { body: joined, source: `redis:${layoutRedisMetaKey}:chunks` };
 	} catch (error) {
