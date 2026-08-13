@@ -2057,6 +2057,7 @@ button:disabled {
 	border-radius: var(--r-sm, 6px);
 	border: 1px solid rgba(56, 189, 248, 0.16);
 	background: rgba(30, 64, 175, 0.08);
+	height: 100%;
 }
 
 .raw-field-list-item {
@@ -2068,6 +2069,7 @@ button:disabled {
 	border-radius: var(--r-sm, 6px);
 	border: 1px solid rgba(56, 189, 248, 0.16);
 	background: rgba(30, 64, 175, 0.08);
+	height: 100%;
 }
 
 .raw-field-list-group .raw-field-list-item {
@@ -4479,6 +4481,16 @@ button:disabled {
 .node-detail-drawer.open {
 	transform: translateX(0);
 	visibility: visible;
+}
+.node-detail-drawer .disclosure-detail-list-compact {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 10px 12px;
+	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+.node-detail-drawer .raw-field-list {
+	grid-template-columns: auto;
 }
 .theme-light .node-detail-drawer {
 	background: #ffffff;
