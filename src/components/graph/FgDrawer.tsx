@@ -5,7 +5,7 @@ import { StatusBox, type SelectionLogEntry } from '../panel/StatusBox';
 interface FgDrawerProps {
 	drawerOpen: boolean;
 	setDrawerOpen: React.Dispatch<React.SetStateAction<boolean>>;
-	
+
 	// Search form props
 	searchQuery: string;
 	onSearchQueryChange: (q: string) => void;
@@ -23,10 +23,10 @@ interface FgDrawerProps {
 	panelActiveKey: string | null;
 	panelDetailJson: any;
 	panelLoading: boolean;
-	
+
 	// Callbacks
 	onSelectKey: (key: string) => void;
-	
+
 	// Optional Selection Log props (used by chart)
 	selectionLog?: SelectionLogEntry[];
 	onClearSelectionLog?: () => void;
@@ -51,7 +51,7 @@ export function FgDrawer({
 	onSelectKey,
 	selectionLog,
 	onClearSelectionLog,
-	onFocusSelectionLogEntry
+	onFocusSelectionLogEntry,
 }: FgDrawerProps) {
 	const [statusExpanded, setStatusExpanded] = useState<boolean>(true);
 
@@ -77,16 +77,9 @@ export function FgDrawer({
 	return (
 		<aside className={`node-detail-drawer${drawerOpen ? ' open' : ''}`}>
 			<div className='sidebar-header'>
-				<button
-					type='button'
-					className='drawer-close-btn'
-					onClick={() => setDrawerOpen(false)}
-					aria-label='Close details panel'>
-					✕
-				</button>
 				<form
 					className='fg-search'
-					style={{ marginBottom: '16px', display: 'flex', width: '100%' }}
+					style={{ display: 'flex', width: '100%' }}
 					onSubmit={onSearchSubmit}>
 					<input
 						className='fg-search-input'
@@ -107,9 +100,7 @@ export function FgDrawer({
 						➤
 					</button>
 				</form>
-				
-				{showTitleAndRoles && panelTitle ? <h1>{panelTitle}</h1> : null}
-				
+
 				{panelRoleRows.length > 0 && (
 					<div className='role-rows'>
 						{panelRoleRows.map((row) => (
@@ -122,10 +113,10 @@ export function FgDrawer({
 						))}
 					</div>
 				)}
-				
-				{panelError ? (
+
+				{panelError ?
 					<p className='fg-panel-error'>{panelError}</p>
-				) : null}
+				:	null}
 			</div>
 
 			<div className='sidebar-content'>
@@ -135,20 +126,18 @@ export function FgDrawer({
 					detailJson={panelDetailJson}
 					onSelectKey={onSelectKey}
 				/>
-				
+
 				<div className='drawer-status-toggle'>
-					<button 
+					<button
 						className='drawer-status-toggle-btn'
 						onClick={toggleStatusBox}
-						aria-expanded={statusExpanded}
-					>
+						aria-expanded={statusExpanded}>
 						<span>Status & Details</span>
 						<span className='toggle-icon'>{statusExpanded ? '▼' : '▶'}</span>
 					</button>
-					<div 
+					<div
 						className='drawer-status-content'
-						style={{ display: statusExpanded ? 'block' : 'none' }}
-					>
+						style={{ display: statusExpanded ? 'block' : 'none' }}>
 						<StatusBox
 							statusMsg={panelError || ''}
 							statusHtml=''
