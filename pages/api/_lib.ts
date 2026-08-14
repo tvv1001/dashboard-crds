@@ -183,8 +183,16 @@ export async function getCacheValue(key: string) {
 		});
 		
 		try {
-			const rawValue = await Promise.any([p1, p2]);
-			return decompressPayload(rawValue);
+			const rawValue = await new Promise((resolve, reject) => {
+				let rejectedCount = 0;
+				const handleReject = () => {
+					rejectedCount++;
+					if (rejectedCount === 2) reject(new Error("both failed"));
+				};
+				p1.then(resolve).catch(handleReject);
+				p2.then(resolve).catch(handleReject);
+			});
+			return decompressPayload(rawValue as string);
 		} catch (e) {
 			return null;
 		}
