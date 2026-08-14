@@ -10,6 +10,8 @@ const redisPassword = process.env.REDIS_PASSWORD;
 const isDev = process.env.NODE_ENV === 'development';
 const upstashRedisRestUrl = isDev ? undefined : process.env.UPSTASH_REDIS_REST_URL;
 const upstashRedisRestToken = isDev ? undefined : process.env.UPSTASH_REDIS_REST_TOKEN;
+const upstashRedisRestUrl2 = isDev ? undefined : process.env.UPSTASH_REDIS_REST_URL_2;
+const upstashRedisRestToken2 = isDev ? undefined : process.env.UPSTASH_REDIS_REST_TOKEN_2;
 const cacheTtlSeconds = Number(process.env.CACHE_TTL_SECONDS) || 3600;
 // The local `data/raw` disk cache/fallback has been removed entirely (deleted
 // from disk) — Redis is now the single source of truth for saved payloads.
@@ -24,6 +26,7 @@ const rawKeysIndexPath = path.join(localDerivedDir, 'raw-keys-index.json');
 const rawFileSuffix = '.json';
 const redisClient = redisUrl ? createClient({ url: redisUrl, password: redisPassword }) : null;
 const upstashRedisClient = upstashRedisRestUrl && upstashRedisRestToken ? new UpstashRedis({ url: upstashRedisRestUrl, token: upstashRedisRestToken }) : null;
+const upstashRedisClient2 = upstashRedisRestUrl2 && upstashRedisRestToken2 ? new UpstashRedis({ url: upstashRedisRestUrl2, token: upstashRedisRestToken2 }) : null;
 const rawKeysIndexBatchSize = 100;
 
 type SavedKeyType = 'individual' | 'firm';
@@ -72,7 +75,7 @@ export function formatErrorMessage(error: unknown) {
 }
 
 export function getRedisConnectionMode(): RedisConnectionMode {
-	if (upstashRedisClient) return 'upstash-rest';
+	if (upstashRedisClient2 || upstashRedisClient) return 'upstash-rest';
 	if (redisClient) return 'redis-url';
 	return 'none';
 }
@@ -171,14 +174,33 @@ function decompressPayload(value: string): string {
 export async function getCacheValue(key: string) {
 	let rawValue: any = null;
 	if (upstashRedisClient) {
-		const value = await upstashRedisClient.get(key);
-		if (value != null) {
-			rawValue = typeof value === 'string' ? value : JSON.stringify(value);
+		try {
+			const value = await upstashRedisClient.get(key);
+			if (value != null) {
+				rawValue = typeof value === 'string' ? value : JSON.stringify(value);
+			}
+		} catch (e) {
+			console.warn('Primary redis read failed', formatErrorMessage(e));
 		}
 	} else {
 		const client = await getRedisClient();
 		if (client) {
-			rawValue = await client.get(key);
+			try {
+				rawValue = await client.get(key);
+			} catch (e) {
+				console.warn('Native redis read failed', formatErrorMessage(e));
+			}
+		}
+	}
+
+	if (rawValue == null && upstashRedisClient2) {
+		try {
+			const value = await upstashRedisClient2.get(key);
+			if (value != null) {
+				rawValue = typeof value === 'string' ? value : JSON.stringify(value);
+			}
+		} catch (e) {
+			console.warn('Secondary redis read failed', formatErrorMessage(e));
 		}
 	}
 	
@@ -188,12 +210,13 @@ export async function getCacheValue(key: string) {
 
 export async function setCacheValue(key: string, value: string, ttlSeconds?: number) {
 	const finalValue = compressPayload(value);
-	if (upstashRedisClient) {
+	const activeUpstash = upstashRedisClient2 || upstashRedisClient;
+	if (activeUpstash) {
 		if (ttlSeconds && ttlSeconds > 0) {
-			await upstashRedisClient.set(key, finalValue, { ex: Math.floor(ttlSeconds) });
+			await activeUpstash.set(key, finalValue, { ex: Math.floor(ttlSeconds) });
 			return;
 		}
-		await upstashRedisClient.set(key, finalValue);
+		await activeUpstash.set(key, finalValue);
 		return;
 	}
 	const client = await getRedisClient();
@@ -206,9 +229,13 @@ export async function setCacheValue(key: string, value: string, ttlSeconds?: num
 }
 
 async function deleteCacheKey(key: string) {
-	if (upstashRedisClient) {
-		await upstashRedisClient.del(key);
-		return;
+	for (const client of [upstashRedisClient, upstashRedisClient2]) {
+		if (!client) continue;
+		try {
+			await client.del(key);
+		} catch (e) {
+			// ignore single client failure
+		}
 	}
 	const client = await getRedisClient();
 	if (!client) return;
@@ -218,8 +245,9 @@ async function deleteCacheKey(key: string) {
 export async function trackFirmConnections(firmIds: string[]) {
 	if (!firmIds || firmIds.length === 0) return;
 	const key = 'dashboard:collected_firms';
-	if (upstashRedisClient) {
-		await upstashRedisClient.sadd(key, ...(firmIds as [string, ...string[]]));
+	const activeUpstash = upstashRedisClient2 || upstashRedisClient;
+	if (activeUpstash) {
+		await activeUpstash.sadd(key, ...(firmIds as [string, ...string[]]));
 		return;
 	}
 	const client = await getRedisClient();
@@ -231,16 +259,23 @@ async function scanKeysByPatterns(patterns: string[]) {
 	const normalizedPatterns = Array.from(new Set(patterns.filter(Boolean)));
 	const keys = new Set<string>();
 
-	if (upstashRedisClient) {
-		for (const pattern of normalizedPatterns) {
-			let cursor = '0';
-			do {
-				const [nextCursor, batch] = await upstashRedisClient.scan(cursor, { match: pattern, count: 1000 });
-				for (const key of batch || []) {
-					keys.add(String(key));
+	if (upstashRedisClient || upstashRedisClient2) {
+		for (const client of [upstashRedisClient, upstashRedisClient2]) {
+			if (!client) continue;
+			try {
+				for (const pattern of normalizedPatterns) {
+					let cursor = '0';
+					do {
+						const [nextCursor, batch] = await client.scan(cursor, { match: pattern, count: 1000 });
+						for (const key of batch || []) {
+							keys.add(String(key));
+						}
+						cursor = String(nextCursor || '0');
+					} while (cursor !== '0');
 				}
-				cursor = String(nextCursor || '0');
-			} while (cursor !== '0');
+			} catch (e) {
+				console.warn('Scan failed on one of the clients', formatErrorMessage(e));
+			}
 		}
 		return Array.from(keys);
 	}
@@ -257,8 +292,15 @@ async function scanKeysByPatterns(patterns: string[]) {
 }
 
 export async function getRedisDbSize() {
-	if (upstashRedisClient) {
-		return await upstashRedisClient.dbsize();
+	if (redisClient || upstashRedisClient || upstashRedisClient2) {
+		let total = 0;
+		for (const client of [upstashRedisClient, upstashRedisClient2]) {
+			if (!client) continue;
+			try {
+				total += await client.dbsize();
+			} catch (e) {}
+		}
+		return total;
 	}
 	if (redisClient) {
 		const client = await getRedisClient();
@@ -357,7 +399,7 @@ export async function fetchWithCache(
 		}
 
 		const data = await resp.json();
-		if (redisClient || upstashRedisClient) {
+		if (redisClient || upstashRedisClient || upstashRedisClient2) {
 			try {
 				await setCacheValue(cacheKey, JSON.stringify(data), cacheTtlSeconds);
 			} catch (e) {
@@ -392,13 +434,13 @@ async function ensureLocalDerivedDir() {
 
 
 async function writeRawValueToRedis(rawKey: string, serializedPayload: string) {
-	if (!(upstashRedisClient || redisClient)) return;
+	if (!(upstashRedisClient || upstashRedisClient2 || redisClient)) return;
 	const compressed = zlib.brotliCompressSync(Buffer.from(serializedPayload, 'utf-8')).toString('base64');
 	await setCacheValue(rawKey, compressed);
 }
 
 async function readRawValueFromRedis(rawKey: string) {
-	if (!(upstashRedisClient || redisClient)) return null;
+	if (!(upstashRedisClient || upstashRedisClient2 || redisClient)) return null;
 	const val = await getCacheValue(rawKey);
 	if (!val) return null;
 	
@@ -417,7 +459,7 @@ async function readRawValueFromRedis(rawKey: string) {
 }
 
 async function listRawKeysFromRedis() {
-	if (!(upstashRedisClient || redisClient)) return [];
+	if (!(upstashRedisClient || upstashRedisClient2 || redisClient)) return [];
 	const keys = await scanKeysByPatterns(['finra:individual:*', 'finra:firm:*', 'sec:individual:*', 'sec:firm:*']);
 	return keys.map((key) => filenameToRawKey(String(key || ''))).filter((key) => /^(finra|sec):(individual|firm):\d+$/i.test(key));
 }
@@ -1419,7 +1461,7 @@ export async function readSeenKeys() {
 		return sanitized;
 	}
 
-	if (redisClient || upstashRedisClient) {
+	if (redisClient || upstashRedisClient || upstashRedisClient2) {
 		try {
 			const v = await getCacheValue('finra-sec:seenKeys');
 			if (v) return await sanitizeSeenKeys(JSON.parse(v));
@@ -1433,7 +1475,7 @@ export async function readSeenKeys() {
 
 export async function writeSeenKeys(obj: any) {
 	const payload = JSON.stringify(await readSeenKeysMerged(obj || {}));
-	if (redisClient || upstashRedisClient) {
+	if (redisClient || upstashRedisClient || upstashRedisClient2) {
 		try {
 			await setCacheValue('finra-sec:seenKeys', payload);
 			return;
