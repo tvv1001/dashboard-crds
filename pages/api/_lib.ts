@@ -262,7 +262,9 @@ export async function getRedisDbSize() {
 	}
 	if (redisClient) {
 		const client = await getRedisClient();
-		return await client.dbSize();
+		if (client) {
+			return await client.dbSize();
+		}
 	}
 	return 0;
 }
