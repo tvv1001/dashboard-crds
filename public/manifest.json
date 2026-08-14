@@ -1,0 +1,21 @@
+{
+	"name": "FINRA/SEC Data Dashboard",
+	"short_name": "Data Dashboard",
+	"description": "Entity resolution and intelligence platform for FINRA BrokerCheck and SEC AdviserInfo records",
+	"start_url": "/",
+	"display": "standalone",
+	"background_color": "#0d1117",
+	"theme_color": "#0d1117",
+	"icons": [
+		{
+			"src": "/icons/icon-192x192.png",
+			"sizes": "192x192",
+			"type": "image/png"
+		},
+		{
+			"src": "/icons/icon-512x512.png",
+			"sizes": "512x512",
+			"type": "image/png"
+		}
+	]
+}

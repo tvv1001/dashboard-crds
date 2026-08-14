@@ -247,7 +247,7 @@ export function Panel({
 					<div className='record-workspace-wrapper'>
 						<div className='record-workspace'>
 							<StatusBox
-								statusMsg={savedStatusMsg}
+								statusMsg={''}
 								statusHtml={statusHtml}
 								detailJson={detailJson}
 								panelLoading={panelLoading}
@@ -255,8 +255,8 @@ export function Panel({
 								fetchLog={fetchLog}
 								onClearLog={onClearLog}
 								onSelectKey={onSelectKey}
+								hideTabs={true}
 							/>
-
 							<aside className='record-side-panel'>
 								<div className='record-side-header'>
 									<h3 className='record-side-title'>Log list</h3>

@@ -31,6 +31,8 @@ interface Props {
 	selectionLog?: SelectionLogEntry[];
 	onClearSelectionLog?: () => void;
 	onFocusSelectionLogEntry?: (entry: SelectionLogEntry) => void;
+	hideTabs?: boolean;
+	hideJsonTab?: boolean;
 }
 
 type DetailTab = 'info' | 'json' | 'log' | null;
@@ -2086,6 +2088,8 @@ export function StatusBox({
 	selectionLog = [],
 	onClearSelectionLog,
 	onFocusSelectionLogEntry,
+	hideTabs,
+	hideJsonTab,
 }: Props) {
 	const [jsonCopied, setJsonCopied] = useState(false);
 	const [activeTab, setActiveTab] = useState<DetailTab>('info');
@@ -2108,7 +2112,7 @@ export function StatusBox({
 	const [logCopied, setLogCopied] = useState(false);
 
 	const hasSelectionLog = selectionLog.length > 0;
-	const showLogTab = Boolean(detailJson) || hasSelectionLog || fetchLog.length > 0;
+	const displayTab = hideTabs ? 'info' : activeTab;
 
 	const filteredSelectionLog = useMemo(() => {
 		const q = logFilter.trim().toLowerCase();
@@ -2124,9 +2128,9 @@ export function StatusBox({
 		try {
 			await navigator.clipboard.writeText(detailJson);
 			setJsonCopied(true);
-			window.setTimeout(() => setJsonCopied(false), 1200);
-		} catch {
-			setJsonCopied(false);
+			setTimeout(() => setJsonCopied(false), 2000);
+		} catch (err) {
+			console.error('Failed to copy detail JSON:', err);
 		}
 	}
 
@@ -2154,28 +2158,32 @@ export function StatusBox({
 	// Hide the empty details shell on mobile so Redis Search can sit in that space.
 	const isEmpty = !panelLoading && !detailJson && fetchLog.length === 0 && !hasSelectionLog;
 
+	const showLogTab = Boolean(detailJson) || hasSelectionLog || fetchLog.length > 0;
+
 	return (
 		<div className={`status-box${isEmpty ? ' is-empty' : ''}`.trim()}>
 			<div className='status-box-header'>
 				<div className='status-box-header-left'>
 					{statusMsg && <div className='status-msg'>{statusMsg}</div>}
-					{showLogTab && (
+					{showLogTab && !hideTabs && (
 						<div className='record-detail-tabs'>
 							<button
 								type='button'
-								className={`record-detail-tab ${activeTab === 'info' ? 'active' : ''}`}
+								className={`record-detail-tab ${displayTab === 'info' ? 'active' : ''}`}
 								onClick={() => handleTabClick('info')}>
 								Info
 							</button>
+							{!hideJsonTab && (
+								<button
+									type='button'
+									className={`record-detail-tab ${displayTab === 'json' ? 'active' : ''}`}
+									onClick={() => handleTabClick('json')}>
+									JSON
+								</button>
+							)}
 							<button
 								type='button'
-								className={`record-detail-tab ${activeTab === 'json' ? 'active' : ''}`}
-								onClick={() => handleTabClick('json')}>
-								JSON
-							</button>
-							<button
-								type='button'
-								className={`record-detail-tab ${activeTab === 'log' ? 'active' : ''}`}
+								className={`record-detail-tab ${displayTab === 'log' ? 'active' : ''}`}
 								onClick={() => handleTabClick('log')}>
 								Log{hasSelectionLog ? ` (${selectionLog.length})` : ''}
 							</button>
@@ -2183,7 +2191,7 @@ export function StatusBox({
 					)}
 				</div>
 				<div className='status-box-header-actions'>
-					{activeTab === 'log' && hasSelectionLog && (
+					{displayTab === 'log' && hasSelectionLog && (
 						<button
 							type='button'
 							className='clear-log-btn'
@@ -2192,7 +2200,7 @@ export function StatusBox({
 							Clear
 						</button>
 					)}
-					{activeTab === 'json' && fetchLog.length > 0 && (
+					{displayTab === 'json' && fetchLog.length > 0 && (
 						<button
 							className='clear-log-btn'
 							onClick={onClearLog}
@@ -2203,9 +2211,9 @@ export function StatusBox({
 				</div>
 			</div>
 
-			{activeTab === 'json' && fetchLog.length > 0 && <pre className='terminal-output'>{[...fetchLog].reverse().join('\n')}</pre>}
+			{displayTab === 'json' && fetchLog.length > 0 && <pre className='terminal-output'>{[...fetchLog].reverse().join('\n')}</pre>}
 
-			{panelLoading && activeTab === 'info' && (
+			{panelLoading && displayTab === 'info' && (
 				<div
 					className='panel-loading-state'
 					role='status'
@@ -2218,7 +2226,7 @@ export function StatusBox({
 				</div>
 			)}
 
-			{detailJson && activeTab === 'info' && !panelLoading && (
+			{detailJson && displayTab === 'info' && !panelLoading && (
 				<RecordInfoView
 					activeKey={activeKey}
 					detailJson={detailJson}
@@ -2226,7 +2234,7 @@ export function StatusBox({
 				/>
 			)}
 
-			{activeTab === 'log' && hasSelectionLog && (
+			{displayTab === 'log' && hasSelectionLog && (
 				<div className='selection-log'>
 					<div className='selection-log-toolbar'>
 						<span className='selection-log-title'>Selection Log</span>
@@ -2307,7 +2315,7 @@ export function StatusBox({
 				</div>
 			)}
 
-			{detailJson && activeTab === 'json' && !panelLoading && (
+			{detailJson && displayTab === 'json' && !panelLoading && (
 				<div className='code-sample-wrap'>
 					<button
 						type='button'
@@ -2321,7 +2329,7 @@ export function StatusBox({
 				</div>
 			)}
 
-			{!detailJson && statusHtml && activeTab === 'info' && (
+			{!detailJson && statusHtml && displayTab === 'info' && (
 				<div
 					className='status-html-content'
 					dangerouslySetInnerHTML={{ __html: statusHtml }}

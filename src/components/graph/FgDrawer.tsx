@@ -53,6 +53,26 @@ export function FgDrawer({
 	onClearSelectionLog,
 	onFocusSelectionLogEntry,
 }: FgDrawerProps) {
+	const [statusExpanded, setStatusExpanded] = useState(true);
+
+	useEffect(() => {
+		const stored = localStorage.getItem('fgDrawerStatusExpanded');
+		if (stored !== null) {
+			setStatusExpanded(stored === 'true');
+		} else {
+			if (window.innerWidth <= 720) {
+				setStatusExpanded(false);
+			} else {
+				setStatusExpanded(true);
+			}
+		}
+	}, []);
+
+	const toggleStatusBox = () => {
+		const nextState = !statusExpanded;
+		setStatusExpanded(nextState);
+		localStorage.setItem('fgDrawerStatusExpanded', String(nextState));
+	};
 
 	return (
 		<aside className={`node-detail-drawer${drawerOpen ? ' open' : ''}`}>
@@ -107,8 +127,9 @@ export function FgDrawer({
 					onSelectKey={onSelectKey}
 				/>
 
-				<div className='drawer-status-content'>
-					<StatusBox
+				<div className='drawer-status-toggle'>
+					<div className='drawer-status-content'>
+						<StatusBox
 							statusMsg={panelError || ''}
 							statusHtml=''
 							detailJson={panelDetailJson}
@@ -121,6 +142,7 @@ export function FgDrawer({
 							onClearSelectionLog={onClearSelectionLog}
 							onFocusSelectionLogEntry={onFocusSelectionLogEntry}
 						/>
+					</div>
 				</div>
 			</div>
 		</aside>
