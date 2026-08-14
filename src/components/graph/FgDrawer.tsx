@@ -53,26 +53,6 @@ export function FgDrawer({
 	onClearSelectionLog,
 	onFocusSelectionLogEntry,
 }: FgDrawerProps) {
-	const [statusExpanded, setStatusExpanded] = useState<boolean>(true);
-
-	useEffect(() => {
-		const stored = localStorage.getItem('fgDrawerStatusExpanded');
-		if (stored !== null) {
-			setStatusExpanded(stored === 'true');
-		} else {
-			if (window.innerWidth <= 720) {
-				setStatusExpanded(false);
-			} else {
-				setStatusExpanded(true);
-			}
-		}
-	}, []);
-
-	const toggleStatusBox = () => {
-		const nextState = !statusExpanded;
-		setStatusExpanded(nextState);
-		localStorage.setItem('fgDrawerStatusExpanded', String(nextState));
-	};
 
 	return (
 		<aside className={`node-detail-drawer${drawerOpen ? ' open' : ''}`}>
@@ -127,18 +107,8 @@ export function FgDrawer({
 					onSelectKey={onSelectKey}
 				/>
 
-				<div className='drawer-status-toggle'>
-					<button
-						className='drawer-status-toggle-btn'
-						onClick={toggleStatusBox}
-						aria-expanded={statusExpanded}>
-						<span>Status & Details</span>
-						<span className='toggle-icon'>{statusExpanded ? '▼' : '▶'}</span>
-					</button>
-					<div
-						className='drawer-status-content'
-						style={{ display: statusExpanded ? 'block' : 'none' }}>
-						<StatusBox
+				<div className='drawer-status-content'>
+					<StatusBox
 							statusMsg={panelError || ''}
 							statusHtml=''
 							detailJson={panelDetailJson}
@@ -151,7 +121,6 @@ export function FgDrawer({
 							onClearSelectionLog={onClearSelectionLog}
 							onFocusSelectionLogEntry={onFocusSelectionLogEntry}
 						/>
-					</div>
 				</div>
 			</div>
 		</aside>

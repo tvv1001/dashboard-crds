@@ -284,8 +284,8 @@ export async function fetchWithCache(
 	const crawlDelayMaxMs = Number(process.env.CRAWL_DELAY_MS_MAX) || Math.max(crawlDelayMinMs, 23000);
 	const crawlInitialDelayMs = Number(process.env.CRAWL_INITIAL_DELAY_MS) || 0;
 	const crawlMaxRetries = Number(process.env.CRAWL_MAX_RETRIES) || 4;
-	const crawl429DelayMinMs = Number(process.env.CRAWL_429_DELAY_MS_MIN) || 2 * 60 * 1000;
-	const crawl429DelayMaxMs = Number(process.env.CRAWL_429_DELAY_MS_MAX) || 4 * 60 * 1000;
+	const crawl429DelayMinMs = Number(process.env.CRAWL_429_DELAY_MS_MIN) || 5 * 60 * 1000;
+	const crawl429DelayMaxMs = Number(process.env.CRAWL_429_DELAY_MS_MAX) || 7 * 60 * 1000;
 
 	while (true) {
 		attempt += 1;

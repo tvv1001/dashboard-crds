@@ -13,7 +13,7 @@ export function NewCrdItem({ item, activeKey, onSelect }: Props) {
 
 	const preferredKey = sources.includes('finra') ? `finra:${type}:${crd}` : `sec:${type}:${crd}`;
 
-	const isActive = sources.some((src) => activeKey === `${src}:${type}:${crd}`);
+	const isActive = activeKey === String(crd) || activeKey === `${type}:${crd}` || activeKey.endsWith(`:${crd}`);
 
 	const rowSelection = (() => {
 		if (Array.isArray(savedFiles) && savedFiles.length > 0) {

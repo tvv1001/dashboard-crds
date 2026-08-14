@@ -1,5 +1,5 @@
 'use client';
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { parseCrdKey } from '../../lib/parseKey';
 import { bucketConnectionRows, extractConnectionRows, isCurrentConnectionRow } from './connectionData';
 import { deriveStatusBadge, deriveTerminatedBadge, type RecordStatusBadge } from '../../lib/statusBadge';
@@ -33,7 +33,7 @@ interface Props {
 	onFocusSelectionLogEntry?: (entry: SelectionLogEntry) => void;
 }
 
-type DetailTab = 'info' | 'json' | 'log';
+type DetailTab = 'info' | 'json' | 'log' | null;
 
 function maybeParseJson(value: unknown): unknown {
 	if (typeof value !== 'string') return value;
@@ -2089,6 +2089,21 @@ export function StatusBox({
 }: Props) {
 	const [jsonCopied, setJsonCopied] = useState(false);
 	const [activeTab, setActiveTab] = useState<DetailTab>('info');
+	
+	useEffect(() => {
+		const saved = localStorage.getItem('statusBoxActiveTab');
+		if (saved !== null) {
+			setActiveTab(saved === 'null' ? null : (saved as DetailTab));
+		} else if (window.innerWidth < 768) {
+			setActiveTab(null);
+		}
+	}, []);
+
+	const handleTabClick = (tab: DetailTab) => {
+		const next = activeTab === tab ? null : tab;
+		setActiveTab(next);
+		localStorage.setItem('statusBoxActiveTab', String(next));
+	};
 	const [logFilter, setLogFilter] = useState('');
 	const [logCopied, setLogCopied] = useState(false);
 
@@ -2149,19 +2164,19 @@ export function StatusBox({
 							<button
 								type='button'
 								className={`record-detail-tab ${activeTab === 'info' ? 'active' : ''}`}
-								onClick={() => setActiveTab('info')}>
+								onClick={() => handleTabClick('info')}>
 								Info
 							</button>
 							<button
 								type='button'
 								className={`record-detail-tab ${activeTab === 'json' ? 'active' : ''}`}
-								onClick={() => setActiveTab('json')}>
+								onClick={() => handleTabClick('json')}>
 								JSON
 							</button>
 							<button
 								type='button'
 								className={`record-detail-tab ${activeTab === 'log' ? 'active' : ''}`}
-								onClick={() => setActiveTab('log')}>
+								onClick={() => handleTabClick('log')}>
 								Log{hasSelectionLog ? ` (${selectionLog.length})` : ''}
 							</button>
 						</div>

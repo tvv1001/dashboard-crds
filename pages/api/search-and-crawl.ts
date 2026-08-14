@@ -129,7 +129,18 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 		if (!url) throw new Error(`Unsupported source detail URL for ${source}`);
 		const filename = detailFilenameForSource(source, type, crd);
 		const existing = await inspectSavedPayload(filename);
-		const data = await fetchJson(url, existing.exists);
+		
+		let data: any = null;
+		if (existing.exists) {
+			logs.push(`Skipping external detail fetch; already cached locally: ${filename}`);
+			const { loadSavedPayload } = await import('./_lib');
+			const raw = await loadSavedPayload(filename);
+			try { data = JSON.parse(raw || '{}'); } catch { data = {}; }
+			syncSummary.unchanged.push(filename);
+			return { filename, status: 'unchanged', payload: data };
+		}
+		
+		data = await fetchJson(url, false);
 		if (isEmptyPayload(data)) return null;
 		if (hasBlockingIndicators(data)) {
 			logs.push(`Detected blocking/upstream limitation message from ${source.toUpperCase()} ${crd}; skipping save`);
@@ -156,7 +167,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 		} else {
 			logs.push(`Saved new local file: ${filename}`);
 		}
-		return { filename, status: sync.status };
+		return { filename, status: sync.status, payload: data };
 	}
 
 	try {
@@ -172,8 +183,16 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 		for (const crd of seeds) {
 			logs.push(`\n=== Handling seed CRD ${crd} ===`);
 			let finraData = null;
+			const seedFilename = detailFilenameForSource('finra', 'individual', crd);
+			const seedExisting = await inspectSavedPayload(seedFilename);
 			try {
-				finraData = await fetchJson(`https://api.brokercheck.finra.org/search/individual/${crd}?includePrevious=true`);
+				if (seedExisting.exists) {
+					const { loadSavedPayload } = await import('./_lib');
+					const raw = await loadSavedPayload(seedFilename);
+					finraData = JSON.parse(raw || '{}');
+				} else {
+					finraData = await fetchJson(`https://api.brokercheck.finra.org/search/individual/${crd}?includePrevious=true`, false);
+				}
 			} catch (e: any) {
 				logs.push(`ERROR fetching FINRA detail for ${crd}: ${e?.message || e}`);
 				errors.push({ crd, message: e?.message || String(e) });

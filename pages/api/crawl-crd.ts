@@ -41,7 +41,19 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 		const url = buildEndpoint({ source, type, crd });
 		if (!url) throw new Error(`Unsupported source detail URL for ${source}`);
 		logs.push(`Fetching ${source.toUpperCase()} ${type} detail for CRD ${crd}`);
-		const data = await fetchWithCache(url);
+		const filename = detailFilenameForSource(source, type, crd);
+		const { inspectSavedPayload, loadSavedPayload } = await import('./_lib');
+		const existing = await inspectSavedPayload(filename);
+		
+		let data: any = null;
+		if (existing.exists) {
+			logs.push(`Skipping external detail fetch; already cached locally: ${filename}`);
+			const raw = await loadSavedPayload(filename);
+			try { data = JSON.parse(raw || '{}'); } catch { data = {}; }
+			return { saved: null, payload: data };
+		}
+		
+		data = await fetchWithCache(url, { forceRefresh: false });
 		if (isEmptyPayload(data)) {
 			logs.push(`Skipping save for empty response from ${source.toUpperCase()} ${crd}`);
 			return { saved: null, payload: data };
@@ -50,7 +62,7 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 			logs.push(`Detected blocking/upstream limitation message from ${source.toUpperCase()} ${crd}; skipping save`);
 			return { saved: null, payload: data };
 		}
-		const filename = detailFilenameForSource(source, type, crd);
+
 		const sync = await syncSavedPayload(filename, data);
 		if (sync.changed) {
 			savedFiles.push(filename);

@@ -134,7 +134,7 @@ export function Panel({
 					display: `${name} :: CRD# ${parsed.crd}`,
 					crd: parsed.crd,
 					key: activeKey,
-					ts: Date.now()
+					ts: Date.now(),
 				});
 			}
 		} catch {
@@ -259,7 +259,7 @@ export function Panel({
 
 							<aside className='record-side-panel'>
 								<div className='record-side-header'>
-									<h3 className='record-side-title'>Selection history</h3>
+									<h3 className='record-side-title'>Log list</h3>
 									{selectionLog.length > 0 && (
 										<span className='record-side-header-actions'>
 											<span className='record-side-badges'>{selectionLog.length}</span>

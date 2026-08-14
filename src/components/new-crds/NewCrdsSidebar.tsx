@@ -63,7 +63,7 @@ export function NewCrdsSidebar({ state, activeKey, onToggle, onDismiss, onSelect
 							className='button-secondary'
 							onClick={onToggle}
 							title='Hide'>
-							▶
+							⤯
 						</button>
 					</div>
 				</div>
@@ -73,11 +73,7 @@ export function NewCrdsSidebar({ state, activeKey, onToggle, onDismiss, onSelect
 				id='newCrdsBody'
 				className='new-crds-body'>
 				<div className='new-crds-summary'>
-					<div className='new-crds-frontier-line'>
-						{loading && !redisHighWater ?
-							'Loading Redis CRDs…'
-						:	`${totalSavedCrds.toLocaleString()} unique CRDs saved in Redis`}
-					</div>
+					<div className='new-crds-frontier-line'>{loading && !redisHighWater ? 'Loading Redis CRDs…' : `${totalSavedCrds.toLocaleString()} unique CRDs saved in Redis`}</div>
 				</div>
 				{error && (
 					<div className='status-error'>
