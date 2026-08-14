@@ -14,7 +14,7 @@ export function NewCrdsNotice({ count, onOpen }: Props) {
 			className='new-crds-notice'
 			type='button'
 			onClick={onOpen}>
-			<span className='new-crds-notice-label'>New CRDs ›</span>
+			<span className='new-crds-notice-label'>New CRDs &#8965;</span>
 			<span className='new-crds-notice-count'>{count}</span>
 		</button>
 	);

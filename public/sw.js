@@ -25,18 +25,17 @@ self.addEventListener('fetch', (event) => {
 		return;
 	}
 
-	// For API requests, use Network First, fallback to Cache
-	if (url.pathname.startsWith('/api/')) {
+	const isHtml = event.request.mode === 'navigate' || (event.request.headers.get('accept') || '').includes('text/html');
+
+	// For HTML pages and API requests, use Network First, fallback to Cache
+	if (isHtml || url.pathname.startsWith('/api/')) {
 		event.respondWith(
 			fetch(event.request)
 				.then((response) => {
-					// If the response is an error (like 429 or 500 from Upstash quota limits),
-					// and we have a cached version, we might want to throw to trigger the catch block.
-					// However, 429 is a valid HTTP response, so fetch() doesn't throw.
-					if (!response.ok) {
+					if (!response.ok && url.pathname.startsWith('/api/')) {
+						// For API, trigger catch on non-ok (e.g. 429 quota limits)
 						throw new Error(`HTTP error! status: ${response.status}`);
 					}
-					// Clone and cache the successful response
 					const responseClone = response.clone();
 					caches.open(CACHE_NAME).then((cache) => {
 						cache.put(event.request, responseClone);
@@ -44,35 +43,31 @@ self.addEventListener('fetch', (event) => {
 					return response;
 				})
 				.catch(async (err) => {
-					// Network failed or returned error status (e.g. Upstash blocked)
-					// Fallback to cache
 					const cache = await caches.open(CACHE_NAME);
 					const cachedResponse = await cache.match(event.request);
 					if (cachedResponse) {
 						return cachedResponse;
 					}
-					// If no cache, we have to throw or return a graceful failure
 					throw err;
 				})
 		);
 		return;
 	}
 
-	// For static assets and pages, use Stale-While-Revalidate or Network First
+	// For static assets (JS, CSS, images), use Cache First, fallback to Network
 	event.respondWith(
 		caches.match(event.request).then((cachedResponse) => {
-			const fetchPromise = fetch(event.request).then((networkResponse) => {
+			if (cachedResponse) {
+				return cachedResponse;
+			}
+			return fetch(event.request).then((networkResponse) => {
 				if (networkResponse.ok) {
 					caches.open(CACHE_NAME).then((cache) => {
 						cache.put(event.request, networkResponse.clone());
 					});
 				}
 				return networkResponse;
-			}).catch(() => {
-				// Ignore network errors for static assets if we have cache
 			});
-
-			return cachedResponse || fetchPromise;
 		})
 	);
 });

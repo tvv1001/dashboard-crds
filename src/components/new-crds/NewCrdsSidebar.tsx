@@ -63,7 +63,7 @@ export function NewCrdsSidebar({ state, activeKey, onToggle, onDismiss, onSelect
 							className='button-secondary'
 							onClick={onToggle}
 							title='Hide'>
-							⤯
+							&#8965;
 						</button>
 					</div>
 				</div>
