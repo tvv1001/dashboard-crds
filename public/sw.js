@@ -31,10 +31,16 @@ self.addEventListener('fetch', (event) => {
 	if (isHtml || url.pathname.startsWith('/api/')) {
 		event.respondWith(
 			fetch(event.request)
-				.then((response) => {
+				.then(async (response) => {
 					if (!response.ok && url.pathname.startsWith('/api/')) {
-						// For API, trigger catch on non-ok (e.g. 429 quota limits)
-						throw new Error(`HTTP error! status: ${response.status}`);
+						// For API, try to fallback to cache on non-ok (e.g. 429 quota limits, 500/503 errors)
+						const cache = await caches.open(CACHE_NAME);
+						const cachedResponse = await cache.match(event.request);
+						if (cachedResponse) {
+							return cachedResponse;
+						}
+						// If not in cache, return the original error response so the app can parse it
+						return response;
 					}
 					const responseClone = response.clone();
 					caches.open(CACHE_NAME).then((cache) => {
@@ -43,6 +49,7 @@ self.addEventListener('fetch', (event) => {
 					return response;
 				})
 				.catch(async (err) => {
+					// Hard network failure (e.g., offline)
 					const cache = await caches.open(CACHE_NAME);
 					const cachedResponse = await cache.match(event.request);
 					if (cachedResponse) {
@@ -62,8 +69,10 @@ self.addEventListener('fetch', (event) => {
 			}
 			return fetch(event.request).then((networkResponse) => {
 				if (networkResponse.ok) {
+					// Clone immediately before async caches.open to avoid "Response body is already used"
+					const responseToCache = networkResponse.clone();
 					caches.open(CACHE_NAME).then((cache) => {
-						cache.put(event.request, networkResponse.clone());
+						cache.put(event.request, responseToCache);
 					});
 				}
 				return networkResponse;
