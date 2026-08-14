@@ -172,6 +172,24 @@ function decompressPayload(value: string): string {
 }
 
 export async function getCacheValue(key: string) {
+	if (upstashRedisClient && upstashRedisClient2) {
+		const p1 = upstashRedisClient.get(key).then(v => {
+			if (v == null) throw new Error("not found");
+			return typeof v === 'string' ? v : JSON.stringify(v);
+		});
+		const p2 = upstashRedisClient2.get(key).then(v => {
+			if (v == null) throw new Error("not found");
+			return typeof v === 'string' ? v : JSON.stringify(v);
+		});
+		
+		try {
+			const rawValue = await Promise.any([p1, p2]);
+			return decompressPayload(rawValue);
+		} catch (e) {
+			return null;
+		}
+	}
+
 	let rawValue: any = null;
 	if (upstashRedisClient) {
 		try {
@@ -182,7 +200,7 @@ export async function getCacheValue(key: string) {
 		} catch (e) {
 			console.warn('Primary redis read failed', formatErrorMessage(e));
 		}
-	} else {
+	} else if (!upstashRedisClient2) {
 		const client = await getRedisClient();
 		if (client) {
 			try {
