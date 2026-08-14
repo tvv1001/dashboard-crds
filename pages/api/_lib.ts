@@ -808,10 +808,11 @@ function parseJsonDocumentLenient(raw: string): unknown {
 		throw firstError;
 	}
 }
-
 async function readSavedKeyIndexFile() {
 	try {
-		const raw = await fs.readFile(rawKeysIndexPath, 'utf-8');
+		const raw = await getCacheValue('finra-sec:cache:rawKeysIndex');
+		if (!raw) return null;
+		
 		const parsed = parseJsonDocumentLenient(raw);
 		const entriesSource =
 			Array.isArray(parsed) ? parsed
@@ -835,33 +836,25 @@ async function readSavedKeyIndexFile() {
 			:	null;
 		return { entries: sortSavedKeyStats(entries, 'date-desc'), generatedAt };
 	} catch (error) {
-		const err = error as NodeJS.ErrnoException;
-		if (err?.code === 'ENOENT') return null;
-		// Corrupt index must not 500 every /api/key — fall through to Redis rebuild.
-		console.warn('Failed to read saved-key index file', formatErrorMessage(error));
+		console.warn('Failed to read saved-key index from Redis cache', formatErrorMessage(error));
 		return null;
 	}
 }
 
 async function writeSavedKeyIndexFile(entries: SavedKeyStat[]) {
-	const dirOk = await ensureLocalDerivedDir();
-	if (!dirOk) return;
 	const payload = JSON.stringify(
 		{
 			generatedAt: new Date().toISOString(),
 			entries: sortSavedKeyStats(entries, 'date-desc'),
 		},
 		null,
-		2,
+		0,
 	);
-	// Atomic write: avoids truncated/concatenated JSON when multiple writers race.
 	try {
-		const tempPath = `${rawKeysIndexPath}.${process.pid}.${Date.now()}.tmp`;
-		await fs.writeFile(tempPath, payload, 'utf-8');
-		await fs.rename(tempPath, rawKeysIndexPath);
+		// Cache the full index in Redis for 12 hours so Vercel cold starts don't rescan
+		await setCacheValue('finra-sec:cache:rawKeysIndex', payload, 43200);
 	} catch (error) {
-		// Memory cache still works for the request; disk is best-effort on serverless.
-		console.warn('Failed to write saved-key index file', formatErrorMessage(error));
+		console.warn('Failed to write saved-key index to Redis', formatErrorMessage(error));
 	}
 }
 
