@@ -1,0 +1,13 @@
+{
+  "hits": {
+    "total": 1,
+    "hits": [
+      {
+        "_type": "_doc",
+        "_source": {
+          "iacontent": "{\"basicInformation\": {\"firmId\": 3227, \"firmName\": \"JOSEPHTHAL & CO., INC.\", \"otherNames\": [\"JOSEPHTHAL & CO INC\", \"ROSENKRANTZ, EHRENKRANTZ, LYON & ROSS INCORPORATED\", \"ROSENKRANTZ LYON & ROSS INCORPORATED\", \"JOSEPHTHAL LYON & ROSS INCORPORATED\", \"JOSEPHTHAL & CO., INC.\"], \"bcScope\": \"INACTIVE\", \"isLegacy\": \"N\", \"finraRegistered\": \"N\", \"districtName\": \"New York\", \"firmType\": \"Corporation\", \"formedState\": \"New York\", \"firmStatus\": \"Terminated\", \"regulator\": \"SEC\", \"firmStatusDate\": \"06/24/2002\", \"formedDate\": \"06/20/1956\", \"fiscalMonthEndCode\": \"March\", \"legacyReportStatus\": \"Not Requested\", \"advFilingDate\": \"06/28/2001\", \"hasPdf\": \"N\", \"bdSECNumber\": \"5651\"}, \"accountantSurpriseExams\": [], \"compilationData\": [{\"editionID\": 50301, \"type\": \"IA_FIRM_SEC\", \"generatedOn\": \"11/23/2024\"}, {\"editionID\": 50302, \"type\": \"IA_FIRM_STATE\", \"generatedOn\": \"11/23/2024\"}, {\"editionID\": 50303, \"type\": \"IA_INDVL\", \"generatedOn\": \"11/23/2024\"}], \"registrationStatus\": [{\"secJurisdiction\": \"SEC\", \"status\": \"Terminated\", \"effectiveDate\": \"2/7/2003\"}], \"noticeFilings\": [], \"exemptReportingAdvisers\": [], \"orgScopeStatusFlags\": {\"isSECRegistered\": \"N\", \"isStateRegistered\": \"N\", \"isERARegistered\": \"N\", \"isSECERARegistered\": \"N\", \"isStateERARegistered\": \"N\"}, \"brochures\": {\"part2ExemptFlag\": \" \", \"brochuredetails\": []}}"
+        }
+      }
+    ]
+  }
+}

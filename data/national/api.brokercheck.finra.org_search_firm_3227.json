@@ -1,0 +1,13 @@
+{
+  "hits": {
+    "total": 1,
+    "hits": [
+      {
+        "_type": "_doc",
+        "_source": {
+          "content": "{\"basicInformation\": {\"firmId\": 3227, \"firmName\": \"JOSEPHTHAL & CO., INC.\", \"otherNames\": [\"JOSEPHTHAL & CO INC\", \"ROSENKRANTZ, EHRENKRANTZ, LYON & ROSS INCORPORATED\", \"ROSENKRANTZ LYON & ROSS INCORPORATED\", \"JOSEPHTHAL LYON & ROSS INCORPORATED\", \"JOSEPHTHAL & CO., INC.\"], \"bcScope\": \"INACTIVE\", \"isLegacy\": \"N\", \"finraRegistered\": \"N\", \"districtName\": \"New York\", \"firmType\": \"Corporation\", \"formedState\": \"New York\", \"firmStatus\": \"Terminated\", \"regulator\": \"SEC\", \"firmStatusDate\": \"06/24/2002\", \"formedDate\": \"06/20/1956\", \"fiscalMonthEndCode\": \"March\", \"legacyReportStatus\": \"Not Requested\", \"bdSECNumber\": \"5651\"}, \"bdDisclosureFlag\": \"Y\", \"iaDisclosureFlag\": \"Y\", \"disclosures\": [{\"disclosureType\": \"Regulatory Event\", \"disclosureCount\": 32}, {\"disclosureType\": \"Arbitration\", \"disclosureCount\": 12}], \"registrations\": {\"approvedFinraRegistrationCount\": 0, \"approvedSECRegistrationCount\": 0, \"approvedSRORegistrationCount\": 0, \"approvedStateRegistrationCount\": 0, \"stateList\": [], \"businessTypeCount\": 0}, \"directOwners\": [{\"legalName\": \"JOSEPHTHAL CAPITAL GROUP, INC.\", \"position\": \"PARENT\", \"bcScope\": \"NotInScope\", \"crdNumber\": \"\"}, {\"legalName\": \"AGOSTA, SALVATORE FRANK\", \"position\": \"CHIEF FINANCIAL OFFICER\", \"bcScope\": \"Active\", \"crdNumber\": \"1253738\"}, {\"legalName\": \"FICHTNER, HENRY ARTHUR\", \"position\": \"NATIONAL MANAGER-RETAIL DIVISION-VICE PRESIDENT\", \"bcScope\": \"Expanded\", \"crdNumber\": \"1327009\"}, {\"legalName\": \"FITZGERALD, PAUL HENRY\", \"position\": \"CEO - CHAIRMAN - PRESIDENT - CHIEF OPERATING OFFICER - DIRECTOR\", \"bcScope\": \"Expanded\", \"crdNumber\": \"812775\"}, {\"legalName\": \"HURLEY, KEVIN BRADY\", \"position\": \"COMPLIANCE DIRECTOR\", \"bcScope\": \"InActive\", \"crdNumber\": \"1293748\"}, {\"legalName\": \"KRONENBERG, DAVID HIRSCH\", \"position\": \"CHIEF ADMINISTRATIVE OFFICER\", \"bcScope\": \"Active\", \"crdNumber\": \"1799665\"}, {\"legalName\": \"MATYCKAS, EDWARD STANLEY\", \"position\": \"CROP/SROP\", \"bcScope\": \"NotInScope\", \"crdNumber\": \"1405961\"}, {\"legalName\": \"MCCABE, DONALD GERARD\", \"position\": \"GENERAL COUNSEL - REGULATION & LITIGATION - ASSISTANT SECRETARY\", \"bcScope\": \"NotInScope\", \"crdNumber\": \"1367480\"}, {\"legalName\": \"MCNAMARA, DENNIS PATRICK\", \"position\": \"GENERAL COUNSEL - CORPORATE-VICE PRESIDENT\", \"bcScope\": \"InActive\", \"crdNumber\": \"2938486\"}]}"
+        }
+      }
+    ]
+  }
+}
