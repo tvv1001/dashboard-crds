@@ -210,15 +210,36 @@ export async function getCacheValue(key: string) {
 
 export async function setCacheValue(key: string, value: string, ttlSeconds?: number) {
 	const finalValue = compressPayload(value);
-	const activeUpstash = upstashRedisClient2 || upstashRedisClient;
-	if (activeUpstash) {
-		if (ttlSeconds && ttlSeconds > 0) {
-			await activeUpstash.set(key, finalValue, { ex: Math.floor(ttlSeconds) });
-			return;
+	let handled = false;
+	
+	if (upstashRedisClient) {
+		try {
+			if (ttlSeconds && ttlSeconds > 0) {
+				await upstashRedisClient.set(key, finalValue, { ex: Math.floor(ttlSeconds) });
+			} else {
+				await upstashRedisClient.set(key, finalValue);
+			}
+			handled = true;
+		} catch (e) {
+			console.warn('Primary redis write failed', formatErrorMessage(e));
 		}
-		await activeUpstash.set(key, finalValue);
-		return;
 	}
+	
+	if (upstashRedisClient2) {
+		try {
+			if (ttlSeconds && ttlSeconds > 0) {
+				await upstashRedisClient2.set(key, finalValue, { ex: Math.floor(ttlSeconds) });
+			} else {
+				await upstashRedisClient2.set(key, finalValue);
+			}
+			handled = true;
+		} catch (e) {
+			console.warn('Secondary redis write failed', formatErrorMessage(e));
+		}
+	}
+	
+	if (handled) return;
+
 	const client = await getRedisClient();
 	if (!client) return;
 	if (ttlSeconds && ttlSeconds > 0) {
@@ -245,11 +266,22 @@ async function deleteCacheKey(key: string) {
 export async function trackFirmConnections(firmIds: string[]) {
 	if (!firmIds || firmIds.length === 0) return;
 	const key = 'dashboard:collected_firms';
-	const activeUpstash = upstashRedisClient2 || upstashRedisClient;
-	if (activeUpstash) {
-		await activeUpstash.sadd(key, ...(firmIds as [string, ...string[]]));
-		return;
+	let handled = false;
+	
+	if (upstashRedisClient) {
+		try {
+			await upstashRedisClient.sadd(key, ...(firmIds as [string, ...string[]]));
+			handled = true;
+		} catch(e) {}
 	}
+	if (upstashRedisClient2) {
+		try {
+			await upstashRedisClient2.sadd(key, ...(firmIds as [string, ...string[]]));
+			handled = true;
+		} catch(e) {}
+	}
+	
+	if (handled) return;
 	const client = await getRedisClient();
 	if (!client) return;
 	await client.sAdd(key, firmIds);

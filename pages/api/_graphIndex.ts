@@ -231,28 +231,39 @@ type EmploymentEdge = { personCrd: string; personName: string; isCurrent: boolea
 
 let cachedSignature = '';
 let cachedIndex: Map<string, EmploymentEdge[]> | null = null;
+let cachedSeenPersonFirm: Set<string> | null = null;
+let cachedLastMtime = 0;
 let cachedIndexPromise: Promise<Map<string, EmploymentEdge[]>> | null = null;
 
 async function getEmploymentIndexSignature() {
 	const stats = await listSavedKeysWithStats({ limit: 0, type: 'individual', sort: 'date-desc' });
 	const newest = stats.keys[0];
-	return `${stats.totalCount}:${newest?.key || ''}:${Math.round(Number(newest?.mtime || 0))}`;
+	return {
+		signature: `${stats.totalCount}:${newest?.key || ''}:${Math.round(Number(newest?.mtime || 0))}`,
+		keys: stats.keys,
+	};
 }
 
-async function buildFirmEmployeeIndex(): Promise<Map<string, EmploymentEdge[]>> {
-	const { keys } = await listSavedKeysWithStats({ limit: 0, type: 'individual', sort: 'date-desc' });
+async function buildFirmEmployeeIndex(keys: SavedKeyStat[]): Promise<Map<string, EmploymentEdge[]>> {
+	const index = cachedIndex || new Map<string, EmploymentEdge[]>();
+	const seenPersonFirm = cachedSeenPersonFirm || new Set<string>();
+	
+	const newKeys = keys.filter(k => k.mtime > cachedLastMtime);
+	if (newKeys.length === 0 && cachedIndex) return index;
+
 	const byCrd = new Map<string, SavedKeyStat[]>();
-	for (const entry of keys) {
+	for (const entry of newKeys) {
 		const list = byCrd.get(entry.crd) || [];
 		list.push(entry);
 		byCrd.set(entry.crd, list);
 	}
 
-	const index = new Map<string, EmploymentEdge[]>();
-	const seenPersonFirm = new Set<string>();
-
-	await Promise.all(
-		Array.from(byCrd.entries()).map(async ([crd, entries]) => {
+	const entriesArray = Array.from(byCrd.entries());
+	const batchSize = 100;
+	
+	for (let i = 0; i < entriesArray.length; i += batchSize) {
+		const batch = entriesArray.slice(i, i + batchSize);
+		await Promise.all(batch.map(async ([crd, entries]) => {
 			for (const entry of entries) {
 				try {
 					const payload = await loadSavedPayload(entry.key);
@@ -281,19 +292,26 @@ async function buildFirmEmployeeIndex(): Promise<Map<string, EmploymentEdge[]>> 
 					continue;
 				}
 			}
-		}),
-	);
+		}));
+	}
+
+	let maxMtime = cachedLastMtime;
+	for (const k of newKeys) {
+		if (k.mtime > maxMtime) maxMtime = k.mtime;
+	}
+	cachedLastMtime = maxMtime;
+	cachedSeenPersonFirm = seenPersonFirm;
 
 	return index;
 }
 
 async function getFirmEmployeeIndex(): Promise<Map<string, EmploymentEdge[]>> {
-	const signature = await getEmploymentIndexSignature();
+	const { signature, keys } = await getEmploymentIndexSignature();
 	if (cachedIndex && cachedSignature === signature) return cachedIndex;
 	if (cachedIndexPromise && cachedSignature === signature) return cachedIndexPromise;
 
 	cachedSignature = signature;
-	cachedIndexPromise = buildFirmEmployeeIndex()
+	cachedIndexPromise = buildFirmEmployeeIndex(keys)
 		.then((index) => {
 			cachedIndex = index;
 			return index;
@@ -355,6 +373,7 @@ export type OwnerReference = {
 
 let cachedOwnerSignature = '';
 let cachedOwnerIndex: Map<string, OwnerReference> | null = null;
+let cachedOwnerLastMtime = 0;
 let cachedOwnerIndexPromise: Promise<Map<string, OwnerReference>> | null = null;
 
 async function getOwnerReferenceIndexSignature() {
@@ -367,7 +386,10 @@ async function getOwnerReferenceIndexSignature() {
 	} catch {
 		// data/national may not exist in every environment; treat as empty
 	}
-	return `${stats.totalCount}:${newest?.key || ''}:${Math.round(Number(newest?.mtime || 0))}:national${nationalFileCount}`;
+	return {
+		signature: `${stats.totalCount}:${newest?.key || ''}:${Math.round(Number(newest?.mtime || 0))}:national${nationalFileCount}`,
+		keys: stats.keys,
+	};
 }
 
 // FINRA's directOwners/indirectOwners rows store legalName as "LAST, FIRST
@@ -450,12 +472,18 @@ async function indexOwnersFromNationalSnapshots(index: Map<string, OwnerReferenc
 	);
 }
 
-async function buildOwnerReferenceIndex(): Promise<Map<string, OwnerReference>> {
-	const { keys } = await listSavedKeysWithStats({ limit: 0, type: 'firm', sort: 'date-desc' });
-	const index = new Map<string, OwnerReference>();
+async function buildOwnerReferenceIndex(keys: SavedKeyStat[]): Promise<Map<string, OwnerReference>> {
+	const index = cachedOwnerIndex || new Map<string, OwnerReference>();
+	const newKeys = keys.filter(k => k.mtime > cachedOwnerLastMtime);
+	
+	if (newKeys.length === 0 && cachedOwnerIndex) {
+		return index;
+	}
 
-	await Promise.all(
-		keys.map(async (entry) => {
+	const batchSize = 100;
+	for (let i = 0; i < newKeys.length; i += batchSize) {
+		const batch = newKeys.slice(i, i + batchSize);
+		await Promise.all(batch.map(async (entry) => {
 			try {
 				const payload = await loadSavedPayload(entry.key);
 				const normalized = normalizeRawPayload(payload) as Record<string, unknown>;
@@ -463,21 +491,29 @@ async function buildOwnerReferenceIndex(): Promise<Map<string, OwnerReference>> 
 			} catch {
 				// skip unreadable entries
 			}
-		}),
-	);
+		}));
+	}
 
-	await indexOwnersFromNationalSnapshots(index);
+	if (!cachedOwnerIndex) {
+		await indexOwnersFromNationalSnapshots(index);
+	}
+
+	let maxMtime = cachedOwnerLastMtime;
+	for (const k of newKeys) {
+		if (k.mtime > maxMtime) maxMtime = k.mtime;
+	}
+	cachedOwnerLastMtime = maxMtime;
 
 	return index;
 }
 
 async function getOwnerReferenceIndex(): Promise<Map<string, OwnerReference>> {
-	const signature = await getOwnerReferenceIndexSignature();
+	const { signature, keys } = await getOwnerReferenceIndexSignature();
 	if (cachedOwnerIndex && cachedOwnerSignature === signature) return cachedOwnerIndex;
 	if (cachedOwnerIndexPromise && cachedOwnerSignature === signature) return cachedOwnerIndexPromise;
 
 	cachedOwnerSignature = signature;
-	cachedOwnerIndexPromise = buildOwnerReferenceIndex()
+	cachedOwnerIndexPromise = buildOwnerReferenceIndex(keys)
 		.then((index) => {
 			cachedOwnerIndex = index;
 			return index;
