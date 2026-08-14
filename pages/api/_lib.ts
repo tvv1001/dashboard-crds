@@ -256,6 +256,17 @@ async function scanKeysByPatterns(patterns: string[]) {
 	return Array.from(keys);
 }
 
+export async function getRedisDbSize() {
+	if (upstashRedisClient) {
+		return await upstashRedisClient.dbsize();
+	}
+	if (redisClient) {
+		const client = await getRedisClient();
+		return await client.dbSize();
+	}
+	return 0;
+}
+
 function cacheKeyForUrl(url: string) {
 	return `finra-sec:cache:${encodeURIComponent(url)}`;
 }

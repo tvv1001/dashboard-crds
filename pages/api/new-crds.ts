@@ -3,7 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { spawn, type ChildProcessByStdio } from 'child_process';
 import type { Readable } from 'stream';
-import { formatErrorMessage, getCacheValue, getRedisConnectionMode, listSavedKeysWithStats, loadSavedPayload, setCacheValue } from './_lib';
+import { formatErrorMessage, getCacheValue, getRedisConnectionMode, getRedisDbSize, listSavedKeysWithStats, loadSavedPayload, setCacheValue } from './_lib';
 
 type SavedSummaryGroup = {
 	id: string;
@@ -109,7 +109,8 @@ async function collectRedisHighWaterSummary() {
 		};
 	}
 
-	const { keys, uniqueTotalCrds } = await listSavedKeysWithStats({ limit: 0, sort: 'crd-desc' });
+	const { keys } = await listSavedKeysWithStats({ limit: 0, sort: 'crd-desc' });
+	const uniqueTotalCrds = await getRedisDbSize();
 	const grouped = new Map<string, NewCrdItem>();
 	for (const entry of keys) {
 		const crd = sanitizePositiveInt(entry.crd);
