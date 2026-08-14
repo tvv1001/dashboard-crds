@@ -8,10 +8,10 @@ import { toProperCaseName } from '../../src/lib/format';
 const redisUrl = process.env.REDIS_URL;
 const redisPassword = process.env.REDIS_PASSWORD;
 const isDev = process.env.NODE_ENV === 'development';
-const upstashRedisRestUrl = isDev ? undefined : process.env.UPSTASH_REDIS_REST_URL;
-const upstashRedisRestToken = isDev ? undefined : process.env.UPSTASH_REDIS_REST_TOKEN;
-const upstashRedisRestUrl2 = isDev ? undefined : process.env.UPSTASH_REDIS_REST_URL_2;
-const upstashRedisRestToken2 = isDev ? undefined : process.env.UPSTASH_REDIS_REST_TOKEN_2;
+const upstashRedisRestUrl = isDev ? undefined : (process.env.UPSTASH_REDIS_REST_URL_3 || process.env.CRD_UPSTASH_URL_1 || process.env.UPSTASH_REDIS_REST_URL);
+const upstashRedisRestToken = isDev ? undefined : (process.env.UPSTASH_REDIS_REST_TOKEN_3 || process.env.CRD_UPSTASH_TOKEN_1 || process.env.UPSTASH_REDIS_REST_TOKEN);
+const upstashRedisRestUrl2 = isDev ? undefined : (process.env.UPSTASH_REDIS_REST_URL_4 || process.env.CRD_UPSTASH_URL_2 || process.env.UPSTASH_REDIS_REST_URL_2);
+const upstashRedisRestToken2 = isDev ? undefined : (process.env.UPSTASH_REDIS_REST_TOKEN_4 || process.env.CRD_UPSTASH_TOKEN_2 || process.env.UPSTASH_REDIS_REST_TOKEN_2);
 const cacheTtlSeconds = Number(process.env.CACHE_TTL_SECONDS) || 3600;
 // The local `data/raw` disk cache/fallback has been removed entirely (deleted
 // from disk) — Redis is now the single source of truth for saved payloads.
@@ -293,11 +293,24 @@ async function scanKeysByPatterns(patterns: string[]) {
 
 export async function getRedisDbSize() {
 	if (redisClient || upstashRedisClient || upstashRedisClient2) {
+		const CACHE_KEY = 'dashboard:cached-crd-count';
+		try {
+			const cached = await getCacheValue(CACHE_KEY);
+			if (cached != null) return Number(cached);
+		} catch (e) {}
+
 		let total = 0;
 		for (const client of [upstashRedisClient, upstashRedisClient2]) {
 			if (!client) continue;
 			try {
 				total += await client.dbsize();
+			} catch (e) {}
+		}
+		
+		// Only write back to cache if we have both configured, ensuring environments with only one connection don't overwrite with a partial count
+		if (upstashRedisClient && upstashRedisClient2) {
+			try {
+				await setCacheValue(CACHE_KEY, String(total), 86400);
 			} catch (e) {}
 		}
 		return total;
