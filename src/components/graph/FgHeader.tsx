@@ -4,33 +4,21 @@ interface FgHeaderProps {
 	focusLabel?: string | null;
 	focusCrd?: string | null;
 	showFocusReadout: boolean;
-	
+
 	showDrawerToggle: boolean;
 	drawerOpen: boolean;
 	setDrawerOpen: React.Dispatch<React.SetStateAction<boolean>>;
-	
+
 	errorMessage?: string | null;
 	searchBanner?: { query: string; count: number } | null;
 	setSearchBanner: (val: null) => void;
 }
 
-export function FgHeader({
-	focusLabel,
-	focusCrd,
-	showFocusReadout,
-	showDrawerToggle,
-	drawerOpen,
-	setDrawerOpen,
-	errorMessage,
-	searchBanner,
-	setSearchBanner
-}: FgHeaderProps) {
+export function FgHeader({ focusLabel, focusCrd, showFocusReadout, showDrawerToggle, drawerOpen, setDrawerOpen, errorMessage, searchBanner, setSearchBanner }: FgHeaderProps) {
 	return (
 		<header className='fg-header'>
 			<div className='fg-header-bar'>
-				<div className='fg-header-controls'>
-					{/* Search moved to details panel */}
-				</div>
+				<div className='fg-header-controls'>{/* Search moved to details panel */}</div>
 
 				<div className={`fg-focus-readout${showFocusReadout ? ' fg-focus-readout--visible' : ''}`}>
 					{focusLabel ?
@@ -54,7 +42,6 @@ export function FgHeader({
 					)}
 				</div>
 			</div>
-			{errorMessage && <div className='fg-search-error'>{errorMessage}</div>}
 			{searchBanner && (
 				<div className='fg-search-banner'>
 					<span>
