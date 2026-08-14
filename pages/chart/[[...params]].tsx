@@ -425,6 +425,8 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 		globalLayoutAnimId = null;
 	}
 	if (graph.order < 2) return;
+	// Skip expensive iterative layout on large precomputed global graphs
+	if (graph.order > 3000) return;
 
 	const nCount = graph.order;
 	const dense = nCount > 300;
