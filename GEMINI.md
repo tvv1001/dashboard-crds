@@ -103,6 +103,9 @@ The application integrates Google Gemini AI (`@google/generative-ai`) for entity
 ## Key Development Commands
 
 ```bash
+# Spin up local Redis cache using Docker
+docker-compose up -d
+
 # Start Express API (port 3000) and Next.js dev server (port 3001) concurrently
 pnpm dev
 
@@ -113,6 +116,9 @@ pnpm analyze-with-gemini <key> [prompt]
 npm run query-derived-crds
 npm run query-high-water-crds
 npm run audit-external-crds
+
+# Upload legacy local JSON files from data/raw/ to the new Redis cache
+npx tsx scripts/upload-local-to-redis.ts
 ```
 
 ---

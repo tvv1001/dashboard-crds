@@ -12,6 +12,7 @@
 		"dev:server": "node src/server.mjs",
 		"query-derived-crds": "tsx scripts/query-derived-crds.ts",
 		"audit-external-crds": "tsx scripts/audit-external-crds.ts",
+		"upload-local": "tsx scripts/upload-local-to-redis.ts",
 		"query-high-water-crds": "tsx scripts/query-high-water-crds.ts",
 		"query-sequential-gap-crds": "tsx scripts/query-sequential-gap-crds.ts",
 		"query-common-name-crds": "tsx scripts/query-common-name-crds.ts",
