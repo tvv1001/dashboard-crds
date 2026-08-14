@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { saveRawPayload } from '../pages/api/_lib';
+import { saveRawFile } from '../pages/api/_lib';
 
 const rawDir = path.resolve(process.cwd(), 'data', 'raw');
 
@@ -35,7 +35,7 @@ async function uploadLocalToRedis() {
 					key = key.replace('api.adviserinfo.sec.gov_search_firm_', 'sec:firm:');
 				}
 				
-				await saveRawPayload(key, payload);
+				await saveRawFile(key, payload);
 				uploaded++;
 				
 				if (uploaded % 1000 === 0) {

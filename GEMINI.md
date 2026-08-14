@@ -12,7 +12,7 @@ This repository (`Data-finra-sec`) is a data ingestion, entity resolution, and i
 - **No Local Raw Disk Storage**: Raw payload disk persistence (`data/raw/`) has been removed. **Redis is the single source of truth** for all saved FINRA and SEC payloads.
 - **Direct Redis Operations**: All data reading, writing, updates, and indexing must use the Redis cache abstraction layer in `pages/api/_lib.ts`:
   - `loadSavedPayload(key)` — Reads raw source payload for a given key.
-  - `saveRawPayload(key, payload)` — Writes raw source payload to Redis cache.
+  - `saveRawFile(key, payload)` — Writes raw source payload to Redis cache.
   - `loadCombinedSavedPayloadBundle(key)` — Reads both FINRA and SEC payloads for a given CRD and returns a merged bundle.
   - `deleteCacheKey(key)` — Removes a key from Redis cache.
   - `listSavedKeysWithStats(options)` — Retrieves indexed Redis key statistics.
@@ -63,7 +63,7 @@ If a CRD is missing or corrupt in Redis cache, query both upstream detail endpoi
 Upon fetching valid upstream payloads:
 1. Validate that the payload is non-empty and free of blocking indicators using `isEmptyPayload()` and `hasBlockingIndicators()`.
 2. Format payload into the exact expected JSON wrapper (`{ finraBrokerCheck: data }` or `{ secInvestmentAdvisor: data }`).
-3. Save directly to Redis cache using `saveRawPayload(key, payload)`.
+3. Save directly to Redis cache using `saveRawFile(key, payload)`.
 4. Do NOT mutate or reformat the JSON schema before writing to Redis.
 
 ---
