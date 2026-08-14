@@ -447,47 +447,47 @@ function decorateEmploymentItems(rows: any[]): any[] {
 // individual payload's employment history (see pages/api/_graphIndex.ts).
 // Fetch it here via the read-only graph-expansion endpoint so firm detail
 // views can show current/previous person connections.
-function useFirmEmployeeConnections(crd: string, enabled: boolean, combinedBundle: any) {
+function useFirmEmployeeConnections(crd: string, enabled: boolean) {
 	const [state, setState] = useState<{ current: any[]; previous: any[]; loading: boolean } | null>(null);
 
 	React.useEffect(() => {
-		if (!enabled || !crd || !combinedBundle) {
+		if (!enabled || !crd) {
 			setState(null);
 			return;
 		}
-		
-		const current: any[] = [];
-		const previous: any[] = [];
-		const owners: any[] = [];
-		
-		for (const source of ['finra', 'sec']) {
-			const record = combinedBundle.sources?.[source];
-			if (record?.found && record?.payload) {
-				const p = record.payload;
-				if (Array.isArray(p.directOwners)) owners.push(...p.directOwners);
-				if (Array.isArray(p.indirectOwners)) owners.push(...p.indirectOwners);
-			}
-		}
-		
-		const seen = new Set();
-		for (const owner of owners) {
-			const ownerCrd = owner.crdNumber || owner.ownerCrd || owner.ownerCrdNumber || owner.ownerCRDNb;
-			const textCrd = String(ownerCrd || '').trim().replace(/^0+/, '') || '0';
-			if (!textCrd || textCrd === '0' || !/^\d+$/.test(textCrd)) continue;
-			if (seen.has(textCrd)) continue;
-			seen.add(textCrd);
-			
-			const name = owner.ownerName || owner.legalName || owner.name || '';
-			const row = { individualName: name, crd: textCrd, __subtitleOverride: String(owner.position || '').trim() };
-			current.push(row);
-		}
-		
-		setState({
-			current: sortRowsByLabel(current),
-			previous: sortRowsByLabel(previous),
-			loading: false,
-		});
-	}, [crd, enabled, combinedBundle]);
+		let cancelled = false;
+		setState({ current: [], previous: [], loading: true });
+		fetch(`/api/finra/expand/${encodeURIComponent(`firm:${crd}`)}?hops=1`)
+			.then((res) => (res.ok ? res.json() : null))
+			.then((data) => {
+				if (cancelled || !data) return;
+				const nodes = Array.isArray(data.nodes) ? data.nodes : [];
+				const links = Array.isArray(data.links) ? data.links : [];
+				const nodeById = new Map(nodes.map((n: any) => [n.id, n]));
+				const firmId = `firm:${crd}`;
+				const current: any[] = [];
+				const previous: any[] = [];
+				for (const link of links) {
+					if (!link || link.relationship !== 'employment' || link.target !== firmId) continue;
+					const person = nodeById.get(link.source) as any;
+					if (!person) continue;
+					const cityState = formatAddress({ city: person.city, state: person.state });
+					const row = { individualName: person.label, crd: person.crd, __subtitleOverride: cityState };
+					(link.isCurrent ? current : previous).push(row);
+				}
+				setState({
+					current: sortRowsByLabel(current),
+					previous: sortRowsByLabel(previous),
+					loading: false,
+				});
+			})
+			.catch(() => {
+				if (!cancelled) setState({ current: [], previous: [], loading: false });
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [crd, enabled]);
 
 	return state;
 }
@@ -651,6 +651,8 @@ const RAW_TOP_LEVEL_SKIP_KEYS = new Set([
 	'registeredStates',
 	'registrations',
 	'currentConnections',
+	'noticeFilings',
+	'accountantSurpriseExams',
 	'previousConnections',
 	'currentEmployments',
 	'currentIAEmployments',
@@ -867,6 +869,71 @@ function RawFieldRow({ label, value, compact = false }: { label: string; value: 
 }
 
 // Surfaces every remaining field from a source payload that isn't already
+function AccountantSurpriseExamsSection({ exams }: { exams: any[] }) {
+	if (!exams || !exams.length) return null;
+	return (
+		<section className='record-detail-section record-detail-section--sec'>
+			<h4 className='record-detail-section-title'>
+				Accountant Surprise Exams ({exams.length})
+				<span className='record-detail-inline-tag record-detail-inline-tag--sec'>SEC</span>
+			</h4>
+			<div className='disclosure-detail-list'>
+				{exams.map((exam, index) => (
+					<div
+						className='disclosure-detail-card disclosure-card-item'
+						key={`exam-${index}`}>
+						<div className='disclosure-detail-card-header'>
+							<span className='disclosure-detail-card-title'>{exam.accountantFirmName || 'Unknown Accountant Firm'}</span>
+						</div>
+						<div className='disclosure-detail-card-meta'>
+							{exam.filingDate ? (
+								<span>Filing Date: {exam.filingDate}</span>
+							) : null}
+							{exam.fileStatus ? (
+								<span>File Status: {exam.fileStatus}</span>
+							) : null}
+							{exam.encryptedFilingID ? (
+								<span>Encrypted ID: {exam.encryptedFilingID}</span>
+							) : null}
+						</div>
+					</div>
+				))}
+			</div>
+		</section>
+	);
+}
+
+function NoticeFilingsSection({ filings }: { filings: any[] }) {
+	if (!filings || !filings.length) return null;
+	return (
+		<section className='record-detail-section record-detail-section--sec'>
+			<h4 className='record-detail-section-title'>
+				Notice Filings ({filings.length})
+				<span className='record-detail-inline-tag record-detail-inline-tag--sec'>SEC</span>
+			</h4>
+			<div className='disclosure-detail-list'>
+				{filings.map((filing, index) => (
+					<div
+						className='disclosure-detail-card disclosure-card-item'
+						key={`notice-filing-${index}`}>
+						<div className='disclosure-detail-card-header'>
+							<span className='disclosure-detail-card-title'>{filing.jurisdiction || 'Unknown Jurisdiction'}</span>
+						</div>
+						<div className='disclosure-detail-card-meta'>
+							{filing.status ? (
+								<span>Status: {filing.status}</span>
+							) : null}
+							{filing.effectiveDate ? (
+								<span>Effective: {filing.effectiveDate}</span>
+							) : null}
+						</div>
+					</div>
+				))}
+			</div>
+		</section>
+	);
+}
+
 // covered by a curated section, so nothing in the raw FINRA/SEC JSON is
 // silently hidden from the UI (e.g. noticeFilings, compilationData,
 // exemptReportingAdvisers, orgScopeStatusFlags, brochures, accountantSurpriseExams).
@@ -1212,7 +1279,7 @@ function RecordInfoView({
 	const parsedKey = parseCrdKey(activeKey);
 	const rawPayload = maybeParseJson(detailJson);
 	const combinedBundle = rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload) ? (rawPayload as Record<string, any>) : null;
-	const employeeConnections = useFirmEmployeeConnections(parsedKey?.crd || '', parsedKey?.type === 'firm', combinedBundle);
+	const employeeConnections = useFirmEmployeeConnections(parsedKey?.crd || '', parsedKey?.type === 'firm');
 	// Only treat as orphan when there is no live FINRA/SEC source payload.
 	// Some records appear both as firm owner refs and as full BrokerCheck people;
 	// a stale/cached orphan flag must not hide the real Redis detail.
@@ -1631,6 +1698,12 @@ function RecordInfoView({
 						body={finraBody}
 						source='finra'
 					/>
+					{hasGenuineSecContent && secBody?.noticeFilings && Array.isArray(secBody.noticeFilings) && secBody.noticeFilings.length > 0 && (
+						<NoticeFilingsSection filings={secBody.noticeFilings} />
+					)}
+					{hasGenuineSecContent && secBody?.accountantSurpriseExams && Array.isArray(secBody.accountantSurpriseExams) && secBody.accountantSurpriseExams.length > 0 && (
+						<AccountantSurpriseExamsSection exams={secBody.accountantSurpriseExams} />
+					)}
 					{hasGenuineSecContent && (
 						<RawFieldGroups
 							title='Additional SEC details'

@@ -5,9 +5,9 @@ import { createClient } from 'redis';
 import { Redis as UpstashRedis } from '@upstash/redis';
 import { toProperCaseName } from '../../src/lib/format';
 
-const redisUrl = process.env.REDIS_URL;
-const redisPassword = process.env.REDIS_PASSWORD;
 const isDev = process.env.NODE_ENV === 'development';
+const redisUrl = isDev ? process.env.REDIS_URL : undefined;
+const redisPassword = isDev ? process.env.REDIS_PASSWORD : undefined;
 const upstashRedisRestUrl = isDev ? undefined : (process.env.UPSTASH_REDIS_REST_URL_3 || process.env.CRD_UPSTASH_URL_1 || process.env.UPSTASH_REDIS_REST_URL);
 const upstashRedisRestToken = isDev ? undefined : (process.env.UPSTASH_REDIS_REST_TOKEN_3 || process.env.CRD_UPSTASH_TOKEN_1 || process.env.UPSTASH_REDIS_REST_TOKEN);
 const upstashRedisRestUrl2 = isDev ? undefined : (process.env.UPSTASH_REDIS_REST_URL_4 || process.env.CRD_UPSTASH_URL_2 || process.env.UPSTASH_REDIS_REST_URL_2);
@@ -358,10 +358,19 @@ export async function getRedisDbSize() {
 		} catch (e) {}
 
 		let total = 0;
+		let usingUpstash = false;
 		for (const client of [upstashRedisClient, upstashRedisClient2]) {
 			if (!client) continue;
+			usingUpstash = true;
 			try {
 				total += await client.dbsize();
+			} catch (e) {}
+		}
+		
+		if (!usingUpstash) {
+			try {
+				const client = await getRedisClient();
+				if (client) total = await client.dbSize();
 			} catch (e) {}
 		}
 		
@@ -529,7 +538,7 @@ async function readRawValueFromRedis(rawKey: string) {
 	}
 }
 
-async function listRawKeysFromRedis() {
+export async function listRawKeysFromRedis() {
 	if (!(upstashRedisClient || upstashRedisClient2 || redisClient)) return [];
 	const keys = await scanKeysByPatterns(['finra:individual:*', 'finra:firm:*', 'sec:individual:*', 'sec:firm:*']);
 	return keys.map((key) => filenameToRawKey(String(key || ''))).filter((key) => /^(finra|sec):(individual|firm):\d+$/i.test(key));
@@ -554,7 +563,7 @@ export function filenameToRawKey(filename: string) {
 		.replace(/\.json$/i, '');
 }
 
-function parseSavedRawKey(rawKey: string) {
+export function parseSavedRawKey(rawKey: string) {
 	const match = String(rawKey || '')
 		.trim()
 		.match(/^(finra|sec):(individual|firm):(\d+)$/i);
