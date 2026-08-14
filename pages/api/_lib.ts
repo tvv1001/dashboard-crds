@@ -1,6 +1,6 @@
+import zlib from "zlib";
 import { promises as fs } from 'fs';
 import path from 'path';
-import zlib from 'zlib';
 import { createClient } from 'redis';
 import { Redis as UpstashRedis } from '@upstash/redis';
 import { toProperCaseName } from '../../src/lib/format';
@@ -377,14 +377,30 @@ async function ensureLocalDerivedDir() {
 	}
 }
 
+
 async function writeRawValueToRedis(rawKey: string, serializedPayload: string) {
 	if (!(upstashRedisClient || redisClient)) return;
-	await setCacheValue(rawKey, serializedPayload);
+	const compressed = zlib.brotliCompressSync(Buffer.from(serializedPayload, 'utf-8')).toString('base64');
+	await setCacheValue(rawKey, compressed);
 }
 
 async function readRawValueFromRedis(rawKey: string) {
 	if (!(upstashRedisClient || redisClient)) return null;
-	return await getCacheValue(rawKey);
+	const val = await getCacheValue(rawKey);
+	if (!val) return null;
+	
+	const trimmed = val.trim();
+	// If it starts with { or [, it's raw JSON (uncompressed legacy)
+	if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+		return trimmed;
+	}
+	
+	try {
+		return zlib.brotliDecompressSync(Buffer.from(trimmed, 'base64')).toString('utf-8');
+	} catch (err) {
+		console.warn(`Failed to decompress raw key ${rawKey}`, err);
+		return null;
+	}
 }
 
 async function listRawKeysFromRedis() {

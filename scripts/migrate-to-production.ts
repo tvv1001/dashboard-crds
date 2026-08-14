@@ -1,3 +1,4 @@
+import zlib from "zlib";
 import { createClient } from 'redis';
 import { Redis as UpstashRedis } from '@upstash/redis';
 import dotenv from 'dotenv';
@@ -34,42 +35,46 @@ async function migrate() {
 	let migratedCount = 0;
 	let errorCount = 0;
 	
-	for (let i = 0; i < keys.length; i++) {
-		const key = keys[i];
-		try {
-			// Handle different types of keys if necessary, but standard payload is string
-			const type = await localRedis.type(key);
-			
-			if (type === 'string') {
-				const val = await localRedis.get(key);
-				if (val) {
-					// Use REST API to set the raw string (Upstash parses json automatically if it can, but set raw works)
-					// We'll use set with the raw string
-					await upstashRedis.set(key, val);
-					migratedCount++;
+	// Process in chunks of 100 to stay under 1MB payload limits and use very few requests
+	const CHUNK_SIZE = 100;
+	
+	for (let i = 0; i < keys.length; i += CHUNK_SIZE) {
+		const chunk = keys.slice(i, i + CHUNK_SIZE);
+		const msetPayload: Record<string, string> = {};
+		let hasKeys = false;
+		
+		for (const key of chunk) {
+			try {
+				const type = await localRedis.type(key);
+				if (type === 'string') {
+					const val = await localRedis.get(key);
+					if (val) {
+						// Compress using Brotli and encode to base64
+						const compressed = zlib.brotliCompressSync(Buffer.from(val, 'utf-8')).toString('base64');
+						msetPayload[key] = compressed;
+						hasKeys = true;
+					}
 				}
-			} else if (type === 'hash') {
-				const val = await localRedis.hGetAll(key);
-				if (val && Object.keys(val).length > 0) {
-					await upstashRedis.hset(key, val);
-					migratedCount++;
-				}
-			} else {
-				console.log(`Skipping key ${key} of unsupported type ${type}`);
+			} catch (err) {
+				console.error(`Failed to read key ${key} from local:`, err);
+				errorCount++;
 			}
-			
-			if (migratedCount % 500 === 0) {
-				console.log(`Progress: Migrated ${migratedCount} keys...`);
+		}
+		
+		if (hasKeys) {
+			try {
+				// MSET uses exactly 1 request for the entire chunk!
+				await upstashRedis.mset(msetPayload);
+				migratedCount += Object.keys(msetPayload).length;
+				
+				console.log(`Progress: Migrated ${migratedCount} / ${keys.length} keys...`);
+				
+				// Sleep to respect the REST API (just in case)
+				await new Promise(resolve => setTimeout(resolve, 200));
+			} catch (err: any) {
+				console.error(`Failed to MSET chunk starting at ${chunk[0]}: ${err.message}`);
+				errorCount += chunk.length;
 			}
-			
-			// Small sleep to avoid Upstash rate limits (1000 requests per second is typical, but let's be safe)
-			if (i % 50 === 0) {
-				await new Promise((resolve) => setTimeout(resolve, 100));
-			}
-			
-		} catch (err: any) {
-			console.error(`Failed to migrate key ${key}: ${err.message}`);
-			errorCount++;
 		}
 	}
 	
