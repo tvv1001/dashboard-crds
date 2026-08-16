@@ -56,7 +56,7 @@ export function getReadOnlyRedisClientInstance(): ReadOnlyClient | null {
 				// @ts-ignore
 				const res = await client.scan(cursor, { MATCH: match, COUNT: count });
 				// res is [nextCursor, keys]
-				return res as [string, string[]];
+				return res as unknown as [string, string[]];
 			},
 			dbsize: async () => {
 				await ensure();
@@ -114,13 +114,13 @@ export function getReadOnlyRedisClientInstance(): ReadOnlyClient | null {
 				// Upstash scan(cursor, { match, count }) returns [nextCursor, batch]
 				// @ts-ignore
 				const res = await c.scan(cursor, { match: opts?.match, count: opts?.count });
-				return res as [string, string[]];
+				return res as unknown as [string, string[]];
 			} catch (err) {
 				if (mirror && c === primary) {
 					try {
 						// @ts-ignore
 						const res2 = await mirror.scan(cursor, { match: opts?.match, count: opts?.count });
-						return res2 as [string, string[]];
+						return res2 as unknown as [string, string[]];
 					} catch (_) {}
 				}
 				throw err;
