@@ -200,11 +200,11 @@ function decompressPayload(value: string): string {
 
 export async function getCacheValue(key: string) {
 	if (upstashRedisClient && upstashRedisClient2) {
-		const p1 = upstashRedisClient.get(key).then((v) => {
+		const p1 = upstashRedisClient.get(key).then((v: unknown) => {
 			if (v == null) throw new Error('not found');
 			return typeof v === 'string' ? v : JSON.stringify(v);
 		});
-		const p2 = upstashRedisClient2.get(key).then((v) => {
+		const p2 = upstashRedisClient2.get(key).then((v: unknown) => {
 			if (v == null) throw new Error('not found');
 			return typeof v === 'string' ? v : JSON.stringify(v);
 		});
