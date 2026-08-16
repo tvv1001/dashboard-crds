@@ -2,6 +2,7 @@ import express from 'express';
 import fetch from 'node-fetch';
 import { createClient } from 'redis';
 import { Redis as UpstashRedis } from '@upstash/redis';
+import { getReadOnlyRedisClientInstance } from '../lib/redisClient';
 import { promises as fs } from 'fs';
 import { spawn } from 'child_process';
 import path from 'path';
@@ -10,8 +11,11 @@ const router = express.Router();
 
 const redisUrl = process.env.REDIS_URL;
 const redisPassword = process.env.REDIS_PASSWORD;
-const upstashRedisRestUrl = process.env.UPSTASH_REDIS_REST_URL;
-const upstashRedisRestToken = process.env.UPSTASH_REDIS_REST_TOKEN;
+// Prefer canonical env names: UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_URL_MIRROR
+const upstashRedisRestUrl = process.env.UPSTASH_REDIS_REST_URL || process.env.CRD_UPSTASH_URL_1;
+const upstashRedisRestToken = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.CRD_UPSTASH_TOKEN_1;
+const upstashRedisRestUrl2 = process.env.UPSTASH_REDIS_REST_URL_MIRROR || process.env.UPSTASH_REDIS_REST_URL_2 || process.env.CRD_UPSTASH_URL_2;
+const upstashRedisRestToken2 = process.env.UPSTASH_REDIS_REST_TOKEN_MIRROR || process.env.UPSTASH_REDIS_REST_TOKEN_2 || process.env.CRD_UPSTASH_TOKEN_2;
 const cacheTtlSeconds = Number(process.env.CACHE_TTL_SECONDS) || 3600;
 const localRawDir = path.resolve(process.cwd(), 'data', 'raw');
 const localRawBakDir = path.join(localRawDir, 'bak');
@@ -20,7 +24,19 @@ const rawKeysIndexPath = path.join(localDerivedDir, 'raw-keys-index.json');
 const rawKeysIndexCacheTtlMs = Number(process.env.RAW_KEYS_INDEX_CACHE_TTL_MS) || 5 * 60 * 1000;
 const rawFileSuffix = '.json';
 const redisClient = redisUrl ? createClient({ url: redisUrl, password: redisPassword }) : null;
-const upstashRedisClient = upstashRedisRestUrl && upstashRedisRestToken ? new UpstashRedis({ url: upstashRedisRestUrl, token: upstashRedisRestToken }) : null;
+// Read-only Upstash client wrapper
+const upstashRedisClient = getReadOnlyRedisClientInstance();
+const upstashRedisClient2 = null;
+const ALLOW_REDIS_WRITES = Boolean(process.env.ALLOW_REDIS_WRITES && String(process.env.ALLOW_REDIS_WRITES) !== '0');
+let writableUpstashClient = null;
+let writableUpstashClient2 = null;
+if (ALLOW_REDIS_WRITES) {
+	try {
+		const { Redis: UpstashWritable } = require('@upstash/redis');
+		if (upstashRedisRestUrl && upstashRedisRestToken) writableUpstashClient = new UpstashWritable({ url: upstashRedisRestUrl, token: upstashRedisRestToken });
+		if (upstashRedisRestUrl2 && upstashRedisRestToken2) writableUpstashClient2 = new UpstashWritable({ url: upstashRedisRestUrl2, token: upstashRedisRestToken2 });
+	} catch (e) {}
+}
 // Crawl throttling and retry configuration.
 // First uncached requests run immediately so the UI can show early results, while
 // retries still use the configured backoff window.
@@ -69,13 +85,18 @@ async function getCacheValue(key) {
 }
 
 async function setCacheValue(key, value, ttlSeconds) {
-	if (upstashRedisClient) {
-		if (ttlSeconds && ttlSeconds > 0) {
-			await upstashRedisClient.set(key, value, { ex: Math.floor(ttlSeconds) });
+	if (!ALLOW_REDIS_WRITES) return;
+	if (writableUpstashClient) {
+		try {
+			if (ttlSeconds && ttlSeconds > 0) {
+				await writableUpstashClient.set(key, value, { ex: Math.floor(ttlSeconds) });
+				return;
+			}
+			await writableUpstashClient.set(key, value);
 			return;
+		} catch (e) {
+			console.warn('Writable upstash primary failed', e?.message || e);
 		}
-		await upstashRedisClient.set(key, value);
-		return;
 	}
 	const client = await getRedisClient();
 	if (!client) return;

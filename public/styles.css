@@ -3642,6 +3642,7 @@ button:disabled {
 .new-crds-mobile-toggle {
 	display: none;
 }
+
 .new-crds-sidebar .button-secondary {
 	background: var(--surface-3);
 	color: var(--text-secondary);
