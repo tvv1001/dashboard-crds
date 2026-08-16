@@ -29,8 +29,10 @@ const rawKeysIndexPath = path.join(localDerivedDir, 'raw-keys-index.json');
 const rawFileSuffix = '.json';
 const redisClient = redisUrl ? createClient({ url: redisUrl, password: redisPassword }) : null;
 // read-only Upstash client (may proxy to mirror/local as configured)
-const upstashRedisClient = getReadOnlyRedisClientInstance();
-const upstashRedisClient2 = null;
+// typed as `any` so existing call-sites that optionally use a secondary
+// client continue to compile when a mirror is not configured.
+const upstashRedisClient: any = getReadOnlyRedisClientInstance();
+const upstashRedisClient2: any = null;
 // Allow enabling writes via env when you want this app to perform writes again.
 const ALLOW_REDIS_WRITES = Boolean(process.env.ALLOW_REDIS_WRITES && String(process.env.ALLOW_REDIS_WRITES) !== '0');
 // writable Upstash clients (only created when writes are allowed)
