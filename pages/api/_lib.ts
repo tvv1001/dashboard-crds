@@ -385,8 +385,58 @@ async function scanKeysByPatterns(patterns: string[]) {
 }
 
 export async function getRedisDbSize() {
+	const CACHE_KEY = 'dashboard:cached-crd-count';
+
+	// In development (localhost) prefer reading from local redis only.
+	if (isDev && redisClient) {
+		try {
+			const client = await getRedisClient();
+			if (client) {
+				try {
+					const v = await client.get(CACHE_KEY);
+					if (v != null) return Number(decompressPayload(typeof v === 'string' ? v : JSON.stringify(v)));
+				} catch (e) {
+					// ignore and fall back to dbSize
+				}
+				try {
+					return await client.dbSize();
+				} catch (e) {
+					// ignore
+				}
+			}
+		} catch (e) {
+			// ignore
+		}
+		return 0;
+	}
+
+	// In production-ish setups prefer explicit Upstash primary first (mirror may lag)
+	try {
+		const { Redis: UpstashRedis } = require('@upstash/redis');
+		if (upstashRedisRestUrl && upstashRedisRestToken) {
+			try {
+				const primary = new UpstashRedis({ url: upstashRedisRestUrl, token: upstashRedisRestToken });
+				const v = await primary.get(CACHE_KEY);
+				if (v != null) return Number(decompressPayload(typeof v === 'string' ? v : JSON.stringify(v)));
+			} catch (e) {
+				// ignore primary read failure
+			}
+		}
+		if (upstashRedisRestUrl2 && upstashRedisRestToken2) {
+			try {
+				const mirror = new UpstashRedis({ url: upstashRedisRestUrl2, token: upstashRedisRestToken2 });
+				const v2 = await mirror.get(CACHE_KEY);
+				if (v2 != null) return Number(decompressPayload(typeof v2 === 'string' ? v2 : JSON.stringify(v2)));
+			} catch (e) {
+				// ignore mirror read failure
+			}
+		}
+	} catch (e) {
+		// ignore if upstash client cannot be constructed
+	}
+
+	// Fallback to previous behavior: cached value via read-only client or dbsize
 	if (redisClient || upstashRedisClient || upstashRedisClient2) {
-		const CACHE_KEY = 'dashboard:cached-crd-count';
 		try {
 			const cached = await getCacheValue(CACHE_KEY);
 			if (cached != null) return Number(cached);
@@ -412,6 +462,7 @@ export async function getRedisDbSize() {
 		// Read-only deployment: do not write cached DB size back to Redis.
 		return total;
 	}
+
 	if (redisClient) {
 		const client = await getRedisClient();
 		if (client) {
@@ -419,6 +470,92 @@ export async function getRedisDbSize() {
 		}
 	}
 	return 0;
+}
+
+export async function getCachedCrdCounts() {
+	const CACHE_KEY = 'dashboard:cached-crd-count';
+	const result: { local: number | null; upstashPrimary: number | null; upstashMirror: number | null } = {
+		local: null,
+		upstashPrimary: null,
+		upstashMirror: null,
+	};
+
+	// If running in development (localhost), prefer local redis only.
+	if (isDev) {
+		if (redisClient) {
+			try {
+				const client = await getRedisClient();
+				if (client) {
+					const v = await client.get(CACHE_KEY);
+					if (v != null) {
+						const dec = decompressPayload(typeof v === 'string' ? v : JSON.stringify(v));
+						const n = Number(dec);
+						result.local = Number.isFinite(n) ? n : null;
+					}
+				}
+			} catch (e) {
+				console.warn('Failed to read local redis cached count', formatErrorMessage(e));
+			}
+		}
+
+		return result;
+	}
+
+	// Upstash primary
+	// Read Upstash primary and mirror separately (mirror may lag)
+	try {
+		const { Redis: UpstashRedis } = require('@upstash/redis');
+		if (upstashRedisRestUrl && upstashRedisRestToken) {
+			try {
+				const primary = new UpstashRedis({ url: upstashRedisRestUrl, token: upstashRedisRestToken });
+				const v = await primary.get(CACHE_KEY);
+				if (v != null) {
+					const raw = typeof v === 'string' ? v : JSON.stringify(v);
+					const dec = decompressPayload(raw);
+					const n = Number(dec);
+					result.upstashPrimary = Number.isFinite(n) ? n : null;
+				}
+			} catch (e) {
+				console.warn('Failed to read primary upstash cached count', formatErrorMessage(e));
+			}
+		}
+
+		if (upstashRedisRestUrl2 && upstashRedisRestToken2) {
+			try {
+				const mirror = new UpstashRedis({ url: upstashRedisRestUrl2, token: upstashRedisRestToken2 });
+				const v2 = await mirror.get(CACHE_KEY);
+				if (v2 != null) {
+					const raw2 = typeof v2 === 'string' ? v2 : JSON.stringify(v2);
+					const dec2 = decompressPayload(raw2);
+					const n2 = Number(dec2);
+					result.upstashMirror = Number.isFinite(n2) ? n2 : null;
+				}
+			} catch (e) {
+				console.warn('Failed to read mirror upstash cached count', formatErrorMessage(e));
+			}
+		}
+	} catch (e) {
+		// upstash client require failed - ignore
+	}
+
+	// Local/native redis
+	if (redisClient) {
+		try {
+			const client = await getRedisClient();
+			if (client) {
+				const v = await client.get(CACHE_KEY);
+				if (v != null) {
+					const dec = decompressPayload(typeof v === 'string' ? v : JSON.stringify(v));
+					const n = Number(dec);
+					result.local = Number.isFinite(n) ? n : null;
+				}
+			}
+		} catch (e) {
+			console.warn('Failed to read local redis cached count', formatErrorMessage(e));
+		}
+	}
+
+	return result;
 }
 
 function cacheKeyForUrl(url: string) {
