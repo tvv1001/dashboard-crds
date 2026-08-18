@@ -522,9 +522,7 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 		// on-screen spacing roughly consistent across every ring.
 		const ringRadii: number[] = [];
 		for (let r = 0; r < ringCount; r++) {
-			ringRadii.push(
-				orbitRadiusForHub({ hubType, childCount: unique.length, ringIndex: r, ringCount, preferSingleRing: preferSingle }).radius,
-			);
+			ringRadii.push(orbitRadiusForHub({ hubType, childCount: unique.length, ringIndex: r, ringCount, preferSingleRing: preferSingle }).radius);
 		}
 		const radiusSum = ringRadii.reduce((s, r) => s + r, 0) || 1;
 		const ringSizes = ringRadii.map((r) => Math.max(1, Math.round((r / radiusSum) * unique.length)));
@@ -1623,10 +1621,7 @@ export default function GlobalGraphPage() {
 		graph.forEachNode((node, attrs) => {
 			const inactive = attrs.inactive === true;
 			const nodeType = String(attrs.nodeType || 'unknown');
-			const typeBase =
-				typeof attrs.typeBaseColor === 'string' && attrs.typeBaseColor ?
-					String(attrs.typeBaseColor)
-				:	nodeTypeBaseColor(nodeType, inactive);
+			const typeBase = typeof attrs.typeBaseColor === 'string' && attrs.typeBaseColor ? String(attrs.typeBaseColor) : nodeTypeBaseColor(nodeType, inactive);
 
 			const isSelected = selected.has(node) || node === focusId;
 			const isRevealed = visited.has(node) || attrs.revealed === true;
@@ -2157,6 +2152,15 @@ export default function GlobalGraphPage() {
 			egoModeRef.current = null;
 			const nMap = nodeIndexRef.current;
 			const seedSet = new Set(CHART_PRELOAD_SEEDS.map((s) => String(s.crd)));
+			// Precompute neighbor sets among seeds from the catalog payload edges
+			const seedNeighborMap = new Map<string, Set<string>>();
+			for (const id of seedSet) seedNeighborMap.set(id, new Set<string>());
+			for (const e of payload.edges || []) {
+				const s = String(e.source);
+				const t = String(e.target);
+				if (seedSet.has(s) && t) seedNeighborMap.get(s)?.add(t);
+				if (seedSet.has(t) && s) seedNeighborMap.get(t)?.add(s);
+			}
 			let nodesAdded = 0;
 			let edgesAdded = 0;
 			let missingFromCatalog = 0;
@@ -2172,8 +2176,34 @@ export default function GlobalGraphPage() {
 				const degree = Math.max(1, Number(catalog?.degree) || 1);
 				const angle = i * golden;
 				const radius = ringStep * Math.sqrt(i + 1);
-				const gx = Math.cos(angle) * radius * LAYOUT_SPREAD;
-				const gy = Math.sin(angle) * radius * LAYOUT_SPREAD * 0.85;
+				// Compute weighting factors to give an "organic" spread:
+				// - industryFactor: use industryDate proxy (older = stronger push)
+				// - internalConn: how many connections this seed has to other seeds
+				// - mutualPartners: shared-neighbor count with other seeds
+				// - regionFactor: small bias for regionGroup to create clusters
+				const seedId = String(seed.crd);
+				const neighbors = seedNeighborMap.get(seedId) || new Set<string>();
+				const internalConn = neighbors.size;
+				let mutualPartners = 0;
+				for (const otherId of seedSet) {
+					if (otherId === seedId) continue;
+					const otherNeighbors = seedNeighborMap.get(otherId) || new Set<string>();
+					// intersection size
+					for (const v of neighbors) if (otherNeighbors.has(v)) mutualPartners++;
+				}
+				// Normalize mutualPartners roughly by seed count so large seeds don't dominate
+				mutualPartners = Math.round(mutualPartners / Math.max(1, CHART_PRELOAD_SEEDS.length / 40));
+				const catalogIndustryDate = Number(catalog?.industryDate || 0) || 0;
+				// industryDate is usually a timestamp string; treat larger as more senior
+				const industryFactor = catalogIndustryDate ? Math.min(1.6, 1 + Math.log10(1 + Math.abs(Date.now() - catalogIndustryDate)) * 0.0000000001) : 1;
+				// regionGroup bias: small angular jitter per region so same-region seeds cluster
+				const regionSeed = catalog?.regionGroup ? (hashString(String(catalog.regionGroup)) % 360) * (Math.PI / 180) : 0;
+				// Combine into a single multiplier for radial spread
+				const weightScore = 1 + Math.log1p(internalConn) * 0.28 + Math.log1p(mutualPartners) * 0.18 + (industryFactor - 1) * 0.6;
+				const spreadMul = Math.max(1.2, Math.min(6, weightScore));
+
+				const gx = Math.cos(angle + regionSeed) * radius * LAYOUT_SPREAD * spreadMul;
+				const gy = Math.sin(angle + regionSeed) * radius * LAYOUT_SPREAD * 0.85 * spreadMul;
 				const stub: LayoutNode = {
 					id: crd,
 					label,
@@ -2188,7 +2218,8 @@ export default function GlobalGraphPage() {
 					regionGroup: catalog?.regionGroup,
 					brokerCount: catalog?.brokerCount,
 					firmLinkCount: catalog?.firmLinkCount,
-					weight: catalog?.weight ?? degree,
+					// Store computed weight so downstream layout can use it.
+					weight: Math.max(1, Math.round((catalog?.weight ?? degree) * spreadMul)),
 					inactive: catalog?.inactive,
 				};
 				if (!catalog) {
@@ -4321,7 +4352,7 @@ export default function GlobalGraphPage() {
 					showDrawerToggle={true}
 					drawerOpen={drawerOpen}
 					setDrawerOpen={setDrawerOpen}
-					errorMessage={(errorMessage || status === 'error') && status !== 'loading' ? (errorMessage || 'Failed to load global layout') : null}
+					errorMessage={(errorMessage || status === 'error') && status !== 'loading' ? errorMessage || 'Failed to load global layout' : null}
 					searchBanner={searchBanner}
 					setSearchBanner={setSearchBanner as any}
 				/>
@@ -4427,7 +4458,9 @@ export default function GlobalGraphPage() {
 										</button>
 									</div>
 								</div>
-								<div className='fg-state-legend' aria-label='Node state legend'>
+								<div
+									className='fg-state-legend'
+									aria-label='Node state legend'>
 									<span className='fg-state-legend-item'>
 										<span className='fg-state-dot selected' />
 										Selected
@@ -4510,7 +4543,6 @@ export default function GlobalGraphPage() {
 					color: #111827;
 				}
 
-				
 				.gg-suggest-dropdown {
 					position: absolute;
 					left: 0;
@@ -4556,7 +4588,6 @@ export default function GlobalGraphPage() {
 					font-size: 0.72rem;
 					color: #94a3b8;
 				}
-
 
 				.graph-main-canvas {
 					display: block;
