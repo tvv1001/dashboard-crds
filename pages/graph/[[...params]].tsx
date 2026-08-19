@@ -558,6 +558,8 @@ export default function NodeGraphPage() {
 		return type && crd ? { type: type as 'individual' | 'firm', crd } : null;
 	}, [router.query]);
 
+	const isTargetLargeBottom = Boolean(routeParams && routeParams.type === 'individual' && routeParams.crd === '1156956');
+
 	const [searchInput, setSearchInput] = useState('');
 	const [searchLoading, setSearchLoading] = useState(false);
 	const [searchError, setSearchError] = useState('');
@@ -2335,11 +2337,16 @@ export default function NodeGraphPage() {
 								const radius = nodeRadius(node.id, node.kind);
 								const labelMode: LabelMode = labelModeById[node.id] ?? 'auto';
 								// Auto labels hide when zoomed out halfway; pinned large/small stay.
-								const showLabel = labelMode !== 'auto' || zoomScale >= LABEL_HIDE_SCALE;
-								const labelSizeClass =
+								let showLabel = labelMode !== 'auto' || zoomScale >= LABEL_HIDE_SCALE;
+								let labelSizeClass =
 									labelMode === 'large' ? ' size-large'
 									: labelMode === 'small' ? ' size-small'
 									: ' size-auto';
+								// Special-case: on individual/1156956 show labels below nodes and much larger.
+								if (isTargetLargeBottom) {
+									showLabel = true;
+									labelSizeClass = ' size-giant';
+								}
 								// Translate the group so circle/label stay locked to the
 								// same origin as link endpoints (cx/cy stay fixed at 0).
 								return (
@@ -2404,12 +2411,18 @@ export default function NodeGraphPage() {
 											<text
 												x={0}
 												y={
-													-(
+													isTargetLargeBottom ?
 														radius +
 														(labelMode === 'large' ? 12
 														: labelMode === 'small' ? 6
-														: 8)
-													)
+														: 8) *
+															3
+													:	-(
+															radius +
+															(labelMode === 'large' ? 12
+															: labelMode === 'small' ? 6
+															: 8)
+														)
 												}
 												className={`graph-label${labelSizeClass}${isActive ? ' active' : ''}${labelMode !== 'auto' ? ' pinned' : ''}${isInactive ? ' inactive' : ''}`}
 												onClick={(event) => handleLabelClick(event, node.id)}
@@ -2538,9 +2551,6 @@ export default function NodeGraphPage() {
 					background: #f3f4f6;
 					color: #111827;
 				}
-
-				
-
 
 				.graph-main-canvas {
 					display: block;
@@ -2759,6 +2769,11 @@ export default function NodeGraphPage() {
 					font-size: 15px;
 					font-weight: 700;
 					stroke-width: 4px;
+				}
+				.graph-label.size-giant {
+					font-size: 45px;
+					font-weight: 800;
+					stroke-width: 6px;
 				}
 				.graph-label.pinned {
 					/* Subtle underline mark so pinned labels are recognizable. */

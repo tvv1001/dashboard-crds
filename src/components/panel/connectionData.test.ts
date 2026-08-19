@@ -14,3 +14,16 @@ test('owner rows from a firm payload are surfaced as current connections when ex
 	assert.equal(buckets.owner.length, 1);
 	assert.equal(isOwnerLikeRelationship(buckets.current[0]), true);
 });
+
+test('search-index employment arrays (ind_current_employments) are extracted as connection rows', () => {
+	const payload = {
+		ind_current_employments: [{ firmId: 8733, firm_id: 8733, firmName: 'LPL ENTERPRISE, LLC' }],
+		ind_previous_employments: [{ firmId: 5685, firmName: 'PRUCO SECURITIES, LLC.', registrationEndDate: '1/1/2020' }],
+	};
+
+	const rows = extractConnectionRows(payload);
+	assert.equal(rows.length, 2);
+	const buckets = bucketConnectionRows(rows);
+	assert.equal(buckets.current.length, 1);
+	assert.equal(buckets.previous.length, 1);
+});

@@ -447,6 +447,23 @@ function decorateEmploymentItems(rows: any[]): any[] {
 // individual payload's employment history (see pages/api/_graphIndex.ts).
 // Fetch it here via the read-only graph-expansion endpoint so firm detail
 // views can show current/previous person connections.
+function connectionRowFromEntry(entry: any): any {
+	const crd = pickFirstNonEmpty(entry?.individualId, entry?.personCrd, entry?.crd, entry?.crdNumber);
+	const name = pickFirstNonEmpty(entry?.name, entry?.personName, entry?.individualName, entry?.label);
+	const startDate = pickFirstNonEmpty(entry?.startDate, entry?.registrationBeginDate);
+	const endDate = pickFirstNonEmpty(entry?.endDate, entry?.registrationEndDate);
+	const dateText = startDate && endDate ? `${startDate} – ${endDate}` : startDate || endDate;
+	return {
+		individualName: name,
+		name,
+		crd,
+		crdNumber: crd,
+		individualId: crd,
+		relationship: entry?.relationship,
+		__subtitleOverride: pickFirstNonEmpty(entry?.__subtitleOverride, dateText, entry?.relationship),
+	};
+}
+
 function useFirmEmployeeConnections(crd: string, enabled: boolean) {
 	const [state, setState] = useState<{ current: any[]; previous: any[]; loading: boolean } | null>(null);
 
@@ -457,27 +474,15 @@ function useFirmEmployeeConnections(crd: string, enabled: boolean) {
 		}
 		let cancelled = false;
 		setState({ current: [], previous: [], loading: true });
-		fetch(`/api/finra/expand/${encodeURIComponent(`firm:${crd}`)}?hops=1`)
+		fetch(`/api/finra/firm/${encodeURIComponent(crd)}/connections`)
 			.then((res) => (res.ok ? res.json() : null))
 			.then((data) => {
-				if (cancelled || !data) return;
-				const nodes = Array.isArray(data.nodes) ? data.nodes : [];
-				const links = Array.isArray(data.links) ? data.links : [];
-				const nodeById = new Map(nodes.map((n: any) => [n.id, n]));
-				const firmId = `firm:${crd}`;
-				const current: any[] = [];
-				const previous: any[] = [];
-				for (const link of links) {
-					if (!link || link.relationship !== 'employment' || link.target !== firmId) continue;
-					const person = nodeById.get(link.source) as any;
-					if (!person) continue;
-					const cityState = formatAddress({ city: person.city, state: person.state });
-					const row = { individualName: person.label, crd: person.crd, __subtitleOverride: cityState };
-					(link.isCurrent ? current : previous).push(row);
-				}
+				if (cancelled) return;
+				const current = Array.isArray(data?.currentConnections) ? data.currentConnections : [];
+				const previous = Array.isArray(data?.previousConnections) ? data.previousConnections : [];
 				setState({
-					current: sortRowsByLabel(current),
-					previous: sortRowsByLabel(previous),
+					current: sortRowsByLabel(current.map(connectionRowFromEntry)),
+					previous: sortRowsByLabel(previous.map(connectionRowFromEntry)),
 					loading: false,
 				});
 			})
@@ -1001,7 +1006,7 @@ function DetailList({
 							pickFirstNonEmpty(item.firmName, item.organizationName, item.legalName, item.name, item.individualName, item.fullName, item.disclosureType)
 						:	pickFirstNonEmpty(item.legalName, item.name, item.individualName, item.fullName, item.firmName, item.organizationName, item.disclosureType);
 					const titleText = rawTitleText ? formatDisplayName(rawTitleText) : rawTitleText;
-					const crd = pickFirstNonEmpty(item.crdNumber, item.crd, item.firmId, item.firmID, item.firmCrd);
+					const crd = pickFirstNonEmpty(item.crdNumber, item.crd, item.individualId, item.personCrd, item.firmId, item.firmID, item.firmCrd);
 					const secNo = pickFirstNonEmpty(item.bdSecNumber, item.bdSECNumber, item.iaSECNumber, item.secNumber);
 					const subtitle =
 						item.__subtitleOverride || pickFirstNonEmpty(item.position, item.currentRegistration, item.status, item.control, item.effectiveDate, item.disclosureCount);

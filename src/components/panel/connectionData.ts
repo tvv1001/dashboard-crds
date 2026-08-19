@@ -23,10 +23,16 @@ export function extractConnectionRows(body: Record<string, any>): any[] {
 	const directRows = [
 		body.currentConnections,
 		body.previousConnections,
+		body.current_connections,
+		body.previous_connections,
 		body.currentEmployments,
 		body.previousEmployments,
 		body.currentIAEmployments,
 		body.previousIAEmployments,
+		body.ind_current_employments,
+		body.ind_previous_employments,
+		body.ind_ia_current_employments,
+		body.ind_ia_previous_employments,
 		body.directOwners,
 		body.owners,
 	].flatMap((list) => toArray(list));

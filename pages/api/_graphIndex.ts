@@ -8,6 +8,7 @@ import { bucketConnectionRows, extractConnectionRows } from '../../src/component
 import { toProperCaseName } from '../../src/lib/format';
 import { deriveStatusBadge, deriveTerminatedBadge } from '../../src/lib/statusBadge';
 import { listSavedKeysWithStats, loadSavedPayload, normalizeRawPayload, loadCombinedSavedPayloadBundle, type SavedKeyStat } from './_lib';
+import { getFirmConnections } from './_firmConnections';
 
 export type GraphEntityType = 'individual' | 'firm';
 
@@ -189,7 +190,7 @@ async function annotateNodeInactive(node: GraphNode): Promise<GraphNode> {
 }
 
 function extractFirmCrd(row: Record<string, unknown>): string {
-	const raw = row.firmId ?? row.firmCrd ?? row.firmCRDNb ?? row.firmCrdNumber;
+	const raw = row.firmId ?? row.firm_id ?? row.firmCrd ?? row.firmCRDNb ?? row.firmCrdNumber;
 	const text = String(raw ?? '').trim();
 	if (!text) return '';
 	const normalized = text.replace(/^0+/, '') || '0';
@@ -619,24 +620,21 @@ async function getFirmNeighbors(crd: string): Promise<{ nodes: GraphNode[]; link
 	}
 
 	try {
-		const employeeIndex = await getFirmEmployeeIndex();
-		const employees = employeeIndex.get(crd) || [];
-		for (const employee of employees) {
-			const personId = buildNodeId('individual', employee.personCrd);
+		const cached = await getFirmConnections(crd);
+		for (const employee of [...cached.currentConnections, ...cached.previousConnections]) {
+			const personId = buildNodeId('individual', employee.individualId);
 			if (!nodes.has(personId)) {
 				nodes.set(personId, {
 					id: personId,
-					label: employee.personName,
+					label: employee.name || employee.individualId,
 					group: 'individual',
-					crd: employee.personCrd,
-					city: employee.city || undefined,
-					state: employee.state || undefined,
+					crd: employee.individualId,
 				});
 			}
 			links.push({ source: personId, target: firmId, relationship: 'employment', isCurrent: employee.isCurrent });
 		}
 	} catch {
-		// leave employment neighbors empty on index-build failure
+		// leave employment neighbors empty when redis cache is missing
 	}
 
 	return { nodes: Array.from(nodes.values()), links };
