@@ -421,6 +421,31 @@ type GraphLink = {
 	isCurrent?: boolean;
 };
 
+type GraphLinkKind = 'owner' | 'current' | 'previous';
+
+function graphLinkKind(link: Pick<GraphLink, 'label' | 'isCurrent'>): GraphLinkKind {
+	const label = String(link.label || '').toLowerCase();
+	if (label.includes('owner') || label.includes('control')) return 'owner';
+	if (link.isCurrent === false || /previous|former|prior/.test(label)) return 'previous';
+	return 'current';
+}
+
+/** Color role for a spoke node: owners first, then current, else previous-only. */
+function graphNodeLinkKind(nodeId: string, links: GraphLink[]): GraphLinkKind | null {
+	if (nodeId === 'primary') return null;
+	let sawPrevious = false;
+	for (const link of links) {
+		const sourceId = typeof link.source === 'string' ? link.source : String((link as any).source?.id ?? link.source);
+		const targetId = typeof link.target === 'string' ? link.target : String((link as any).target?.id ?? link.target);
+		if (sourceId !== nodeId && targetId !== nodeId) continue;
+		const kind = graphLinkKind(link);
+		if (kind === 'owner') return 'owner';
+		if (kind === 'current') return 'current';
+		if (kind === 'previous') sawPrevious = true;
+	}
+	return sawPrevious ? 'previous' : null;
+}
+
 // Shape returned by GET /api/finra/expand/[nodeId] (see pages/api/_graphIndex.ts).
 // That endpoint reads directly from the Redis-backed saved-payload store and
 // resolves BOTH current and previous employments (for individuals) and
@@ -591,6 +616,8 @@ export default function NodeGraphPage() {
 	// expanded so re-clicking a node doesn't refetch.
 	const [expansionNodes, setExpansionNodes] = useState<GraphNode[]>([]);
 	const [expansionLinks, setExpansionLinks] = useState<GraphLink[]>([]);
+	const [firmCacheNodes, setFirmCacheNodes] = useState<GraphNode[]>([]);
+	const [firmCacheLinks, setFirmCacheLinks] = useState<GraphLink[]>([]);
 	const [expandingNodeId, setExpandingNodeId] = useState<string | null>(null);
 	const expandedKeysRef = useRef<Set<string>>(new Set());
 	// Explicit hub key — graph topology is built from this snapshot only.
@@ -1103,6 +1130,8 @@ export default function NodeGraphPage() {
 		setSearchBanner(null);
 		setExpansionNodes([]);
 		setExpansionLinks([]);
+		setFirmCacheNodes([]);
+		setFirmCacheLinks([]);
 		setExpandingNodeId(null);
 		setLabelModeById({});
 		setHubKey(null);
@@ -1143,6 +1172,64 @@ export default function NodeGraphPage() {
 		expandNode({ id: 'primary', label: entityTitle, kind: 'primary', entityType: entityType === 'firm' ? 'firm' : 'individual' });
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [activeSnapshot?.resolvedKey, parsedKeyInfo?.crd]);
+
+	// Firm payloads only carry owners. Current/previous people live in Redis
+	// (`graph:firm-connections:v9` / `graph:firm-emp-adj:v1`) — pull them
+	// directly so the hub graph is not limited to Direct owners.
+	useEffect(() => {
+		if (entityType !== 'firm' || !parsedKeyInfo?.crd) {
+			setFirmCacheNodes([]);
+			setFirmCacheLinks([]);
+			return;
+		}
+		const crd = parsedKeyInfo.crd;
+		const firmCanonical = `firm:${crd}`;
+		let cancelled = false;
+		fetch(`/api/finra/firm/${encodeURIComponent(crd)}/connections`)
+			.then((res) => (res.ok ? res.json() : null))
+			.then((data) => {
+				if (cancelled || !data) return;
+				const nodes: GraphNode[] = [];
+				const links: GraphLink[] = [];
+				const seen = new Set<string>();
+				const add = (entry: any, isCurrent: boolean) => {
+					const personCrd = String(entry?.individualId || entry?.personCrd || entry?.crd || '').trim();
+					if (!personCrd || !/^\d{1,10}$/.test(personCrd) || seen.has(`${personCrd}:${isCurrent}`)) return;
+					seen.add(`${personCrd}:${isCurrent}`);
+					const nodeId = `individual:${personCrd}`;
+					const name = toProperCaseName(String(entry?.name || entry?.personName || entry?.individualName || '').trim()) || personCrd;
+					if (!nodes.some((n) => n.id === nodeId)) {
+						nodes.push({
+							id: nodeId,
+							label: name,
+							kind: 'relation',
+							entityType: 'individual',
+							subLabel: isCurrent ? 'Current connection' : 'Previous connection',
+							loadKey: `finra:individual:${personCrd}`,
+						});
+					}
+					links.push({
+						source: nodeId,
+						target: firmCanonical,
+						label: isCurrent ? 'Employment' : 'Previous employment',
+						isCurrent,
+					});
+				};
+				for (const entry of Array.isArray(data.currentConnections) ? data.currentConnections : []) add(entry, true);
+				for (const entry of Array.isArray(data.previousConnections) ? data.previousConnections : []) add(entry, false);
+				setFirmCacheNodes(nodes);
+				setFirmCacheLinks(links);
+			})
+			.catch(() => {
+				if (!cancelled) {
+					setFirmCacheNodes([]);
+					setFirmCacheLinks([]);
+				}
+			});
+		return () => {
+			cancelled = true;
+		};
+	}, [entityType, parsedKeyInfo?.crd]);
 
 	const graphData = useMemo(() => {
 		const hubEntityType: GraphEntityType = entityType === 'firm' ? 'firm' : 'individual';
@@ -1202,35 +1289,35 @@ export default function NodeGraphPage() {
 
 		const nodes = [...hub.nodes, ...extraSearchNodes].map(stampInactive);
 		const seenIds = new Set(nodes.map((n) => n.id));
-		for (const expansionNode of expansionNodes) {
-			if (canonicalToId.has(expansionNode.id) || seenIds.has(expansionNode.id)) continue;
+		for (const extraNode of [...expansionNodes, ...firmCacheNodes]) {
+			if (canonicalToId.has(extraNode.id) || seenIds.has(extraNode.id)) continue;
 			// Skip pure seed stubs that only exist to carry inactive for primary.
-			if (expansionNode.id === (parsedKeyInfo?.crd ? `${entityType}:${parsedKeyInfo.crd}` : '')) continue;
-			canonicalToId.set(expansionNode.id, expansionNode.id);
-			seenIds.add(expansionNode.id);
-			nodes.push(stampInactive(expansionNode));
+			if (extraNode.id === (parsedKeyInfo?.crd ? `${entityType}:${parsedKeyInfo.crd}` : '')) continue;
+			canonicalToId.set(extraNode.id, extraNode.id);
+			seenIds.add(extraNode.id);
+			nodes.push(stampInactive(extraNode));
 		}
 
 		const links: GraphLink[] = hub.links.map((l) => ({ ...l, isCurrent: l.isCurrent !== false }));
 		const seenLinkKeys = new Set(links.map((l) => `${l.source}->${l.target}:${l.label}`));
-		for (const expansionLink of expansionLinks) {
-			const source = canonicalToId.get(expansionLink.source) ?? expansionLink.source;
-			const target = canonicalToId.get(expansionLink.target) ?? expansionLink.target;
+		for (const extraLink of [...expansionLinks, ...firmCacheLinks]) {
+			const source = canonicalToId.get(extraLink.source) ?? extraLink.source;
+			const target = canonicalToId.get(extraLink.target) ?? extraLink.target;
 			if (source === target) continue;
-			const key = `${source}->${target}:${expansionLink.label}`;
-			const reverseKey = `${target}->${source}:${expansionLink.label}`;
+			const key = `${source}->${target}:${extraLink.label}`;
+			const reverseKey = `${target}->${source}:${extraLink.label}`;
 			if (seenLinkKeys.has(key) || seenLinkKeys.has(reverseKey)) continue;
 			seenLinkKeys.add(key);
 			links.push({
 				source,
 				target,
-				label: expansionLink.label,
-				isCurrent: expansionLink.isCurrent !== false,
+				label: extraLink.label,
+				isCurrent: extraLink.isCurrent !== false,
 			});
 		}
 
-		return { nodes, links };
-	}, [activeSnapshot, finraContent, secContent, entityTitle, searchResultNodes, expansionNodes, expansionLinks, entityType, parsedKeyInfo, hubLocation]);
+		return { nodes: nodes.map(stampInactive), links };
+	}, [activeSnapshot, finraContent, secContent, entityTitle, searchResultNodes, expansionNodes, expansionLinks, firmCacheNodes, firmCacheLinks, entityType, parsedKeyInfo, hubLocation]);
 
 	// Undirected degree for each node — drives visual radius so hubs read larger.
 	const connectionCountById = useMemo(() => {
@@ -2290,30 +2377,15 @@ export default function NodeGraphPage() {
 								const targetPos = graphPositions[targetId];
 								if (!sourcePos || !targetPos) return null;
 								const dimmed = traceConnectedIds ? !(traceConnectedIds.has(sourceId) && traceConnectedIds.has(targetId)) : false;
-								const isPrevious = link.isCurrent === false || /previous|former|prior/i.test(String(link.label || ''));
-								// Reference app: inactive endpoint OR previous => full gray dashed edge.
-								const sourceNode = graphData.nodes.find((n) => n.id === sourceId);
-								const targetNode = graphData.nodes.find((n) => n.id === targetId);
-								const sourceCanonical = sourceNode ? canonicalIdForNode(sourceNode) : null;
-								const targetCanonical = targetNode ? canonicalIdForNode(targetNode) : null;
-								const sourceInactive =
-									inactiveNodeIds.has(sourceId) ||
-									(!!sourceNode?.loadKey && inactiveNodeIds.has(sourceNode.loadKey)) ||
-									(!!sourceCanonical && inactiveNodeIds.has(sourceCanonical)) ||
-									Boolean(sourceNode?.inactive);
-								const targetInactive =
-									inactiveNodeIds.has(targetId) ||
-									(!!targetNode?.loadKey && inactiveNodeIds.has(targetNode.loadKey)) ||
-									(!!targetCanonical && inactiveNodeIds.has(targetCanonical)) ||
-									Boolean(targetNode?.inactive);
-								const grayDashed = isPrevious || sourceInactive || targetInactive;
-								// Selection only lights active/current spokes — never previous/inactive-endpoint lines.
+								const linkKind = graphLinkKind(link);
+								// Previous spokes stay gray even if the other end is still active.
+								const grayDashed = linkKind === 'previous';
 								const touchesSelection = Boolean(focusedNodeId) && (sourceId === focusedNodeId || targetId === focusedNodeId);
-								const isSelectedSpoke = touchesSelection && !grayDashed && !dimmed;
+								const isSelectedSpoke = touchesSelection && linkKind !== 'previous' && !dimmed;
 								return (
 									<line
-										key={`${sourceId}-${targetId}-${link.label}-${grayDashed ? 'gray' : 'curr'}`}
-										className={`graph-link-glow${grayDashed ? ' previous' : ' current'}${dimmed ? ' dimmed' : ''}${isSelectedSpoke ? ' selected' : ''}${touchesSelection && grayDashed ? ' selection-muted' : ''}`}
+										key={`${sourceId}-${targetId}-${link.label}-${linkKind}`}
+										className={`graph-link-glow ${linkKind}${dimmed ? ' dimmed' : ''}${isSelectedSpoke ? ' selected' : ''}${touchesSelection && grayDashed ? ' selection-muted' : ''}`}
 										x1={sourcePos.x}
 										y1={sourcePos.y}
 										x2={targetPos.x}
@@ -2334,6 +2406,7 @@ export default function NodeGraphPage() {
 									(!!node.loadKey && inactiveNodeIds.has(node.loadKey)) ||
 									(!!canonical && inactiveNodeIds.has(canonical)) ||
 									Boolean(node.inactive);
+								const spokeKind = graphNodeLinkKind(node.id, graphData.links);
 								const radius = nodeRadius(node.id, node.kind);
 								const labelMode: LabelMode = labelModeById[node.id] ?? 'auto';
 								// Auto labels hide when zoomed out halfway; pinned large/small stay.
@@ -2389,11 +2462,11 @@ export default function NodeGraphPage() {
 										)}
 										{nodeEntityType === 'firm' ?
 											<polygon
-												className={`graph-node firm${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
+												className={`graph-node firm${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive && spokeKind !== 'owner' ? ' inactive' : ''}${spokeKind ? ` ${spokeKind}` : ''}`}
 												points={`0,${-radius} ${radius * 0.866},${-radius / 2} ${radius * 0.866},${radius / 2} 0,${radius} ${-radius * 0.866},${radius / 2} ${-radius * 0.866},${-radius / 2}`}
 											/>
 										:	<circle
-												className={`graph-node individual${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive ? ' inactive' : ''}`}
+												className={`graph-node individual${isPrimary ? ' primary' : ''}${isActive ? ' active' : ''}${isInactive && spokeKind !== 'owner' ? ' inactive' : ''}${spokeKind ? ` ${spokeKind}` : ''}`}
 												cx={0}
 												cy={0}
 												r={radius}
@@ -2592,20 +2665,32 @@ export default function NodeGraphPage() {
 					transition: opacity 150ms ease;
 					pointer-events: none;
 				}
-				/* Current employment (both ends active): blue solid. */
+				/* Direct owners / executive officers: light red. */
+				.graph-link-glow.owner {
+					stroke: rgba(248, 113, 113, 0.78);
+					stroke-width: 0.9;
+				}
+				.theme-light .graph-link-glow.owner {
+					stroke: rgba(239, 68, 68, 0.7);
+				}
+				.graph-link-glow.owner.selected {
+					stroke: #f87171;
+					stroke-width: 1.5;
+				}
+				/* Current connections: blue solid. */
 				.graph-link-glow.current {
 					stroke: rgba(30, 136, 255, 0.88);
 					stroke-width: 0.8;
 				}
-				/* Previous OR inactive-endpoint: full gray dashed (reference app). */
+				/* Previous connections: light gray dashed, regardless of endpoint status. */
 				.graph-link-glow.previous {
-					stroke: rgba(156, 163, 175, 0.45);
-					stroke-width: 0.5;
+					stroke: rgba(156, 163, 175, 0.55);
+					stroke-width: 0.55;
 					stroke-dasharray: 1 2;
 					overflow: visible;
 				}
 				.theme-light .graph-link-glow.previous {
-					stroke: rgba(156, 163, 175, 0.35);
+					stroke: rgba(156, 163, 175, 0.45);
 				}
 				/* Active spoke on selected node only (current active edges). */
 				.graph-link-glow.current.selected {
@@ -2665,6 +2750,22 @@ export default function NodeGraphPage() {
 					fill: #0ea5e9;
 					stroke: #0ea5e9;
 					filter: drop-shadow(0 0 8px rgba(14, 165, 233, 0.75));
+				}
+				.graph-node.individual.current {
+					fill: #0ea5e9;
+					stroke: #38bdf8;
+					filter: drop-shadow(0 0 8px rgba(56, 189, 248, 0.8));
+				}
+				/* Direct owners & executive officers: light red node + matching stroke. */
+				.graph-node.owner,
+				.graph-node.individual.owner,
+				.graph-node.firm.owner {
+					fill: #fca5a5;
+					stroke: #f87171;
+					filter: drop-shadow(0 0 8px rgba(248, 113, 113, 0.7));
+				}
+				.graph-node.firm.owner {
+					stroke-width: 2.5px;
 				}
 				.graph-node.firm {
 					fill: #0f172a;
@@ -2736,6 +2837,17 @@ export default function NodeGraphPage() {
 					fill: #6b7280;
 					stroke: #9ca3af;
 					filter: drop-shadow(0 0 6px rgba(107, 114, 128, 0.45));
+				}
+				/* Owners stay light red even if another rule marked them inactive. */
+				.graph-node.owner,
+				.graph-node.individual.owner,
+				.graph-node.firm.owner,
+				.graph-node.owner.inactive,
+				.graph-node.individual.owner.inactive,
+				.graph-node.firm.owner.inactive {
+					fill: #fca5a5;
+					stroke: #f87171;
+					filter: drop-shadow(0 0 8px rgba(248, 113, 113, 0.7));
 				}
 				.graph-node.inactive.active,
 				.graph-node.individual.inactive.active,
