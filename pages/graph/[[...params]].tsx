@@ -399,6 +399,35 @@ function entityTypeFromLoadKey(loadKey?: string): GraphEntityType | undefined {
 	return undefined;
 }
 
+function parseGraphCrdRef(value: string | null | undefined): { type: GraphEntityType; crd: string } | null {
+	const raw = String(value || '').trim();
+	if (!raw) return null;
+	const full = raw.match(/^(?:finra|sec):(individual|firm|person):(\d+)$/i);
+	if (full) return { type: full[1].toLowerCase() === 'firm' ? 'firm' : 'individual', crd: full[2] };
+	const short = raw.match(/^(individual|firm|person):(\d+)$/i);
+	if (short) return { type: short[1].toLowerCase() === 'firm' ? 'firm' : 'individual', crd: short[2] };
+	const rel = raw.match(/^relation-(individual|firm)-(\d+)$/i);
+	if (rel) return { type: rel[1].toLowerCase() === 'firm' ? 'firm' : 'individual', crd: rel[2] };
+	const search = raw.match(/^search-(individual|firm)-(\d+)/i);
+	if (search) return { type: search[1].toLowerCase() === 'firm' ? 'firm' : 'individual', crd: search[2] };
+	return null;
+}
+
+function graphNodeToCrdRef(node: Pick<GraphNode, 'id' | 'loadKey' | 'entityType'>): { type: GraphEntityType; crd: string } | null {
+	return parseGraphCrdRef(node.loadKey) || parseGraphCrdRef(node.id) || null;
+}
+
+function finraKeyFromCrdRef(ref: { type: GraphEntityType; crd: string }): string {
+	return `finra:${ref.type}:${ref.crd}`;
+}
+
+function snapshotKeyAliases(key: string): string[] {
+	const ref = parseGraphCrdRef(key) || parseCrdKey(key);
+	if (!ref?.crd) return [key];
+	const type = ref.type === 'firm' ? 'firm' : 'individual';
+	return Array.from(new Set([key, `finra:${type}:${ref.crd}`, `sec:${type}:${ref.crd}`, `${type}:${ref.crd}`, type === 'individual' ? `person:${ref.crd}` : ''].filter(Boolean)));
+}
+
 function resolveNodeEntityType(
 	node: Pick<GraphNode, 'id'> & Partial<Pick<GraphNode, 'entityType' | 'loadKey' | 'kind' | 'label'>>,
 	hubEntityType?: GraphEntityType,
@@ -606,6 +635,9 @@ export default function NodeGraphPage() {
 	// (via loadKey) when the user clicks one.
 	const [searchResultNodes, setSearchResultNodes] = useState<GraphNode[]>([]);
 	const [searchBanner, setSearchBanner] = useState<{ query: string; count: number } | null>(null);
+	const [sessionHydrated, setSessionHydrated] = useState(false);
+	const restoredSessionRef = useRef(false);
+	const skipSessionSaveRef = useRef(true);
 
 	// Click-to-expand: when a node is clicked, its own connections (current
 	// AND previous employments for individuals; owners/control persons plus
@@ -635,9 +667,11 @@ export default function NodeGraphPage() {
 
 	const activeSnapshot = useMemo(() => {
 		if (hubKey) {
-			const direct = cache[hubKey];
-			if (direct) return direct;
-			const match = Object.values(cache).find((s) => s.key === hubKey || s.resolvedKey === hubKey);
+			const aliases = snapshotKeyAliases(hubKey);
+			for (const alias of aliases) {
+				if (cache[alias]) return cache[alias];
+			}
+			const match = Object.values(cache).find((s) => aliases.includes(s.key) || aliases.includes(s.resolvedKey));
 			if (match) return match;
 		}
 		return Object.values(cache).sort((a, b) => b.fetchedAt - a.fetchedAt)[0] ?? null;
@@ -713,11 +747,8 @@ export default function NodeGraphPage() {
 			if (node.id === 'primary') {
 				return parsedKeyInfo?.crd ? `${entityType}:${parsedKeyInfo.crd}` : null;
 			}
-			if (node.loadKey) {
-				const parts = node.loadKey.split(':');
-				if (parts.length === 3) return `${parts[1]}:${parts[2]}`;
-			}
-			return null;
+			const fromKey = graphNodeToCrdRef(node);
+			return fromKey ? `${fromKey.type}:${fromKey.crd}` : null;
 		},
 		[entityType, parsedKeyInfo],
 	);
@@ -887,6 +918,56 @@ export default function NodeGraphPage() {
 		[fetchAndApplyKey],
 	);
 
+	useEffect(() => {
+		let cancelled = false;
+		fetch('/api/finra/graph')
+			.then((res) => (res.ok ? res.json() : null))
+			.then((data) => {
+				if (cancelled) return;
+				const session = data?.session;
+				if (!session || !Array.isArray(session.nodes) || session.nodes.length === 0) {
+					skipSessionSaveRef.current = false;
+					setSessionHydrated(true);
+					return;
+				}
+				restoredSessionRef.current = true;
+				skipSessionSaveRef.current = true;
+				const extraNodes: GraphNode[] = (session.nodes as GraphNode[]).filter((node) => node && node.id);
+				const extraLinks: GraphLink[] = Array.isArray(session.links) ? session.links : [];
+				const positions: Record<string, { x: number; y: number }> = {};
+				for (const row of Array.isArray(session.nodePositions) ? session.nodePositions : []) {
+					if (row?.id && Number.isFinite(row.x) && Number.isFinite(row.y)) positions[row.id] = { x: row.x, y: row.y };
+				}
+				positionsRef.current = positions;
+				setGraphPositions(positions);
+				sessionLayoutLockedRef.current = extraNodes.length > 0;
+				setExpansionNodes(extraNodes);
+				setExpansionLinks(extraLinks);
+				if (session.zoomTransform && typeof session.zoomTransform.k === 'number') {
+					const z = session.zoomTransform;
+					setTransform(d3.zoomIdentity.translate(z.x || 0, z.y || 0).scale(z.k));
+				}
+				const hubKey = String(session.hubKey || extraNodes[0]?.loadKey || extraNodes[0]?.id || '').trim();
+				if (hubKey) {
+					const parsed = parseCrdKey(hubKey) || (hubKey.match(/^(individual|firm):\d+$/i) ? { type: hubKey.split(':')[0], crd: hubKey.split(':')[1] } : null);
+					if (parsed?.type && parsed?.crd) lastRouteKeyRef.current = `${parsed.type}:${parsed.crd}`;
+					loadKey(hubKey);
+				}
+				if (session.selectedNodeId) setFocusedNodeId(session.selectedNodeId);
+				window.setTimeout(() => {
+					if (!cancelled) skipSessionSaveRef.current = false;
+				}, 800);
+				setSessionHydrated(true);
+			})
+			.catch(() => {
+				if (!cancelled) setSessionHydrated(true);
+			});
+		return () => {
+			cancelled = true;
+		};
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, []);
+
 	// Loads detail JSON into the side panel for a clicked graph node without
 	// replacing the hub / rebuilding the whole graph.
 	const loadPanelForNode = useCallback(
@@ -905,14 +986,9 @@ export default function NodeGraphPage() {
 				return;
 			}
 
-			const requestKey =
-				node.loadKey ||
-				(() => {
-					const canonical = canonicalIdForNode(node);
-					if (!canonical) return '';
-					const [type, crd] = canonical.split(':');
-					return type && crd ? `finra:${type}:${crd}` : '';
-				})();
+			const crdRef = graphNodeToCrdRef(node);
+			const requestKey = crdRef ? finraKeyFromCrdRef(crdRef) : node.loadKey || '';
+			const aliases = requestKey ? snapshotKeyAliases(requestKey) : [];
 
 			if (!requestKey) {
 				setPanelSnapshot({
@@ -925,8 +1001,12 @@ export default function NodeGraphPage() {
 				return;
 			}
 
-			const cached = cache[requestKey] || Object.values(cache).find((s) => s.key === requestKey || s.resolvedKey === requestKey) || null;
-			if (cached?.detailJson) {
+			const cached =
+				aliases.map((alias) => cache[alias]).find((entry) => entry?.detailJson) ||
+				Object.values(cache).find((entry) => aliases.includes(entry.key) || aliases.includes(entry.resolvedKey)) ||
+				null;
+			const cachedLooksRight = Boolean(cached?.detailJson && (!crdRef || cached.detailJson.includes(crdRef.crd)));
+			if (cachedLooksRight && cached?.detailJson) {
 				setPanelSnapshot({
 					key: cached.key,
 					resolvedKey: cached.resolvedKey || cached.key,
@@ -945,39 +1025,40 @@ export default function NodeGraphPage() {
 				error: '',
 			});
 
-			fetchAndApplyKey(requestKey, requestKey, { asHub: false })
-				.then((result) => {
-					if (panelRequestRef.current !== requestId) return;
-					if (!result.found) {
-						setPanelSnapshot({
-							key: requestKey,
-							resolvedKey: requestKey,
-							detailJson: null,
-							loading: false,
-							error: `No FINRA/SEC record found for ${requestKey}`,
-						});
-						return;
+			const keysToTry = crdRef ? [requestKey, `finra:${crdRef.type === 'firm' ? 'individual' : 'firm'}:${crdRef.crd}`] : [requestKey];
+
+			(async () => {
+				let lastError = '';
+				for (const key of keysToTry) {
+					try {
+						const result = await fetchAndApplyKey(key, key, { asHub: false });
+						if (panelRequestRef.current !== requestId) return;
+						if (result.found && result.detailValue) {
+							setPanelSnapshot({
+								key,
+								resolvedKey: result.resolvedKey || key,
+								detailJson: result.detailValue,
+								loading: false,
+								error: '',
+							});
+							return;
+						}
+						lastError = `No FINRA/SEC record found for ${key}`;
+					} catch (err: unknown) {
+						lastError = err instanceof Error ? err.message : `Could not load data for ${key}`;
 					}
-					setPanelSnapshot({
-						key: requestKey,
-						resolvedKey: result.resolvedKey || requestKey,
-						detailJson: result.detailValue,
-						loading: false,
-						error: '',
-					});
-				})
-				.catch((err: unknown) => {
-					if (panelRequestRef.current !== requestId) return;
-					setPanelSnapshot({
-						key: requestKey,
-						resolvedKey: requestKey,
-						detailJson: null,
-						loading: false,
-						error: err instanceof Error ? err.message : `Could not load data for ${requestKey}`,
-					});
+				}
+				if (panelRequestRef.current !== requestId) return;
+				setPanelSnapshot({
+					key: requestKey,
+					resolvedKey: requestKey,
+					detailJson: null,
+					loading: false,
+					error: lastError || `No FINRA/SEC record found for ${requestKey}`,
 				});
+			})();
 		},
-		[activeSnapshot, cache, canonicalIdForNode, fetchAndApplyKey],
+		[activeSnapshot, cache, fetchAndApplyKey],
 	);
 
 	// Deep-link support: when this page is reached via /graph/individual/<crd>
@@ -987,13 +1068,15 @@ export default function NodeGraphPage() {
 	// just pushed into the URL below.
 	const lastRouteKeyRef = useRef<string | null>(null);
 	useEffect(() => {
+		if (!sessionHydrated) return;
+		if (restoredSessionRef.current) return;
 		if (!routeParams) return;
 		const key = `${routeParams.type}:${routeParams.crd}`;
 		if (lastRouteKeyRef.current === key) return;
 		lastRouteKeyRef.current = key;
 		loadKey(key);
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [routeParams]);
+	}, [sessionHydrated, routeParams]);
 
 	// A bare CRD number typed into the top search box is ambiguous (could be
 	// an individual or a firm) — the backend's plain-number lookup assumes
@@ -1118,6 +1201,13 @@ export default function NodeGraphPage() {
 	}, [activeSnapshot, loadKey]);
 
 	const handleResetSession = useCallback(() => {
+		skipSessionSaveRef.current = true;
+		restoredSessionRef.current = false;
+		void fetch('/api/finra/graph', {
+			method: 'POST',
+			headers: { 'Content-Type': 'application/json' },
+			body: JSON.stringify({ action: 'reset' }),
+		}).catch(() => {});
 		clear();
 		setSearchInput('');
 		setSearchError('');
@@ -1136,6 +1226,9 @@ export default function NodeGraphPage() {
 		setLabelModeById({});
 		setHubKey(null);
 		setPanelSnapshot(null);
+		setGraphPositions({});
+		positionsRef.current = {};
+		sessionLayoutLockedRef.current = false;
 		panelRequestRef.current += 1;
 		expandedKeysRef.current.clear();
 		lastRouteKeyRef.current = null;
@@ -1149,26 +1242,30 @@ export default function NodeGraphPage() {
 	const [labelModeById, setLabelModeById] = useState<Record<string, LabelMode>>({});
 	// Hide auto labels once zoomed out past ~halfway from default (k=1 → 0.5).
 	const LABEL_HIDE_SCALE = 0.5;
-	// Reset the focused/highlighted node whenever a new hub entity is loaded so
-	// stale node ids from the previous graph don't linger. Panel resets to hub.
+	// Reset the focused/highlighted node whenever the hub entity itself changes.
+	// Do not key this off cache writes from clicking other nodes — that was
+	// wiping the clicked CRD's panel JSON and snapping selection back to primary.
 	useEffect(() => {
 		setFocusedNodeId('primary');
-		if (activeSnapshot) {
-			setPanelSnapshot({
-				key: activeSnapshot.key,
-				resolvedKey: activeSnapshot.resolvedKey || activeSnapshot.key,
-				detailJson: activeSnapshot.detailJson,
-				loading: false,
-				error: '',
-			});
-		}
-	}, [activeSnapshot?.resolvedKey]);
+		if (!hubKey || !activeSnapshot) return;
+		const hubAliases = snapshotKeyAliases(hubKey);
+		const isHubSnapshot = hubAliases.includes(activeSnapshot.key) || hubAliases.includes(activeSnapshot.resolvedKey);
+		if (!isHubSnapshot) return;
+		setPanelSnapshot({
+			key: activeSnapshot.key,
+			resolvedKey: activeSnapshot.resolvedKey || activeSnapshot.key,
+			detailJson: activeSnapshot.detailJson,
+			loading: false,
+			error: '',
+		});
+	}, [hubKey]);
 
 	// Auto-expand the primary node the moment its entity loads, so its full
 	// current + previous connections are visible immediately instead of only
 	// the "current" subset buildGraphData derives from the loaded snapshot.
 	useEffect(() => {
 		if (!activeSnapshot || !parsedKeyInfo?.crd) return;
+		if (restoredSessionRef.current) return;
 		expandNode({ id: 'primary', label: entityTitle, kind: 'primary', entityType: entityType === 'firm' ? 'firm' : 'individual' });
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, [activeSnapshot?.resolvedKey, parsedKeyInfo?.crd]);
@@ -1177,6 +1274,7 @@ export default function NodeGraphPage() {
 	// (`graph:firm-connections:v9` / `graph:firm-emp-adj:v1`) — pull them
 	// directly so the hub graph is not limited to Direct owners.
 	useEffect(() => {
+		if (restoredSessionRef.current) return;
 		if (entityType !== 'firm' || !parsedKeyInfo?.crd) {
 			setFirmCacheNodes([]);
 			setFirmCacheLinks([]);
@@ -1289,21 +1387,36 @@ export default function NodeGraphPage() {
 
 		const nodes = [...hub.nodes, ...extraSearchNodes].map(stampInactive);
 		const seenIds = new Set(nodes.map((n) => n.id));
+		if (seenIds.has('primary')) canonicalToId.set('primary', 'primary');
 		for (const extraNode of [...expansionNodes, ...firmCacheNodes]) {
 			if (canonicalToId.has(extraNode.id) || seenIds.has(extraNode.id)) continue;
-			// Skip pure seed stubs that only exist to carry inactive for primary.
-			if (extraNode.id === (parsedKeyInfo?.crd ? `${entityType}:${parsedKeyInfo.crd}` : '')) continue;
+			// Skip the live hub's canonical id only when `primary` is already present.
+			if (seenIds.has('primary') && extraNode.id === (parsedKeyInfo?.crd ? `${entityType}:${parsedKeyInfo.crd}` : '')) continue;
+			if (extraNode.id === 'primary') canonicalToId.set('primary', 'primary');
 			canonicalToId.set(extraNode.id, extraNode.id);
 			seenIds.add(extraNode.id);
 			nodes.push(stampInactive(extraNode));
+			registerCanonical(extraNode);
 		}
+
+		const resolveLinkEnd = (rawId: string) => {
+			if (canonicalToId.has(rawId)) return canonicalToId.get(rawId) as string;
+			const ref = parseGraphCrdRef(rawId);
+			if (ref) {
+				const canonical = `${ref.type}:${ref.crd}`;
+				if (canonicalToId.has(canonical)) return canonicalToId.get(canonical) as string;
+			}
+			if (rawId === 'primary' && seenIds.has('primary')) return 'primary';
+			return rawId;
+		};
 
 		const links: GraphLink[] = hub.links.map((l) => ({ ...l, isCurrent: l.isCurrent !== false }));
 		const seenLinkKeys = new Set(links.map((l) => `${l.source}->${l.target}:${l.label}`));
 		for (const extraLink of [...expansionLinks, ...firmCacheLinks]) {
-			const source = canonicalToId.get(extraLink.source) ?? extraLink.source;
-			const target = canonicalToId.get(extraLink.target) ?? extraLink.target;
+			const source = resolveLinkEnd(extraLink.source);
+			const target = resolveLinkEnd(extraLink.target);
 			if (source === target) continue;
+			if (!seenIds.has(source) || !seenIds.has(target)) continue;
 			const key = `${source}->${target}:${extraLink.label}`;
 			const reverseKey = `${target}->${source}:${extraLink.label}`;
 			if (seenLinkKeys.has(key) || seenLinkKeys.has(reverseKey)) continue;
@@ -1316,7 +1429,7 @@ export default function NodeGraphPage() {
 			});
 		}
 
-		return { nodes: nodes.map(stampInactive), links };
+		return { nodes: nodes.map(stampInactive), links: links.filter((l) => seenIds.has(l.source) && seenIds.has(l.target)) };
 	}, [activeSnapshot, finraContent, secContent, entityTitle, searchResultNodes, expansionNodes, expansionLinks, firmCacheNodes, firmCacheLinks, entityType, parsedKeyInfo, hubLocation]);
 
 	// Undirected degree for each node — drives visual radius so hubs read larger.
@@ -1443,9 +1556,50 @@ export default function NodeGraphPage() {
 	// near the center — that full-graph reset was what made expanded
 	// graphs look like nodes "disconnecting" from their links.
 	const positionsRef = useRef<Record<string, { x: number; y: number }>>({});
+	// After the user clicks/drags/expands, freeze already-placed nodes until Reset.
+	const sessionLayoutLockedRef = useRef(false);
 	useEffect(() => {
 		positionsRef.current = graphPositions;
 	}, [graphPositions]);
+
+	const lockSessionLayout = useCallback(() => {
+		sessionLayoutLockedRef.current = true;
+		const next = { ...positionsRef.current };
+		for (const n of dragNodesRef.current) {
+			if (!n?.id) continue;
+			const x = typeof n.fx === 'number' ? n.fx : n.x;
+			const y = typeof n.fy === 'number' ? n.fy : n.y;
+			if (typeof x === 'number' && typeof y === 'number') next[n.id] = { x, y };
+		}
+		positionsRef.current = next;
+		setGraphPositions(next);
+	}, []);
+
+	useEffect(() => {
+		if (!sessionHydrated || skipSessionSaveRef.current) return;
+		if (graphData.nodes.length === 0) return;
+		const timer = window.setTimeout(() => {
+			const nodePositions = Object.entries(positionsRef.current)
+				.filter(([, point]) => Number.isFinite(point.x) && Number.isFinite(point.y))
+				.map(([id, point]) => ({ id, x: point.x, y: point.y }));
+			void fetch('/api/finra/graph', {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					action: 'save',
+					session: {
+						hubKey: hubKey || activeSnapshot?.resolvedKey || activeSnapshot?.key || null,
+						selectedNodeId: focusedNodeId,
+						nodes: graphData.nodes,
+						links: graphData.links,
+						nodePositions,
+						zoomTransform: { x: transform.x, y: transform.y, k: transform.k },
+					},
+				}),
+			}).catch(() => {});
+		}, 700);
+		return () => window.clearTimeout(timer);
+	}, [sessionHydrated, graphData, graphPositions, transform, hubKey, focusedNodeId, activeSnapshot]);
 
 	// Kept in sync with `transform` (React state) so drag handlers — which
 	// run outside the render cycle via pointer event callbacks — can always
@@ -1486,6 +1640,7 @@ export default function NodeGraphPage() {
 			// when the user presses a node to select or drag it.
 			event.stopPropagation();
 			event.nativeEvent.stopImmediatePropagation?.();
+			lockSessionLayout();
 			const node = dragNodesRef.current.find((n) => n.id === nodeId);
 			if (!node) return;
 			const graphPoint = clientPointToGraph(event.clientX, event.clientY);
@@ -1499,23 +1654,11 @@ export default function NodeGraphPage() {
 			};
 			node.fx = node.x;
 			node.fy = node.y;
-			// Unpin direct neighbors so charge/collision can push them aside.
-			const neighborIds = new Set<string>();
-			for (const link of graphData.links) {
-				if (link.source === nodeId) neighborIds.add(link.target);
-				if (link.target === nodeId) neighborIds.add(link.source);
-			}
-			for (const n of dragNodesRef.current) {
-				if (neighborIds.has(n.id)) {
-					n.fx = null;
-					n.fy = null;
-				}
-			}
 			setDraggingNodeId(nodeId);
 			simulationRef.current?.alphaTarget(0.3).restart();
 			(event.target as Element).setPointerCapture?.(event.pointerId);
 		},
-		[clientPointToGraph, graphData.links],
+		[clientPointToGraph, lockSessionLayout],
 	);
 
 	const handleNodePointerMove = useCallback(
@@ -1571,21 +1714,18 @@ export default function NodeGraphPage() {
 			const drag = dragStateRef.current;
 			if (!drag) return;
 			const node = dragNodesRef.current.find((n) => n.id === drag.id);
-			// Keep the selected node pinned; only release non-selected drag pins.
-			if (node) {
-				if (drag.id === focusedNodeId) {
-					node.fx = node.x;
-					node.fy = node.y;
-				} else {
-					node.fx = null;
-					node.fy = null;
-				}
+			// Remember the dropped position for the rest of the session.
+			if (node && typeof node.x === 'number' && typeof node.y === 'number') {
+				node.fx = node.x;
+				node.fy = node.y;
+				positionsRef.current[drag.id] = { x: node.x, y: node.y };
+				setGraphPositions((prev) => ({ ...prev, [drag.id]: { x: node.x, y: node.y } }));
 			}
 			dragStateRef.current = null;
 			setDraggingNodeId(null);
 			simulationRef.current?.alphaTarget(0);
 		},
-		[focusedNodeId],
+		[],
 	);
 
 	// Graph dimensions
@@ -1654,6 +1794,8 @@ export default function NodeGraphPage() {
 		};
 
 		const prevById = new Map((dragNodesRef.current || []).map((n: any) => [n.id, n]));
+		const frozenPos = sessionLayoutLockedRef.current ? { ...positionsRef.current } : {};
+		const frozenIds = new Set(Object.keys(frozenPos));
 
 		// Force profile from finra-data-chart-next-02/src/lib/finra-graph.ts
 		const nCount = graphData.nodes.length;
@@ -1707,7 +1849,8 @@ export default function NodeGraphPage() {
 
 		const d3Nodes = graphData.nodes.map((n) => {
 			const prev = prevById.get(n.id);
-			const existing = positionsRef.current[n.id];
+			const existing = frozenPos[n.id] || positionsRef.current[n.id];
+			const lockPlaced = frozenIds.has(n.id);
 			const radius = nodeRadius(n.id, n.kind);
 			const locKey = locationKeyFromParts(n.city, n.state);
 			const entityType = resolveNodeEntityType(n);
@@ -1718,6 +1861,7 @@ export default function NodeGraphPage() {
 						...n,
 						x: existing.x,
 						y: existing.y,
+						...(lockPlaced ? { fx: existing.x, fy: existing.y, vx: 0, vy: 0 } : {}),
 						radius,
 						locKey,
 						locX: loc?.x,
@@ -1766,12 +1910,18 @@ export default function NodeGraphPage() {
 							entityType,
 						};
 					})();
-			// Reference fluidDrag releases pins on end — don't re-pin across rebuilds.
-			if (prev && typeof prev.vx === 'number') (base as any).vx = prev.vx * 0.7;
-			if (prev && typeof prev.vy === 'number') (base as any).vy = prev.vy * 0.7;
+			// Already-placed nodes stay pinned for the session. Only brand-new
+			// (unplaced) nodes inherit leftover velocity from a live sim rebuild.
+			if (!lockPlaced) {
+				if (prev && typeof prev.vx === 'number') (base as any).vx = prev.vx * 0.7;
+				if (prev && typeof prev.vy === 'number') (base as any).vy = prev.vy * 0.7;
+			}
 			return base;
 		});
-		const d3Links = graphData.links.map((l) => ({ source: l.source, target: l.target, label: l.label }));
+		const simNodeIds = new Set(d3Nodes.map((n) => n.id));
+		const d3Links = graphData.links
+			.filter((l) => simNodeIds.has(l.source) && simNodeIds.has(l.target))
+			.map((l) => ({ source: l.source, target: l.target, label: l.label }));
 
 		const nodeById = new Map(d3Nodes.map((n) => [n.id, n]));
 
@@ -1818,19 +1968,25 @@ export default function NodeGraphPage() {
 		const degreeOf = (d: any) => connectionCountById[d?.id] || 0;
 		const isFirmNode = (d: any) => resolveNodeEntityType(d as GraphNode) === 'firm' || d?.entityType === 'firm';
 
-		// Keep the currently selected node fixed while neighbors settle around it.
-		const pinSelectedNode = () => {
-			if (!focusedNodeId) return;
-			const n = nodeById.get(focusedNodeId) as any;
-			if (!n) return;
-			if (typeof n.fx !== 'number') n.fx = n.x;
-			if (typeof n.fy !== 'number') n.fy = n.y;
-			n.x = n.fx;
-			n.y = n.fy;
-			n.vx = 0;
-			n.vy = 0;
+		// Once the user has interacted, keep already-placed nodes fixed.
+		// New expanded nodes stay free so they can settle around that layout.
+		const pinRememberedNodes = () => {
+			if (!frozenIds.size) return;
+			const draggingId = dragStateRef.current?.id;
+			for (const raw of d3Nodes) {
+				const n = raw as any;
+				if (!n?.id || !frozenIds.has(n.id) || n.id === draggingId) continue;
+				const remembered = positionsRef.current[n.id] || frozenPos[n.id];
+				if (!remembered) continue;
+				n.fx = remembered.x;
+				n.fy = remembered.y;
+				n.x = remembered.x;
+				n.y = remembered.y;
+				n.vx = 0;
+				n.vy = 0;
+			}
 		};
-		pinSelectedNode();
+		pinRememberedNodes();
 
 		// For each hub, order neighbors and assign staggered ring distances so
 		// child nodes sit on alternating radii (readable labels + associations).
@@ -2122,7 +2278,7 @@ export default function NodeGraphPage() {
 
 		simulation.on('tick', () => {
 			tickCount += 1;
-			pinSelectedNode();
+			pinRememberedNodes();
 			// While hot, only push every 2nd tick (reference cadence).
 			if (simulation.alpha() > 0.1 && tickCount % 2 !== 0) return;
 
@@ -2171,17 +2327,19 @@ export default function NodeGraphPage() {
 			if (rafId) cancelAnimationFrame(rafId);
 			if (simulationRef.current === simulation) simulationRef.current = null;
 		};
-	}, [graphData, nodeRadius, connectionCountById, width, height, focusedNodeId]);
+	}, [graphData, nodeRadius, connectionCountById, width, height]);
 
 	const selectNode = useCallback(
 		(nodeId: string) => {
+			lockSessionLayout();
 			setFocusedNodeId(nodeId);
 			// Selecting any node (including the primary/hub node) reveals the
 			// detail drawer, matching the reference site's "closed until a
 			// node is picked" behavior.
 			setDrawerOpen(true);
 
-			// Pin selection immediately so expand layout orbits around a fixed hub.
+			// Keep the clicked node where it is. Do not reheat or unpin the rest
+			// of the graph — the session layout stays put until Reset.
 			const simNode = dragNodesRef.current.find((n) => n.id === nodeId) as any;
 			if (simNode) {
 				const px = typeof simNode.x === 'number' ? simNode.x : positionsRef.current[nodeId]?.x;
@@ -2196,17 +2354,6 @@ export default function NodeGraphPage() {
 					positionsRef.current[nodeId] = { x: px, y: py };
 					setGraphPositions((prev) => ({ ...prev, [nodeId]: { x: px, y: py } }));
 				}
-				// Unpin previous selection so only the active node stays fixed.
-				for (const n of dragNodesRef.current) {
-					if (n.id !== nodeId && typeof (n as any).fx === 'number') {
-						// Keep drag pins only while actively dragging.
-						if (draggingNodeId && n.id === draggingNodeId) continue;
-						(n as any).fx = null;
-						(n as any).fy = null;
-					}
-				}
-				// Soft restart so neighbors slowly settle around the pinned selection.
-				simulationRef.current?.alpha(0.12).restart();
 			}
 
 			const node = graphData.nodes.find((n) => n.id === nodeId);
@@ -2230,7 +2377,7 @@ export default function NodeGraphPage() {
 			// for a firm) merged into the existing graph, in place.
 			expandNode(node);
 		},
-		[graphData.nodes, loadKey, loadPanelForNode, expandNode, draggingNodeId],
+		[graphData.nodes, loadKey, loadPanelForNode, expandNode, lockSessionLayout],
 	);
 
 	// Wraps `selectNode` so that releasing a drag (which fires a trailing

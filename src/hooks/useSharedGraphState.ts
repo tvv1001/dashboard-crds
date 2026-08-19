@@ -9,7 +9,7 @@ export type SharedNodeSnapshot = {
 };
 
 const STORAGE_KEY = 'finra-sec-shared-node-cache';
-const MAX_ENTRIES = 80;
+const MAX_ENTRIES = 2000;
 
 function readStorage(): Record<string, SharedNodeSnapshot> {
 	if (typeof window === 'undefined') return {};

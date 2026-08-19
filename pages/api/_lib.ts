@@ -308,6 +308,45 @@ export async function setCacheValue(key: string, value: string, ttlSeconds?: num
 	await client.set(key, finalValue);
 }
 
+export async function getLocalRedisValue(key: string) {
+	const client = await getRedisClient();
+	if (!client) return null;
+	try {
+		const value = await client.get(key);
+		if (value == null) return null;
+		return decompressPayload(typeof value === 'string' ? value : JSON.stringify(value));
+	} catch (error) {
+		console.warn('Local graph redis read failed', formatErrorMessage(error));
+		return null;
+	}
+}
+
+/** Session-graph reads. Local Redis in dev, then the shared cache. */
+export async function getGraphCacheValue(key: string) {
+	const local = await getLocalRedisValue(key);
+	if (local != null) return local;
+	return getCacheValue(key);
+}
+
+/** Session-graph writes. Local Redis in dev; same write path as cache in prod. */
+export async function setGraphCacheValue(key: string, value: string) {
+	const client = await getRedisClient();
+	if (client) {
+		await client.set(key, value);
+		return;
+	}
+	await setCacheValue(key, value);
+}
+
+export async function deleteGraphCacheKey(key: string) {
+	const client = await getRedisClient();
+	if (client) {
+		await client.del(key);
+		return;
+	}
+	await deleteCacheKey(key);
+}
+
 async function deleteCacheKey(key: string) {
 	if (!ALLOW_REDIS_WRITES) return;
 	for (const client of [writableUpstashClient, writableUpstashClient2]) {
@@ -688,20 +727,25 @@ async function writeRawValueToRedis(rawKey: string, serializedPayload: string) {
 
 async function readRawValueFromRedis(rawKey: string) {
 	if (!(upstashRedisClient || upstashRedisClient2 || redisClient)) return null;
-	const val = await getCacheValue(rawKey);
+	// Local Redis first (dev), then the shared cache. Do not require the
+	// saved-key index or on-disk raw files.
+	const val = (await getLocalRedisValue(rawKey)) ?? (await getCacheValue(rawKey));
 	if (!val) return null;
 
 	const trimmed = val.trim();
-	// If it starts with { or [, it's raw JSON (uncompressed legacy)
 	if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
 		return trimmed;
 	}
 
 	try {
 		return zlib.brotliDecompressSync(Buffer.from(trimmed, 'base64')).toString('utf-8');
-	} catch (err) {
-		console.warn(`Failed to decompress raw key ${rawKey}`, err);
-		return null;
+	} catch {
+		try {
+			return zlib.gunzipSync(Buffer.from(trimmed, 'base64')).toString('utf-8');
+		} catch (err) {
+			console.warn(`Failed to decompress raw key ${rawKey}`, err);
+			return null;
+		}
 	}
 }
 

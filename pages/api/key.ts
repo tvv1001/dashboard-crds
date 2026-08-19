@@ -1,7 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { promises as fs } from 'fs';
-import path from 'path';
-import { formatErrorMessage, hydrateFromUpstream, loadCombinedSavedPayloadBundle, normalizeRawPayload, removeSavedPayload, discoverFirmIdsFromPayload, trackFirmConnections } from './_lib';
+import { formatErrorMessage, loadCombinedSavedPayloadBundle, removeSavedPayload, discoverFirmIdsFromPayload, trackFirmConnections } from './_lib';
 import { findOwnerReference, findEmploymentReference, type OwnerReference, type EmploymentReference } from './_graphIndex';
 
 function parseSavedKey(key: string) {
@@ -42,70 +40,6 @@ function isMissingSavedPayloadError(error: unknown) {
 
 type SavedKeySource = 'finra' | 'sec';
 type SavedKeyType = 'individual' | 'firm';
-
-async function readNationalSnapshotFallback(source: SavedKeySource, type: SavedKeyType, crd: string) {
-	const fileCandidates =
-		source === 'finra' ?
-			[
-				path.resolve(process.cwd(), 'data', 'national', `api.brokercheck.finra.org_search_${type}_${crd}.json`),
-				path.resolve(process.cwd(), 'data', 'national', 'brokercheck.finra.org', `api.brokercheck.finra.org_search_${type}_${crd}.json`),
-			]
-		:	[
-				path.resolve(process.cwd(), 'data', 'national', `api.adviserinfo.sec.gov_search_${type}_${crd}.json`),
-				path.resolve(process.cwd(), 'data', 'national', 'adviserinfo.sec.gov', `api.adviserinfo.sec.gov_search_${type}_${crd}.json`),
-			];
-
-	for (const filePath of fileCandidates) {
-		try {
-			const raw = await fs.readFile(filePath, 'utf-8');
-			const parsed = JSON.parse(raw);
-			const normalized = normalizeRawPayload(parsed);
-			return {
-				key: `${source}:${type}:${crd}`,
-				found: true,
-				rawPayload: JSON.stringify(normalized),
-				payload: normalized,
-				error: null,
-				origin: filePath,
-			};
-		} catch (error) {
-			const err = error as NodeJS.ErrnoException;
-			if (err?.code === 'ENOENT') continue;
-		}
-	}
-
-	return {
-		key: `${source}:${type}:${crd}`,
-		found: false,
-		rawPayload: null,
-		payload: null,
-		error: 'national snapshot not found',
-		origin: null,
-	};
-}
-
-async function buildNationalFallbackBundle(type: SavedKeyType, crd: string, requestedKey: string) {
-	const finra = await readNationalSnapshotFallback('finra', type, crd);
-	const sec = await readNationalSnapshotFallback('sec', type, crd);
-	if (!finra.found && !sec.found) return null;
-
-	const resolvedKey =
-		finra.found ? finra.key
-		: sec.found ? sec.key
-		: requestedKey;
-
-	return {
-		requestedKey,
-		resolvedKey,
-		crd,
-		type,
-		sources: {
-			finra,
-			sec,
-		},
-		fallbackSource: 'national-search-cache',
-	};
-}
 
 // Builds a synthetic "no live CRD" bundle for individuals that only exist as
 // a directOwners/indirectOwners reference scraped from a firm's own detail
@@ -148,7 +82,20 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 			:	`${parsed.source}:${parsed.type}:${parsed.crd}`
 		:	key;
 	const canonicalKey = parsed ? `${parsed.source}:${parsed.type}:${parsed.crd}` : key;
-	const loadKeysToTry = parsed ? Array.from(new Set([preferredLoadKey, canonicalKey, `finra:${parsed.type}:${parsed.crd}`, `sec:${parsed.type}:${parsed.crd}`])) : [key];
+	const alternateType = parsed && parsed.type === 'individual' ? 'firm' : 'individual';
+	const loadKeysToTry =
+		parsed ?
+			Array.from(
+				new Set([
+					preferredLoadKey,
+					canonicalKey,
+					`finra:${parsed.type}:${parsed.crd}`,
+					`sec:${parsed.type}:${parsed.crd}`,
+					`finra:${alternateType}:${parsed.crd}`,
+					`sec:${alternateType}:${parsed.crd}`,
+				]),
+			)
+		:	[key];
 
 	async function loadFirstAvailableBundle() {
 		let lastError: unknown = null;
@@ -172,10 +119,6 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 			if (firmIds.length > 0) {
 				trackFirmConnections(firmIds).catch(() => {});
 			}
-			// If it's a firm profile, check external APIs to see if data is new or changed
-			if (parsed && parsed.type === 'firm') {
-				hydrateFromUpstream('firm', parsed.crd).catch(() => {});
-			}
 		}
 
 		// Never surface an orphan card when Redis already has a live individual record,
@@ -189,29 +132,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 		});
 	} catch (e) {
 		if (parsed && isMissingSavedPayloadError(e)) {
-			// Rule 3: Upstream external API hydration check (FINRA + SEC)
-			const hydrated = await hydrateFromUpstream(parsed.type, parsed.crd);
-			if (hydrated) {
-				try {
-					const hydratedBundle = await loadFirstAvailableBundle();
-					return res.json({
-						rawPayload: JSON.stringify(hydratedBundle, null, 2),
-						requestedKey: key,
-						resolvedKey: hydratedBundle.resolvedKey,
-						fallbackUsed: true,
-						bundle: hydratedBundle,
-					});
-				} catch {
-					// continue fallbacks if load fails
-				}
-			}
-
 			const alternateSource = parsed.source === 'finra' ? 'sec' : 'finra';
-			const alternateType = parsed.type === 'individual' ? 'firm' : 'individual';
+			const swappedType = parsed.type === 'individual' ? 'firm' : 'individual';
 			const candidateKeys = [
 				`${alternateSource}:${parsed.type}:${parsed.crd}`,
-				`${parsed.source}:${alternateType}:${parsed.crd}`,
-				`${alternateSource}:${alternateType}:${parsed.crd}`,
+				`${parsed.source}:${swappedType}:${parsed.crd}`,
+				`${alternateSource}:${swappedType}:${parsed.crd}`,
 			];
 
 			for (const candidateKey of candidateKeys) {
@@ -225,19 +151,8 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 						bundle,
 					});
 				} catch {
-					// keep trying candidates
+					// Redis-only: keep trying the other source/type keys
 				}
-			}
-
-			const nationalFallback = await buildNationalFallbackBundle(parsed.type, parsed.crd, key);
-			if (nationalFallback) {
-				return res.json({
-					rawPayload: JSON.stringify(nationalFallback, null, 2),
-					requestedKey: key,
-					resolvedKey: nationalFallback.resolvedKey,
-					fallbackUsed: true,
-					bundle: nationalFallback,
-				});
 			}
 
 			// Orphan only as last resort: no Redis/live/national payload at all,
