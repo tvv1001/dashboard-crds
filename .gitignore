@@ -31,3 +31,4 @@ data/master-crd-index.csv
 data/side-crd.json
 data/side-crd-full.json
 tsconfig.tsbuildinfo
+.notes

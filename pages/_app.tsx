@@ -171,14 +171,25 @@ export default function MyApp({ Component, pageProps }: AppProps) {
 	useEffect(() => {
 		if (typeof window !== 'undefined' && 'serviceWorker' in navigator) {
 			window.addEventListener('load', () => {
-				navigator.serviceWorker.register('/sw.js').then(
-					(registration) => {
-						console.log('ServiceWorker registration successful with scope: ', registration.scope);
-					},
-					(err) => {
-						console.log('ServiceWorker registration failed: ', err);
-					}
-				);
+				const isLocalhost = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+				if (isLocalhost) {
+					// Unregister any existing service workers on localhost to prevent stale offline cache
+					navigator.serviceWorker.getRegistrations().then((registrations) => {
+						for (const registration of registrations) {
+							registration.unregister();
+							console.log('ServiceWorker unregistered on localhost');
+						}
+					});
+				} else {
+					navigator.serviceWorker.register('/sw.js').then(
+						(registration) => {
+							console.log('ServiceWorker registration successful with scope: ', registration.scope);
+						},
+						(err) => {
+							console.log('ServiceWorker registration failed: ', err);
+						}
+					);
+				}
 			});
 		}
 	}, []);

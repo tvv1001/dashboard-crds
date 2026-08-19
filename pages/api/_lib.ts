@@ -423,6 +423,30 @@ async function scanKeysByPatterns(patterns: string[]) {
 	return Array.from(keys);
 }
 
+
+export async function getTopCrdsFromZset(type: 'individual' | 'firm', count = 20): Promise<string[]> {
+	const key = `dashboard:highest-crds:${type}`;
+	if (upstashRedisClient && typeof upstashRedisClient.zrange === 'function') {
+		try {
+			const res = await upstashRedisClient.zrange(key, 0, count - 1, { rev: true });
+			if (Array.isArray(res)) return res.map(String);
+		} catch (e) {
+			console.warn(`Upstash ZREVRANGE failed for ${key}`, formatErrorMessage(e));
+		}
+	}
+	
+	const client = await getRedisClient();
+	if (client) {
+		try {
+			const res = await client.zRange(key, 0, count - 1, { REV: true });
+			if (Array.isArray(res)) return res.map(String);
+		} catch (e) {
+			console.warn(`Native redis ZREVRANGE failed for ${key}`, formatErrorMessage(e));
+		}
+	}
+	return [];
+}
+
 export async function getRedisDbSize() {
 	const CACHE_KEY = 'dashboard:cached-crd-count';
 
@@ -1072,7 +1096,7 @@ function buildSavedKeyStat(filename: string, mtime: number, payload: unknown): S
 	};
 }
 
-function extractDisplayNameFromContent(filename: string, content: Record<string, unknown> | null): string | null {
+export function extractDisplayNameFromContent(filename: string, content: Record<string, unknown> | null): string | null {
 	if (!content || typeof content !== 'object') return null;
 	const bi = content.basicInformation && typeof content.basicInformation === 'object' ? (content.basicInformation as Record<string, unknown>) : {};
 	const text = (...values: unknown[]) =>
@@ -1329,7 +1353,7 @@ async function removeSavedKeyIndexEntry(key: string) {
 	};
 }
 
-function getContentBlock(_filename: string, payload: unknown): Record<string, unknown> | null {
+export function getContentBlock(_filename: string, payload: unknown): Record<string, unknown> | null {
 	if (!payload || typeof payload !== 'object') return null;
 	// Delegate to normalizeRawPayload, which already fully unwraps every known
 	// storage shape (finraBrokerCheck/secInvestmentAdvisor wrappers, legacy

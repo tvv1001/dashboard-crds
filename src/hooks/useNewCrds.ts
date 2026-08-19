@@ -21,11 +21,14 @@ function parseIsoTime(value?: string | null) {
 	return Number.isFinite(parsed) ? parsed : null;
 }
 
-const CACHE_KEY = 'new-crds-cache';
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const CACHE_KEY = 'new-crds-cache-v2';
+const CACHE_TTL_MS = 5 * 60 * 1000;
 
 function readStoredCache() {
 	if (typeof window === 'undefined') return null;
+	// Disable cache on localhost for easier local development
+	if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') return null;
+	
 	const str = window.localStorage.getItem(CACHE_KEY);
 	if (!str) return null;
 	try {
@@ -96,7 +99,7 @@ export function useNewCrds() {
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);
 				const json = await res.json();
 				
-				if (typeof window !== 'undefined') {
+				if (typeof window !== 'undefined' && window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1') {
 					window.localStorage.setItem(CACHE_KEY, JSON.stringify({ timestamp: Date.now(), data: json }));
 				}
 

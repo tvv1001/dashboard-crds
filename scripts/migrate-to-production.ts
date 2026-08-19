@@ -28,8 +28,25 @@ async function migrate() {
 		token: upstashToken,
 	});
 
-	console.log("Fetching keys from local Redis...");
-	const keys = await localRedis.keys('*');
+	const targetKeys = process.argv.slice(2);
+	let keys: string[] = [];
+
+	if (targetKeys.length > 0) {
+		console.log(`Targeting specific keys provided via arguments: ${targetKeys.join(', ')}`);
+		// Check if they exist locally
+		for (const key of targetKeys) {
+			const exists = await localRedis.exists(key);
+			if (exists) {
+				keys.push(key);
+			} else {
+				console.warn(`Warning: Target key ${key} not found in local Redis.`);
+			}
+		}
+	} else {
+		console.log("Fetching all keys from local Redis...");
+		keys = await localRedis.keys('*');
+	}
+	
 	console.log(`Found ${keys.length} keys to migrate.`);
 
 	let migratedCount = 0;

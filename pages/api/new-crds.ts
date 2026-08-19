@@ -3,7 +3,7 @@ import { promises as fs } from 'fs';
 import path from 'path';
 import { spawn, type ChildProcessByStdio } from 'child_process';
 import type { Readable } from 'stream';
-import { formatErrorMessage, getCacheValue, getRedisConnectionMode, getRedisDbSize, listSavedKeysWithStats, loadSavedPayload, setCacheValue } from './_lib';
+import { formatErrorMessage, getCacheValue, getRedisConnectionMode, getRedisDbSize, listSavedKeysWithStats, loadSavedPayload, setCacheValue, getTopCrdsFromZset, extractDisplayNameFromContent, getContentBlock } from './_lib';
 
 type SavedSummaryGroup = {
 	id: string;
@@ -109,12 +109,29 @@ async function collectRedisHighWaterSummary() {
 		};
 	}
 
-	const { keys } = await listSavedKeysWithStats({ limit: 0, sort: 'crd-desc' });
+	const topIndividualCrds = await getTopCrdsFromZset('individual', 20);
+	const topFirmCrds = await getTopCrdsFromZset('firm', 20);
+	const allTopCrds = [...topIndividualCrds, ...topFirmCrds];
+
+	let indexKeys = [];
+	if (allTopCrds.length > 0) {
+		const result = await listSavedKeysWithStats({ limit: 0, includeCrds: allTopCrds });
+		indexKeys = result.keys;
+	} else {
+		// Fallback to full DB scan if cronjob hasn't populated zsets
+		const result = await listSavedKeysWithStats({ limit: 0, sort: 'crd-desc' });
+		indexKeys = result.keys;
+	}
+
 	const uniqueTotalCrds = await getRedisDbSize();
 	const grouped = new Map<string, NewCrdItem>();
-	for (const entry of keys) {
+
+	for (const entry of indexKeys) {
 		const crd = sanitizePositiveInt(entry.crd);
 		if (!crd) continue;
+		// If we're using ZSETs, forcefully ignore everything else!
+		if (allTopCrds.length > 0 && !allTopCrds.includes(crd)) continue;
+
 		const id = `${entry.type}:${entry.crd}`;
 		const foundAt = entry.mtime ? new Date(entry.mtime).toISOString() : checkedAt;
 		const existing = grouped.get(id);
@@ -142,17 +159,62 @@ async function collectRedisHighWaterSummary() {
 		});
 	}
 
+	// Ensure all top CRDs have a proper name, falling back to loading their payload if missing or generic
+	
+	for (const crd of topIndividualCrds) {
+		const id = `individual:${crd}`;
+		const existing = grouped.get(id);
+		if (!existing || existing.name.startsWith('#')) {
+			const sources = ['finra', 'sec'];
+			for (const source of sources) {
+				try {
+					const rawKey = `${source}:individual:${crd}`;
+					const payload = await loadSavedPayload(rawKey);
+					if (payload) {
+						const content = getContentBlock(rawKey, payload);
+						const name = extractDisplayNameFromContent(rawKey, content) || `#${crd}`;
+						if (existing) {
+							existing.name = name;
+						} else {
+							grouped.set(id, { id, type: 'individual', crd, name, foundAt: checkedAt, sources: [source], savedFiles: [rawKey] });
+						}
+						break;
+					}
+				} catch (err) {}
+			}
+		}
+	}
+
+	
+	for (const crd of topFirmCrds) {
+		const id = `firm:${crd}`;
+		const existing = grouped.get(id);
+		if (!existing || existing.name.startsWith('#')) {
+			const sources = ['finra', 'sec'];
+			for (const source of sources) {
+				try {
+					const rawKey = `${source}:firm:${crd}`;
+					const payload = await loadSavedPayload(rawKey);
+					if (payload) {
+						const content = getContentBlock(rawKey, payload);
+						const name = extractDisplayNameFromContent(rawKey, content) || `#${crd}`;
+						if (existing) {
+							existing.name = name;
+						} else {
+							grouped.set(id, { id, type: 'firm', crd, name, foundAt: checkedAt, sources: [source], savedFiles: [rawKey] });
+						}
+						break;
+					}
+				} catch (err) {}
+			}
+		}
+	}
+
 	const sortByCrdDesc = (left: NewCrdItem, right: NewCrdItem) => Number(right.crd) - Number(left.crd) || String(right.foundAt || '').localeCompare(String(left.foundAt || ''));
 	const maxItems = 20;
 	const sections = {
-		individual: Array.from(grouped.values())
-			.filter((item) => item.type === 'individual')
-			.sort(sortByCrdDesc)
-			.slice(0, maxItems),
-		firm: Array.from(grouped.values())
-			.filter((item) => item.type === 'firm')
-			.sort(sortByCrdDesc)
-			.slice(0, maxItems),
+		individual: Array.from(grouped.values()).filter((item) => item.type === 'individual').sort(sortByCrdDesc).slice(0, maxItems),
+		firm: Array.from(grouped.values()).filter((item) => item.type === 'firm').sort(sortByCrdDesc).slice(0, maxItems),
 	};
 
 	return {
