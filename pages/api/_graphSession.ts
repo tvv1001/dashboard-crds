@@ -4,9 +4,9 @@
 import zlib from 'zlib';
 import { deleteGraphCacheKey, getGraphCacheValue, getLocalRedisValue, setGraphCacheValue } from './_lib';
 
-export const REDIS_GRAPH_KEY = 'finra:graph';
-export const REDIS_GRAPH_UPDATED_AT_KEY = 'finra:graph:updated-at';
-export const REDIS_GRAPH_SESSION_KEY = 'finra:graph:session';
+export const REDIS_GRAPH_KEY = 'finra-sec:graph';
+export const REDIS_GRAPH_UPDATED_AT_KEY = 'finra-sec:graph:updated-at';
+export const REDIS_GRAPH_SESSION_KEY = 'finra-sec:graph:session';
 
 export type GraphSessionNode = {
 	id: string;

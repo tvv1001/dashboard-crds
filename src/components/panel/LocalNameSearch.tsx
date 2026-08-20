@@ -89,6 +89,26 @@ export function LocalNameSearch({
 				onKeyDown={handleKeyDown}
 				spellCheck={false}
 			/>
+			<div className='local-name-search-filters' style={{ display: 'flex', gap: '15px', padding: '10px 0', fontSize: '13px', alignItems: 'center' }}>
+				<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+					<input type='checkbox' defaultChecked /> Firm
+				</label>
+				<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+					<input type='checkbox' defaultChecked /> Person
+				</label>
+				<label style={{ display: 'flex', alignItems: 'center', gap: '4px', marginLeft: '10px' }}>
+					Zip Code: <input type='text' placeholder='Zip' style={{ width: '60px', padding: '2px 4px', fontSize: '12px' }} />
+				</label>
+				<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+					Radius: 
+					<select style={{ padding: '2px 4px', fontSize: '12px' }}>
+						<option value='10'>10 mi</option>
+						<option value='25'>25 mi</option>
+						<option value='50'>50 mi</option>
+						<option value='100'>100 mi</option>
+					</select>
+				</label>
+			</div>
 			<div className='local-name-search-status-row'>
 				<a
 					href='/api/redis-health'

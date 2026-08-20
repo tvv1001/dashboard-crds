@@ -478,28 +478,13 @@ function parseTermGroups(value: string): string[][] {
 }
 
 function matchTermGroup(tokens: string[], entry: LocalSearchEntry) {
-	// Broad OR + fuzzy matching: a record matches a query group if it matches
-	// ANY of the group's words (anywhere in its record, name or otherwise),
-	// exactly or fuzzily. Results are ranked afterward by matchScore so
-	// records matching more/exact/own-name terms surface above partial or
-	// incidental matches.
 	const matches: NonNullable<ReturnType<typeof findMatchedValues>>[] = [];
 	for (const token of tokens) {
-		// A single-character token (e.g. a middle initial like "d") is too
-		// short to safely OR-match against the entire record — almost every
-		// entry contains that letter somewhere as a substring. Instead of
-		// dropping it (or requiring it), only credit it as a match when it
-		// appears as a standalone word/initial in the entity's own name, so
-		// it can still contribute to ranking without flooding results.
-		if (token.length < 2) {
-			const initialMatches = entry.searchableNames.filter((value) => normalizeForSearch(value).split(' ').includes(token));
-			if (initialMatches.length) {
-				matches.push({ term: token, exact: true, nameMatch: true, matchedValues: initialMatches.slice(0, 6) });
-			}
-			continue;
+		const nameMatches = entry.searchableNames.filter((name) => normalizeForSearch(name).includes(token));
+		if (nameMatches.length) {
+			const exact = nameMatches.some((name) => normalizeForSearch(name) === token || normalizeForSearch(name).split(' ').includes(token));
+			matches.push({ term: token, exact, nameMatch: true, matchedValues: nameMatches.slice(0, 6) });
 		}
-		const match = findMatchedValues(token, entry);
-		if (match) matches.push(match);
 	}
 	if (!matches.length) return null;
 	return matches;
