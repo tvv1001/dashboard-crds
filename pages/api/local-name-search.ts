@@ -480,10 +480,21 @@ function parseTermGroups(value: string): string[][] {
 function matchTermGroup(tokens: string[], entry: LocalSearchEntry) {
 	const matches: NonNullable<ReturnType<typeof findMatchedValues>>[] = [];
 	for (const token of tokens) {
+		const isNumber = /^\d+$/.test(token);
+		if (isNumber && entry.crd.includes(token)) {
+			matches.push({ term: token, exact: entry.crd === token, nameMatch: true, matchedValues: [entry.crd] });
+			continue;
+		}
 		const nameMatches = entry.searchableNames.filter((name) => normalizeForSearch(name).includes(token));
 		if (nameMatches.length) {
 			const exact = nameMatches.some((name) => normalizeForSearch(name) === token || normalizeForSearch(name).split(' ').includes(token));
 			matches.push({ term: token, exact, nameMatch: true, matchedValues: nameMatches.slice(0, 6) });
+			continue;
+		}
+		// Fallback for current firm or other critical text (avoids huge disclosure matches)
+		const coreText = normalizeForSearch(`${entry.currentFirm} ${entry.secNumber} ${entry.currentCity}`);
+		if (coreText.includes(token)) {
+			matches.push({ term: token, exact: false, nameMatch: false, matchedValues: [coreText] });
 		}
 	}
 	if (!matches.length) return null;

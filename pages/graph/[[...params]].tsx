@@ -2467,7 +2467,7 @@ export default function NodeGraphPage() {
 	return (
 		<>
 			<Head>
-				<title>{entityTitle ? `${entityTitle} • Node Graph` : 'Node Graph'} • FINRA / SEC</title>
+				<title>{`${entityTitle ? `${entityTitle} • Node Graph` : 'Node Graph'} • FINRA / SEC`}</title>
 			</Head>
 
 			<div

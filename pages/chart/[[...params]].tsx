@@ -314,7 +314,7 @@ const LAYOUT_SPREAD = 7;
  * Local testing: bare `/chart` preloads curated CRD seeds (see chartPreloadSeeds)
  * plus catalog edges among them. Set false to restore blank-canvas behavior.
  */
-const CHART_USE_PRELOAD_SEEDS = true;
+const CHART_USE_PRELOAD_SEEDS = false;
 
 function hashString(input: string): number {
 	let h = 2166136261;
@@ -4338,7 +4338,7 @@ export default function GlobalGraphPage() {
 	return (
 		<>
 			<Head>
-				<title>{focus ? `${focus.label} • Global Map` : 'Global Map'} • FINRA / SEC</title>
+				<title>{`${focus ? `${focus.label} • Global Map` : 'Global Map'} • FINRA / SEC`}</title>
 			</Head>
 
 			<div

@@ -1,5 +1,5 @@
 import type { NextApiRequest, NextApiResponse } from 'next';
-import { formatErrorMessage, loadCombinedSavedPayloadBundle, removeSavedPayload, discoverFirmIdsFromPayload, trackFirmConnections } from './_lib';
+import { formatErrorMessage, loadCombinedSavedPayloadBundle, removeSavedPayload, discoverFirmIdsFromPayload, trackFirmConnections, hydrateFromUpstream } from './_lib';
 import { findOwnerReference, findEmploymentReference, type OwnerReference, type EmploymentReference } from './_graphIndex';
 
 function parseSavedKey(key: string) {
@@ -152,6 +152,24 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 					});
 				} catch {
 					// Redis-only: keep trying the other source/type keys
+				}
+			}
+
+			// HYDRATE FROM UPSTREAM
+			const hydrated = await hydrateFromUpstream(parsed.type, parsed.crd);
+			if (hydrated) {
+				try {
+					// We must try fetching the requested key again now that it's in Redis
+					const bundle = await loadCombinedSavedPayloadBundle(key);
+					return res.json({
+						rawPayload: JSON.stringify(bundle, null, 2),
+						requestedKey: key,
+						resolvedKey: bundle.resolvedKey,
+						fallbackUsed: bundle.resolvedKey !== key,
+						bundle,
+					});
+				} catch {
+					// If it still fails, fall through to orphan checks
 				}
 			}
 

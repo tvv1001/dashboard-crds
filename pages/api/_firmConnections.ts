@@ -29,7 +29,7 @@ export type FirmConnectionsPayload = {
 	source: 'redis' | 'empty';
 };
 
-const REDIS_CACHE_KEYS = (firmId: string) => [`graph:firm-emp-adj:v1:${firmId}`, `graph:firm-connections:v9:${firmId}`];
+const REDIS_CACHE_KEYS = (firmId: string) => [`graph:firm-connections:v10:${firmId}`, `graph:firm-connections:v9:${firmId}`, `graph:firm-emp-adj:v1:${firmId}`];
 
 function toArray(value: unknown): any[] {
 	return Array.isArray(value) ? value : [];

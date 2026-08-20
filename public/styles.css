@@ -1691,6 +1691,7 @@ button:disabled {
 	padding: 5px;
 	overflow-y: auto;
 	overflow-x: hidden;
+	word-break: break-word;
 	font-family: var(--font-mono);
 	font-size: 0.85rem;
 	line-height: 1.65;
@@ -3611,6 +3612,7 @@ button:disabled {
 /* ══════════════════════════════════════════════════════════════
    RIGHT SIDEBAR — NEW CRDs
    ══════════════════════════════════════════════════════════════ */
+
 .new-crds-header {
 	display: flex;
 	align-items: flex-start;
@@ -3635,6 +3637,7 @@ button:disabled {
 	letter-spacing: 0.08em;
 	background: linear-gradient(135deg, var(--cyan-bright), var(--violet-bright));
 	-webkit-background-clip: text;
+	background-clip: text;
 	-webkit-text-fill-color: transparent;
 }
 
@@ -4458,8 +4461,8 @@ button:disabled {
 
 /* FgDrawer Shared CSS */
 .node-detail-drawer {
-	width: 336px;
-	max-width: min(336px, 100vw);
+	width: 460px;
+	max-width: min(300px, 100vw);
 	background: #0d131f;
 	border-left: 1px solid rgba(255, 255, 255, 0.08);
 	display: flex;
@@ -4480,10 +4483,15 @@ button:disabled {
 	transform: translateX(0);
 	visibility: visible;
 }
+
+.node-detail-drawer .disclosure-detail-card.exam-card-product {
+	height: auto;
+}
+
 .node-detail-drawer .disclosure-detail-list-compact {
 	display: flex;
-	align-items: center;
-	justify-content: space-between;
+	flex-wrap: wrap;
+	gap: 8px;
 	padding: 8px;
 	border-bottom: 1px solid rgba(255, 255, 255, 0.08);
 }
@@ -4510,17 +4518,20 @@ button:disabled {
 .theme-light .sidebar-header h1 {
 	color: #111827;
 }
+
 .fg-panel-error {
 	margin: 8px 0 0;
 	color: #f87171;
 	font-size: 0.8rem;
 }
+
 .role-rows {
 	display: flex;
 	flex-direction: column;
 	gap: 4px;
 	margin-bottom: 10px;
 }
+
 .role-row {
 	display: flex;
 	align-items: center;
@@ -4541,13 +4552,17 @@ button:disabled {
 	flex-shrink: 0;
 }
 
-.sidebar-content {
+.sidebar-content > div {
 	padding: 5px;
 	overflow-y: auto;
 	flex: 1;
 	background: #0d131f;
 	color: #f1f1ff;
 	border-bottom: 1px solid #2a50a996;
+}
+
+.sidebar-content {
+	width: 100%;
 }
 
 .node-detail-drawer .current-crd-banner,

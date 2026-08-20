@@ -508,7 +508,7 @@ async function buildOwnerReferenceIndex(keys: SavedKeyStat[]): Promise<Map<strin
 	return index;
 }
 
-async function getOwnerReferenceIndex(): Promise<Map<string, OwnerReference>> {
+export async function getOwnerReferenceIndex(): Promise<Map<string, OwnerReference>> {
 	const { signature, keys } = await getOwnerReferenceIndexSignature();
 	if (cachedOwnerIndex && cachedOwnerSignature === signature) return cachedOwnerIndex;
 	if (cachedOwnerIndexPromise && cachedOwnerSignature === signature) return cachedOwnerIndexPromise;

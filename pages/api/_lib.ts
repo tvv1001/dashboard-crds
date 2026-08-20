@@ -167,7 +167,7 @@ function sleep(ms: number) {
 	return new Promise((r) => setTimeout(r, ms));
 }
 
-async function getRedisClient() {
+export async function getRedisClient() {
 	if (!redisClient) return null;
 	if (!redisClient.isOpen) {
 		await redisClient.connect();
