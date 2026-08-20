@@ -2193,7 +2193,7 @@ export default function GlobalGraphPage() {
 				}
 				// Normalize mutualPartners roughly by seed count so large seeds don't dominate
 				mutualPartners = Math.round(mutualPartners / Math.max(1, CHART_PRELOAD_SEEDS.length / 40));
-				const catalogIndustryDate = Number(catalog?.industryDate || 0) || 0;
+				const catalogIndustryDate = Number((catalog as any)?.industryDate || 0) || 0;
 				// industryDate is usually a timestamp string; treat larger as more senior
 				const industryFactor = catalogIndustryDate ? Math.min(1.6, 1 + Math.log10(1 + Math.abs(Date.now() - catalogIndustryDate)) * 0.0000000001) : 1;
 				// regionGroup bias: small angular jitter per region so same-region seeds cluster

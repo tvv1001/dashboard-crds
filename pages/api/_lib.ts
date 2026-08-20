@@ -1490,6 +1490,8 @@ export interface CombinedSavedPayloadBundle {
 		finra: CombinedSavedPayloadSourceRecord;
 		sec: CombinedSavedPayloadSourceRecord;
 	};
+	brokersConnected?: string[];
+	brokersPrevious?: string[];
 }
 
 export async function loadCombinedSavedPayloadBundle(key: string): Promise<CombinedSavedPayloadBundle> {
@@ -1547,7 +1549,7 @@ export async function loadCombinedSavedPayloadBundle(key: string): Promise<Combi
 			};
 		}
 	}
-	const bundle = {
+	const bundle: CombinedSavedPayloadBundle = {
 		requestedKey,
 		resolvedKey,
 		crd,
@@ -1557,6 +1559,32 @@ export async function loadCombinedSavedPayloadBundle(key: string): Promise<Combi
 			sec: await readSourceRecord('sec'),
 		},
 	};
+
+	if (type === 'firm') {
+		try {
+			const client = await getRedisClient();
+			if (client) {
+				const finraConn = await client.get(`finra:firm:${crd}_brokers:connected`);
+				const secConn = await client.get(`sec:firm:${crd}_brokers:connected`);
+				const finraPrev = await client.get(`finra:firm:${crd}_brokers:previous`);
+				const secPrev = await client.get(`sec:firm:${crd}_brokers:previous`);
+				
+				const connectedSet = new Set<string>();
+				const prevSet = new Set<string>();
+				
+				if (finraConn) JSON.parse(finraConn).forEach((id: string) => connectedSet.add(String(id)));
+				if (secConn) JSON.parse(secConn).forEach((id: string) => connectedSet.add(String(id)));
+				if (finraPrev) JSON.parse(finraPrev).forEach((id: string) => prevSet.add(String(id)));
+				if (secPrev) JSON.parse(secPrev).forEach((id: string) => prevSet.add(String(id)));
+				
+				bundle.brokersConnected = Array.from(connectedSet);
+				bundle.brokersPrevious = Array.from(prevSet);
+			}
+		} catch (e) {
+			// skip on error
+		}
+	}
+
 	if (!bundle.sources.finra.found && !bundle.sources.sec.found) {
 		// The local `data/raw` disk fallback has been removed — Redis is the
 		// single source of truth for saved payloads now.

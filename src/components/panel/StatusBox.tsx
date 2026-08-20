@@ -464,38 +464,7 @@ function connectionRowFromEntry(entry: any): any {
 	};
 }
 
-function useFirmEmployeeConnections(crd: string, enabled: boolean) {
-	const [state, setState] = useState<{ current: any[]; previous: any[]; loading: boolean } | null>(null);
 
-	React.useEffect(() => {
-		if (!enabled || !crd) {
-			setState(null);
-			return;
-		}
-		let cancelled = false;
-		setState({ current: [], previous: [], loading: true });
-		fetch(`/api/finra/firm/${encodeURIComponent(crd)}/connections`)
-			.then((res) => (res.ok ? res.json() : null))
-			.then((data) => {
-				if (cancelled) return;
-				const current = Array.isArray(data?.currentConnections) ? data.currentConnections : [];
-				const previous = Array.isArray(data?.previousConnections) ? data.previousConnections : [];
-				setState({
-					current: sortRowsByLabel(current.map(connectionRowFromEntry)),
-					previous: sortRowsByLabel(previous.map(connectionRowFromEntry)),
-					loading: false,
-				});
-			})
-			.catch(() => {
-				if (!cancelled) setState({ current: [], previous: [], loading: false });
-			});
-		return () => {
-			cancelled = true;
-		};
-	}, [crd, enabled]);
-
-	return state;
-}
 
 // Keys that are internal UI/booking flags rather than human-readable disclosure
 // narrative content, so they're excluded from the rendered detail card.
@@ -1284,7 +1253,16 @@ function RecordInfoView({
 	const parsedKey = parseCrdKey(activeKey);
 	const rawPayload = maybeParseJson(detailJson);
 	const combinedBundle = rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload) ? (rawPayload as Record<string, any>) : null;
-	const employeeConnections = useFirmEmployeeConnections(parsedKey?.crd || '', parsedKey?.type === 'firm');
+	
+	const brokersConnected = (combinedBundle?.brokersConnected as string[]) || [];
+	const brokersPrevious = (combinedBundle?.brokersPrevious as string[]) || [];
+	
+	const employeeConnections = {
+		loading: false,
+		current: brokersConnected.map(crd => ({ crd, name: `CRD ${crd}` })),
+		previous: brokersPrevious.map(crd => ({ crd, name: `CRD ${crd}` }))
+	};
+
 	// Only treat as orphan when there is no live FINRA/SEC source payload.
 	// Some records appear both as firm owner refs and as full BrokerCheck people;
 	// a stale/cached orphan flag must not hide the real Redis detail.

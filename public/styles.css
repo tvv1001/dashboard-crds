@@ -4479,6 +4479,7 @@ button:disabled {
 	visibility: hidden;
 	max-height: 75vh;
 }
+
 .node-detail-drawer.open {
 	transform: translateX(0);
 	visibility: visible;

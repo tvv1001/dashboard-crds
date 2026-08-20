@@ -130,7 +130,7 @@ async function collectRedisHighWaterSummary() {
 		const crd = sanitizePositiveInt(entry.crd);
 		if (!crd) continue;
 		// If we're using ZSETs, forcefully ignore everything else!
-		if (allTopCrds.length > 0 && !allTopCrds.includes(crd)) continue;
+		if (allTopCrds.length > 0 && !allTopCrds.includes(String(crd))) continue;
 
 		const id = `${entry.type}:${entry.crd}`;
 		const foundAt = entry.mtime ? new Date(entry.mtime).toISOString() : checkedAt;
@@ -165,7 +165,7 @@ async function collectRedisHighWaterSummary() {
 		const id = `individual:${crd}`;
 		const existing = grouped.get(id);
 		if (!existing || existing.name.startsWith('#')) {
-			const sources = ['finra', 'sec'];
+			const sources = ['finra', 'sec'] as const;
 			for (const source of sources) {
 				try {
 					const rawKey = `${source}:individual:${crd}`;
@@ -190,7 +190,7 @@ async function collectRedisHighWaterSummary() {
 		const id = `firm:${crd}`;
 		const existing = grouped.get(id);
 		if (!existing || existing.name.startsWith('#')) {
-			const sources = ['finra', 'sec'];
+			const sources = ['finra', 'sec'] as const;
 			for (const source of sources) {
 				try {
 					const rawKey = `${source}:firm:${crd}`;
