@@ -6,6 +6,17 @@ let localIoRedis: IORedis | null = null;
 // invocation which adds latency and extra resource usage.
 const upstashClientCache = new Map<string, UpstashRedis>();
 
+/** A malformed env var (bad URL) must never crash the whole app at module load. */
+function isValidHttpUrl(value: string | undefined | null): value is string {
+	if (!value) return false;
+	try {
+		const parsed = new URL(value);
+		return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+	} catch {
+		return false;
+	}
+}
+
 async function executeLocalRequest(req: any): Promise<any> {
 	if (!localIoRedis) {
 		localIoRedis = new IORedis('redis://127.0.0.1:6379');
@@ -53,8 +64,8 @@ export function getRedisClientInstance(config: { url: string; token: string }) {
 	const url2 = process.env.UPSTASH_REDIS_REST_URL_MIRROR || process.env.UPSTASH_REDIS_REST_URL_2;
 	const token2 = process.env.UPSTASH_REDIS_REST_TOKEN_MIRROR || process.env.UPSTASH_REDIS_REST_TOKEN_2 || process.env.UPSTASH_REDIS_REST_TOKEN__2;
 
-	const hasDb1 = !!(url1 && token1);
-	const hasDb2 = !!(url2 && token2);
+	const hasDb1 = !!(token1 && isValidHttpUrl(url1));
+	const hasDb2 = !!(token2 && isValidHttpUrl(url2));
 	const disableDb2 = process.env.UPSTASH_REDIS_DISABLE_MIRROR === '1' || process.env.UPSTASH_REDIS_DISABLE_2 === '1';
 
 	// If DB2 is explicitly disabled via env, prefer DB1 when available and avoid the dual-proxy.
@@ -239,8 +250,8 @@ export function getReadOnlyRedisClientInstance(config?: { url?: string; token?: 
 	const url2 = process.env.UPSTASH_REDIS_REST_URL_MIRROR || process.env.UPSTASH_REDIS_REST_URL_2 || config?.url;
 	const token2 = process.env.UPSTASH_REDIS_REST_TOKEN_MIRROR || process.env.UPSTASH_REDIS_REST_TOKEN_2 || process.env.UPSTASH_REDIS_REST_TOKEN__2;
 
-	const hasDb1 = !!(url1 && token1);
-	const hasDb2 = !!(url2 && token2);
+	const hasDb1 = !!(token1 && isValidHttpUrl(url1));
+	const hasDb2 = !!(token2 && isValidHttpUrl(url2));
 	const disableDb2 = process.env.UPSTASH_REDIS_DISABLE_MIRROR === '1' || process.env.UPSTASH_REDIS_DISABLE_2 === '1';
 
 	const readMethods = new Set(['get', 'mget', 'scan', 'zrange', 'smembers', 'hgetall', 'exists', 'dbsize', 'type', 'keys', 'hget', 'zrevrange', 'zscore', 'zrank', 'zincrby']);
@@ -299,8 +310,22 @@ export function getReadOnlyRedisClientInstance(config?: { url?: string; token?: 
 		});
 	}
 
-	if (hasDb1) return new UpstashRedis({ url: url1, token: token1 });
-	if (hasDb2) return new UpstashRedis({ url: url2, token: token2 });
+	if (hasDb1) return new UpstashRedis({ url: url1 as string, token: token1 as string });
+	if (hasDb2) return new UpstashRedis({ url: url2 as string, token: token2 as string });
 
-	return new UpstashRedis({ url: config?.url || '', token: config?.token || '' });
+	// No valid Upstash config available: return a client whose calls simply
+	// reject/return null rather than throwing a malformed-URL error at
+	// construction time (which would crash the whole module on import).
+	if (isValidHttpUrl(config?.url) && config?.token) {
+		return new UpstashRedis({ url: config.url as string, token: config.token });
+	}
+	return new Proxy(
+		{},
+		{
+			get(_target, prop) {
+				if (typeof prop !== 'string') return undefined;
+				return async () => null;
+			},
+		},
+	) as any;
 }
