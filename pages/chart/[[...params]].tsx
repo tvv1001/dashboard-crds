@@ -1393,7 +1393,7 @@ export default function GlobalGraphPage() {
 	}, [drawerOpen]);
 	const [searchLoading, setSearchLoading] = useState(false);
 	const [searchBanner, setSearchBanner] = useState<{ query: string; count: number } | null>(null);
-	/** Same Redis name-search path as dashboard bottom panel (`useLocalNameSearch` → `/api/redis-search`). */
+	/** Same name-search path as dashboard bottom panel (`useLocalNameSearch` → `/api/local-name-search`). */
 	const { search: searchRedisNames, setQuery: setNameSearchQuery } = useLocalNameSearch();
 	const [panelSnapshot, setPanelSnapshot] = useState<{
 		key: string;

@@ -63,7 +63,11 @@ export function LocalNameSearch({
 		: redisHeaderStatus.mode === 'redis-url' ? 'Redis URL'
 		: 'Not Configured';
 	const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-	const redisBadgeText = redisHeaderStatus.connected ? (isLocalhost ? 'Local Redis Connected' : 'Redis Connected') : 'Redis Disconnected';
+	const redisBadgeText =
+		redisHeaderStatus.connected ?
+			isLocalhost ? 'Local Redis Connected'
+			:	'Redis Connected'
+		:	'Redis Disconnected';
 	const redisBadgeTitle = `${redisModeLabel}${redisHeaderStatus.latencyMs != null ? ` • ${Math.round(redisHeaderStatus.latencyMs)}ms` : ''}`;
 	const redisBadgeClass = `redis-health-badge ${redisHeaderStatus.connected ? 'connected' : 'disconnected'}`;
 
@@ -99,18 +103,33 @@ export function LocalNameSearch({
 					<span className='local-name-search-button-label'>{loading ? 'Fetching…' : 'Search'}</span>
 				</button>
 			</div>
-			<div className='local-name-search-filters' style={{ display: 'flex', gap: '15px', padding: '10px 0', fontSize: '13px', alignItems: 'center' }}>
+			<div
+				className='local-name-search-filters'
+				style={{ display: 'flex', gap: '15px', padding: '10px 0', fontSize: '13px', alignItems: 'center' }}>
 				<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-					<input type='checkbox' defaultChecked /> Firm
+					<input
+						type='checkbox'
+						defaultChecked
+					/>{' '}
+					Firm
 				</label>
 				<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-					<input type='checkbox' defaultChecked /> Person
+					<input
+						type='checkbox'
+						defaultChecked
+					/>{' '}
+					Person
 				</label>
 				<label style={{ display: 'flex', alignItems: 'center', gap: '4px', marginLeft: '10px' }}>
-					Zip Code: <input type='text' placeholder='Zip' style={{ width: '60px', padding: '2px 4px', fontSize: '12px' }} />
+					Zip Code:{' '}
+					<input
+						type='text'
+						placeholder='Zip'
+						style={{ width: '60px', padding: '2px 4px', fontSize: '12px' }}
+					/>
 				</label>
 				<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-					Radius: 
+					Radius:
 					<select style={{ padding: '2px 4px', fontSize: '12px' }}>
 						<option value='10'>10 mi</option>
 						<option value='25'>25 mi</option>
@@ -118,18 +137,19 @@ export function LocalNameSearch({
 						<option value='100'>100 mi</option>
 					</select>
 				</label>
+				<div className='local-name-search-status-row'>
+					<a
+						href='/api/redis-health'
+						target='_blank'
+						rel='noopener noreferrer'
+						className={redisBadgeClass}
+						title={`${redisBadgeTitle} • Open health details`}
+						aria-label='Open Redis health details'>
+						{redisBadgeText}
+					</a>
+				</div>
 			</div>
-			<div className='local-name-search-status-row'>
-				<a
-					href='/api/redis-health'
-					target='_blank'
-					rel='noopener noreferrer'
-					className={redisBadgeClass}
-					title={`${redisBadgeTitle} • Open health details`}
-					aria-label='Open Redis health details'>
-					{redisBadgeText}
-				</a>
-			</div>
+
 			{results.length > 0 && (
 				<div className='row'>
 					<button

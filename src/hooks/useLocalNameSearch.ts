@@ -44,7 +44,7 @@ export function useLocalNameSearch() {
 			setSearched(false);
 			try {
 				const params = new URLSearchParams({ q: searchQ.trim() });
-				const res = await fetch(`/api/redis-search?${params.toString()}`);
+				const res = await fetch(`/api/local-name-search?${params.toString()}`);
 				if (!res.ok) throw new Error(`HTTP ${res.status}`);
 				const json = await res.json();
 				const found: LocalNameSearchResult[] =
@@ -71,7 +71,7 @@ export function useLocalNameSearch() {
 						});
 						if (externalRes.ok) {
 							// After the external search saves payloads to Redis, update the UI
-							const recheckRes = await fetch(`/api/redis-search?${params.toString()}`);
+							const recheckRes = await fetch(`/api/local-name-search?${params.toString()}`);
 							if (recheckRes.ok) {
 								const recheckJson = await recheckRes.json();
 								const recheckFound: LocalNameSearchResult[] =

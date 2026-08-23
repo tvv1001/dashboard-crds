@@ -1111,7 +1111,7 @@ export default function NodeGraphPage() {
 		setSearchLoading(true);
 		setSearchError('');
 		setSearchBanner(null);
-		fetch(`/api/redis-search?q=${encodeURIComponent(query)}`)
+		fetch(`/api/local-name-search?q=${encodeURIComponent(query)}`)
 			.then((r) => r.json())
 			.then((json) => {
 				const matches =
