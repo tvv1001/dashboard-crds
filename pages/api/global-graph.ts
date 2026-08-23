@@ -75,15 +75,16 @@ async function readLayoutFromRedis(): Promise<{ body: string; source: string } |
 		const meta = JSON.parse(metaRaw) as { chunks?: number; encoding?: string };
 		const chunkCount = Number(meta.chunks || 0);
 		if (!Number.isFinite(chunkCount) || chunkCount <= 0) return null;
-		const parts: string[] = [];
-		for (let i = 0; i < chunkCount; i++) {
-			const part = await getCacheValue(`${layoutRedisChunkPrefix}${i}`);
-			if (!part) {
-				console.warn(`global-graph: missing redis chunk ${i}/${chunkCount}`);
-				return null;
-			}
-			parts.push(part);
+		// Fetch chunks concurrently (rather than one-at-a-time) to cut total
+		// round-trip latency and reduce the odds of hitting per-request time
+		// limits when both DB1/DB2 fallbacks are exercised sequentially.
+		const chunkResults = await Promise.all(Array.from({ length: chunkCount }, (_, i) => getCacheValue(`${layoutRedisChunkPrefix}${i}`)));
+		const missingIndex = chunkResults.findIndex((part) => !part);
+		if (missingIndex !== -1) {
+			console.warn(`global-graph: missing redis chunk ${missingIndex}/${chunkCount}`);
+			return null;
 		}
+		const parts = chunkResults as string[];
 		const joined = parts.join('');
 		if (meta.encoding === 'br-base64' || !joined.trimStart().startsWith('{')) {
 			const { brotliDecompressSync } = await import('zlib');

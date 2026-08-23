@@ -33,3 +33,5 @@ data/side-crd-full.json
 tsconfig.tsbuildinfo
 .notes
 data/search-index.json
+.vercel
+.env*

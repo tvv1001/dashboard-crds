@@ -73,11 +73,17 @@ export function getRedisClientInstance(config: { url: string; token: string }) {
 		let db2Maxxed = false;
 
 		const checkMaxxed = (err: any, dbIndex: 1 | 2) => {
-			const msg = String(err?.message || '').toLowerCase();
-			if (msg.includes('max') || msg.includes('limit') || msg.includes('exceeded') || msg.includes('daily')) {
+			const rawMsg = String(err?.message || err || '');
+			const msg = rawMsg.toLowerCase();
+			// Match actual Upstash quota-error phrasing rather than a bare
+			// "exceeded"/"limit" substring, which also matches unrelated
+			// errors (e.g. network timeouts like "deadline exceeded").
+			if (/max (daily )?requests?( per (second|day))? limit exceeded|daily request limit/.test(msg)) {
 				if (dbIndex === 1) db1Maxxed = true;
 				else db2Maxxed = true;
-				console.warn(`[Redis LB] DB${dbIndex} marked as maxxed out!`);
+				console.warn(`[Redis LB] DB${dbIndex} marked as maxxed out! ${rawMsg}`);
+			} else if (msg.includes('max') || msg.includes('limit') || msg.includes('exceeded') || msg.includes('daily')) {
+				console.warn(`[Redis LB] DB${dbIndex} error (not treated as quota exhaustion): ${rawMsg}`);
 			}
 		};
 
@@ -240,10 +246,12 @@ export function getReadOnlyRedisClientInstance(config?: { url?: string; token?: 
 	const readMethods = new Set(['get', 'mget', 'scan', 'zrange', 'smembers', 'hgetall', 'exists', 'dbsize', 'type', 'keys', 'hget', 'zrevrange', 'zscore', 'zrank', 'zincrby']);
 
 	const checkMaxxed = (err: any, dbIndex: 1 | 2) => {
-		const msg = String(err?.message || '').toLowerCase();
-		if (msg.includes('max') || msg.includes('limit') || msg.includes('exceeded') || msg.includes('daily')) {
-			// noop for read-only: log only
-			console.warn(`[Redis RO] DB${dbIndex} marked as maxxed out (read)!`);
+		const rawMsg = String(err?.message || err || '');
+		const msg = rawMsg.toLowerCase();
+		if (/max (daily )?requests?( per (second|day))? limit exceeded|daily request limit/.test(msg)) {
+			console.warn(`[Redis RO] DB${dbIndex} marked as maxxed out (read)! ${rawMsg}`);
+		} else if (msg.includes('max') || msg.includes('limit') || msg.includes('exceeded') || msg.includes('daily')) {
+			console.warn(`[Redis RO] DB${dbIndex} read failed (not treated as quota exhaustion): ${rawMsg}`);
 		}
 	};
 
