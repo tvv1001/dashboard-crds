@@ -822,7 +822,16 @@ async function main() {
 	const opts = parseArgs(process.argv.slice(2));
 	const started = Date.now();
 	console.log('Loading network index…', opts.inPath);
-	const raw = await fs.readFile(opts.inPath, 'utf-8');
+	let raw: string;
+	try {
+		raw = await fs.readFile(opts.inPath, 'utf-8');
+	} catch (e: any) {
+		if (e.code === 'ENOENT' && process.env.VERCEL) {
+			console.log(`Skipping layout build on Vercel: ${opts.inPath} not found.`);
+			return;
+		}
+		throw e;
+	}
 	const index = JSON.parse(raw) as NetworkIndex;
 	const metadata = index.metadata || {};
 	const adj = index.graph || {};
