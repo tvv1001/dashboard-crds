@@ -260,16 +260,7 @@ function nodeSize(degree: number, type: string, weight?: number): number {
 }
 
 function rawDataRoots(): string[] {
-	return [
-		path.resolve(process.cwd(), 'data', 'raw'),
-		path.resolve(process.cwd(), '..', 'Data-finra-sec', 'data', 'raw'),
-		path.resolve(process.cwd(), '..', 'newwest-new-data-vis', 'data', 'raw'),
-		path.resolve(process.cwd(), '..', 'finra-data-chart-next-01', 'data', 'raw'),
-		path.resolve(process.cwd(), '..', 'finra-data-large-view', 'data', 'raw'),
-		'/home/lenny/Dev/webDev/Data-finra-sec/data/raw',
-		'/home/lenny/Dev/webDev/newwest-new-data-vis/data/raw',
-		'/home/lenny/Dev/webDev/finra-data-chart-next-01/data/raw',
-	];
+	return [path.resolve(process.cwd(), 'data', 'raw')];
 }
 
 async function existingRawRoots(): Promise<string[]> {
@@ -475,7 +466,7 @@ async function loadIndividualCareerWeights(individualIds: string[]): Promise<Map
 		console.log('No individual raw dirs found — career weights fall back to network degree');
 		return out;
 	}
-	console.log(`Loading individual career weights from ${roots[0]} (+${Math.max(0, roots.length - 1)} fallbacks) for ${individualIds.length} brokers…`);
+	console.log(`Loading individual career weights from ${roots[0]} for ${individualIds.length} brokers…`);
 	let hit = 0;
 	let miss = 0;
 	for (const id of individualIds) {
@@ -633,7 +624,7 @@ async function loadFirmRegions(firmIds: string[]): Promise<Map<string, { state?:
 		console.log('No firm raw dirs found — region weights fall back to Unknown');
 		return out;
 	}
-	console.log(`Loading firm regions from ${existingRoots[0]} (+${Math.max(0, existingRoots.length - 1)} fallbacks)…`);
+	console.log(`Loading firm regions from ${existingRoots[0]}…`);
 	let hit = 0;
 	let miss = 0;
 	for (const id of firmIds) {

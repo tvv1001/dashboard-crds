@@ -6,7 +6,7 @@
 		"start": "node src/server.mjs",
 		"dev": "bash /home/lenny/Dev/db/redis/start-redis.sh && pnpm run kill-ports && next dev -p 3001",
 		"kill-ports": "fuser -k 3000/tcp 3001/tcp 2>/dev/null || true; sleep 0.2",
-		"build": "next build && pnpm run build-global-graph-layout",
+		"build": "next build",
 		"start:web": "next start",
 		"type-check": "tsc --noEmit",
 		"dev:server": "node src/server.mjs",
