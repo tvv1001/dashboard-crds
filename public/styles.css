@@ -3496,11 +3496,13 @@ button:disabled {
 	vertical-align: top;
 	word-break: break-word;
 	overflow-wrap: anywhere;
+	display: flex;
 }
 
 .local-name-search-row {
 	cursor: pointer;
 	transition: background-color 0.15s ease;
+	display: flex;
 }
 
 .local-name-search-row:hover {

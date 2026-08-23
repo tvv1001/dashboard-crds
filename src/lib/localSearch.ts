@@ -552,9 +552,15 @@ function tokensFuzzyMatch(queryToken: string, candidateToken: string) {
 	// Candidate token contains the query token (e.g. 'hooten' contains 'hoot')
 	if (candidateToken.includes(queryToken) && queryToken.length >= 3) return true;
 
+	// Query token contains the candidate token (e.g. if user types 'albanys' but name is 'albany')
+	if (queryToken.includes(candidateToken) && candidateToken.length >= 4) return true;
+
+	// Shared prefix matching (e.g., 'albany' and 'albanese' share 'alban')
+	if (queryToken.length >= 5 && candidateToken.length >= 5 && queryToken.substring(0, 5) === candidateToken.substring(0, 5)) return true;
+
 	const minLength = Math.min(queryToken.length, candidateToken.length);
 	if (minLength < 4) return false;
-	const maxDistance = Math.max(1, Math.floor(queryToken.length * 0.3));
+	const maxDistance = Math.max(2, Math.floor(queryToken.length * 0.4));
 	return getBoundedEditDistance(queryToken, candidateToken, maxDistance) <= maxDistance;
 }
 
@@ -1294,4 +1300,28 @@ export function extractSearchQueries(query: string): string[] {
 export function cleanSearchQuery(query: string): string {
 	const queries = extractSearchQueries(query);
 	return queries[0] || query.trim();
+}
+
+export async function resolveNameFromLocalIndex(source: LocalSearchSource, type: LocalSearchEntity, crd: string): Promise<string | null> {
+	const bucket = `${source}:${type}` as LocalSearchBucket;
+	const index = await loadIndex(bucket);
+	if (!index || !Array.isArray(index.docs)) return null;
+	const match = index.docs.find((d: any) => {
+		const hit = d.hit || {};
+		return String(hit.ind_source_id) === String(crd) || 
+			String(hit.ind_crd) === String(crd) || 
+			String(hit.firm_id) === String(crd) || 
+			String(hit.firmId) === String(crd) || 
+			String(hit.firm_source_id) === String(crd) || 
+			String(d.id) === String(crd);
+	});
+	if (match && match.hit) {
+		const hit = match.hit;
+		if (type === 'individual') {
+			const names = [hit.ind_firstname, hit.ind_middlename, hit.ind_lastname].filter(Boolean);
+			if (names.length) return names.join(' ');
+		}
+		return hit.firm_name || hit.firmName || hit.organizationName || hit.organization_name || hit.companyName || hit.legalName || hit.name || match.nameSearchText || null;
+	}
+	return null;
 }

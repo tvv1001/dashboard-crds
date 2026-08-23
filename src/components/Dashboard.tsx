@@ -21,7 +21,7 @@ export default function Dashboard() {
 	type RedisHeaderStatus = {
 		connected: boolean;
 		configured: boolean;
-		mode: 'upstash-rest' | 'redis-url' | 'none';
+		mode: 'upstash-rest' | 'redis-url' | 'local-redis' | 'none';
 		latencyMs: number | null;
 	};
 
@@ -292,7 +292,7 @@ export default function Dashboard() {
 				setRedisHeaderStatus({
 					connected: Boolean(json?.ok),
 					configured: Boolean(json?.configured),
-					mode: json?.mode === 'upstash-rest' || json?.mode === 'redis-url' ? json.mode : 'none',
+					mode: json?.mode === 'upstash-rest' || json?.mode === 'redis-url' || json?.mode === 'local-redis' ? json.mode : 'none',
 					latencyMs: Number.isFinite(Number(json?.latencyMs)) ? Number(json.latencyMs) : null,
 				});
 			} catch (error) {
@@ -312,6 +312,19 @@ export default function Dashboard() {
 		};
 
 		fetchRedisHealth();
+
+		const interval = setInterval(() => {
+			setRedisHeaderStatus(prev => {
+				if (!prev.connected) {
+					fetchRedisHealth();
+				}
+				return prev;
+			});
+		}, 10000);
+
+		return () => {
+			clearInterval(interval);
+		};
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 	}, []);
 

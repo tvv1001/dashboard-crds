@@ -110,6 +110,8 @@ export interface LocalNameSearchResult {
 	key?: string;
 	secNumber?: string;
 	currentAddress?: string;
+	currentFirm?: string;
+	currentFirmCrd?: string;
 	matchedValues?: string[];
 	matchedTerms?: string[];
 	aliases?: string[];

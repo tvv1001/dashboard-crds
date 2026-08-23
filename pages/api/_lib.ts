@@ -80,7 +80,7 @@ let rawKeysIndexRefreshPromise: Promise<SavedKeyStat[]> | null = null;
 let rawKeysIndexWritePromise: Promise<void> = Promise.resolve();
 const rawKeysIndexCacheTtlMs = Number(process.env.RAW_KEYS_INDEX_CACHE_TTL_MS) || 5 * 60 * 1000;
 
-export type RedisConnectionMode = 'upstash-rest' | 'redis-url' | 'none';
+export type RedisConnectionMode = 'upstash-rest' | 'redis-url' | 'local-redis' | 'none';
 
 export interface RedisHealthStatus {
 	ok: boolean;
@@ -96,6 +96,8 @@ export function formatErrorMessage(error: unknown) {
 }
 
 export function getRedisConnectionMode(): RedisConnectionMode {
+	const isLocalhost = process.env.NODE_ENV !== 'production' && process.env.USE_LOCAL_REDIS !== '0';
+	if (isLocalhost) return 'local-redis';
 	if (upstashRedisClient) return 'upstash-rest';
 	if (redisClient) return 'redis-url';
 	return 'none';

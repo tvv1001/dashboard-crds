@@ -216,7 +216,10 @@ export default function MyApp({ Component, pageProps }: AppProps) {
 	return (
 		<div className='app-shell'>
 			<nav className='top-nav' aria-label='Primary'>
-				<div className='top-nav-brand'>FINRA / SEC</div>
+				<div className='top-nav-brand' style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+					FINRA / SEC
+					<div id="top-nav-search-portal" />
+				</div>
 				<div className='top-nav-links'>
 					{navItems.map((item) => {
 						const isActive =

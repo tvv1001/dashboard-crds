@@ -19,7 +19,12 @@ function isValidHttpUrl(value: string | undefined | null): value is string {
 
 async function executeLocalRequest(req: any): Promise<any> {
 	if (!localIoRedis) {
-		localIoRedis = new IORedis('redis://127.0.0.1:6379');
+		localIoRedis = new IORedis('redis://127.0.0.1:6379', {
+			maxRetriesPerRequest: 0,
+			connectTimeout: 500,
+			commandTimeout: 500,
+			enableOfflineQueue: false
+		});
 		console.log('Other local applications can now connect to your shared local cache at redis://127.0.0.1:6379!');
 	}
 
@@ -50,7 +55,7 @@ async function executeLocalRequest(req: any): Promise<any> {
 }
 
 export function getRedisClientInstance(config: { url: string; token: string }) {
-	const isLocalhost = process.env.USE_LOCAL_REDIS === '1';
+	const isLocalhost = process.env.NODE_ENV !== 'production' && process.env.USE_LOCAL_REDIS !== '0';
 
 	if (isLocalhost) {
 		return new UpstashRedis({
@@ -239,7 +244,7 @@ export function getRedisClientInstance(config: { url: string; token: string }) {
  * read from the cache (e.g., analytics or reporting services).
  */
 export function getReadOnlyRedisClientInstance(config?: { url?: string; token?: string }) {
-	const isLocalhost = process.env.USE_LOCAL_REDIS === '1';
+	const isLocalhost = process.env.NODE_ENV !== 'production' && process.env.USE_LOCAL_REDIS !== '0';
 	if (isLocalhost) {
 		// Local proxy still supports read-only usage via the normal Upstash wrapper
 		return new UpstashRedis({ request: executeLocalRequest } as any);

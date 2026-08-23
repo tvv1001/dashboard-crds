@@ -4,6 +4,7 @@ import path from 'path';
 import { spawn, type ChildProcessByStdio } from 'child_process';
 import type { Readable } from 'stream';
 import { formatErrorMessage, getCacheValue, getRedisConnectionMode, getRedisDbSize, listSavedKeysWithStats, loadSavedPayload, setCacheValue, getTopCrdsFromZset, extractDisplayNameFromContent, getContentBlock } from './_lib';
+import { resolveNameFromLocalIndex } from '../../src/lib/localSearch';
 
 type SavedSummaryGroup = {
 	id: string;
@@ -166,46 +167,57 @@ async function collectRedisHighWaterSummary() {
 		const existing = grouped.get(id);
 		if (!existing || existing.name.startsWith('#')) {
 			const sources = ['finra', 'sec'] as const;
+			let resolvedName: string | null = null;
 			for (const source of sources) {
 				try {
 					const rawKey = `${source}:individual:${crd}`;
 					const payload = await loadSavedPayload(rawKey);
 					if (payload) {
 						const content = getContentBlock(rawKey, payload);
-						const name = extractDisplayNameFromContent(rawKey, content) || `#${crd}`;
-						if (existing) {
-							existing.name = name;
-						} else {
-							grouped.set(id, { id, type: 'individual', crd, name, foundAt: checkedAt, sources: [source], savedFiles: [rawKey] });
-						}
-						break;
+						resolvedName = extractDisplayNameFromContent(rawKey, content);
+						if (resolvedName) break;
+					} else {
+						// Fallback to sidecar flatfile
+						resolvedName = await resolveNameFromLocalIndex(source, 'individual', crd);
+						if (resolvedName) break;
 					}
 				} catch (err) {}
+			}
+			const finalName = resolvedName || `#${crd}`;
+			if (existing) {
+				existing.name = finalName;
+			} else {
+				grouped.set(id, { id, type: 'individual', crd, name: finalName, foundAt: checkedAt, sources: ['finra'], savedFiles: [] });
 			}
 		}
 	}
 
-	
 	for (const crd of topFirmCrds) {
 		const id = `firm:${crd}`;
 		const existing = grouped.get(id);
 		if (!existing || existing.name.startsWith('#')) {
 			const sources = ['finra', 'sec'] as const;
+			let resolvedName: string | null = null;
 			for (const source of sources) {
 				try {
 					const rawKey = `${source}:firm:${crd}`;
 					const payload = await loadSavedPayload(rawKey);
 					if (payload) {
 						const content = getContentBlock(rawKey, payload);
-						const name = extractDisplayNameFromContent(rawKey, content) || `#${crd}`;
-						if (existing) {
-							existing.name = name;
-						} else {
-							grouped.set(id, { id, type: 'firm', crd, name, foundAt: checkedAt, sources: [source], savedFiles: [rawKey] });
-						}
-						break;
+						resolvedName = extractDisplayNameFromContent(rawKey, content);
+						if (resolvedName) break;
+					} else {
+						// Fallback to sidecar flatfile
+						resolvedName = await resolveNameFromLocalIndex(source, 'firm', crd);
+						if (resolvedName) break;
 					}
 				} catch (err) {}
+			}
+			const finalName = resolvedName || `#${crd}`;
+			if (existing) {
+				existing.name = finalName;
+			} else {
+				grouped.set(id, { id, type: 'firm', crd, name: finalName, foundAt: checkedAt, sources: ['finra'], savedFiles: [] });
 			}
 		}
 	}

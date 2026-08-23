@@ -7,11 +7,6 @@ interface FgDrawerProps {
 	setDrawerOpen: React.Dispatch<React.SetStateAction<boolean>>;
 
 	// Search form props
-	searchQuery: string;
-	onSearchQueryChange: (q: string) => void;
-	onSearchSubmit: (e: React.FormEvent) => void;
-	searchDisabled: boolean;
-	searchLoading: boolean;
 
 	// Title / Roles
 	showTitleAndRoles: boolean;
@@ -36,11 +31,6 @@ interface FgDrawerProps {
 export function FgDrawer({
 	drawerOpen,
 	setDrawerOpen,
-	searchQuery,
-	onSearchQueryChange,
-	onSearchSubmit,
-	searchDisabled,
-	searchLoading,
 	showTitleAndRoles,
 	panelTitle,
 	panelRoleRows,
@@ -77,30 +67,6 @@ export function FgDrawer({
 	return (
 		<aside className={`node-detail-drawer${drawerOpen ? ' open' : ''}`}>
 			<div className='sidebar-header'>
-				<form
-					className='fg-search'
-					style={{ display: 'flex', width: '100%' }}
-					onSubmit={onSearchSubmit}>
-					<input
-						className='fg-search-input'
-						style={{ flex: 1, minWidth: 0 }}
-						type='search'
-						placeholder='firm, person, CRD/SEC#'
-						value={searchQuery}
-						onChange={(e) => onSearchQueryChange(e.target.value)}
-						aria-label='Search firm, person, or CRD'
-						autoComplete='off'
-						disabled={searchDisabled}
-					/>
-					<button
-						type='submit'
-						className='fg-send-btn'
-						aria-label='Search'
-						disabled={searchDisabled || searchLoading}>
-						➤
-					</button>
-				</form>
-
 				{panelRoleRows.length > 0 && (
 					<div className='role-rows'>
 						{panelRoleRows.map((row) => (

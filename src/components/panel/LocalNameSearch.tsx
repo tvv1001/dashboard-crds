@@ -15,7 +15,7 @@ interface Props {
 	redisHeaderStatus: {
 		connected: boolean;
 		configured: boolean;
-		mode: 'upstash-rest' | 'redis-url' | 'none';
+		mode: 'upstash-rest' | 'redis-url' | 'local-redis' | 'none';
 		latencyMs: number | null;
 	};
 	searched: boolean;
@@ -59,15 +59,15 @@ export function LocalNameSearch({
 	const formattedRedisUnique = Number(redisUniqueCount || 0).toLocaleString();
 	const modeLabel = sourceMode === 'redis' ? 'Redis' : 'Local cache fallback';
 	const redisModeLabel =
-		redisHeaderStatus.mode === 'upstash-rest' ? 'Upstash REST'
+		redisHeaderStatus.mode === 'local-redis' ? 'Local Redis'
+		: redisHeaderStatus.mode === 'upstash-rest' ? 'Upstash REST'
 		: redisHeaderStatus.mode === 'redis-url' ? 'Redis URL'
 		: 'Not Configured';
-	const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 	const redisBadgeText =
 		redisHeaderStatus.connected ?
-			isLocalhost ? 'Local Redis Connected'
-			:	'Redis Connected'
-		:	'Redis Disconnected';
+			redisHeaderStatus.mode === 'local-redis' ? 'Local Redis Connected'
+			: 'Connected to Redis Cache'
+		: 'Redis Disconnected';
 	const redisBadgeTitle = `${redisModeLabel}${redisHeaderStatus.latencyMs != null ? ` • ${Math.round(redisHeaderStatus.latencyMs)}ms` : ''}`;
 	const redisBadgeClass = `redis-health-badge ${redisHeaderStatus.connected ? 'connected' : 'disconnected'}`;
 
@@ -75,78 +75,70 @@ export function LocalNameSearch({
 
 	return (
 		<div className='local-name-search-panel'>
-			<div className='local-name-search-header'>
-				<h3>
+			<div className='local-name-search-header-row' style={{ display: 'flex', alignItems: 'center', gap: '15px', flexWrap: 'wrap' }}>
+				<h3 style={{ margin: 0, whiteSpace: 'nowrap' }}>
 					Redis Search
 					{searched && !loading && !error && <span className='local-name-search-count'> ({resultCount.toLocaleString()})</span>}
 				</h3>
-				<div className='local-name-search-summary'>
-					<div className='local-name-search-compare'>Redis CRDs: {formattedRedisUnique}</div>
-				</div>
-			</div>
-			<div style={{ display: 'flex', gap: '8px' }}>
-				<input
-					type='text'
-					className='local-name-search-input'
-					style={{ flex: 1, minWidth: 0 }}
-					placeholder='Search Redis-saved records by name…'
-					value={query}
-					onChange={(e) => onQueryChange(e.target.value)}
-					onKeyDown={handleKeyDown}
-					spellCheck={false}
-				/>
-				<button
-					className={`button-secondary local-name-search-button${loading ? ' is-loading' : ''}`}
-					onClick={() => onSearch()}
-					disabled={loading || !query.trim()}
-					aria-busy={loading}>
-					<span className='local-name-search-button-label'>{loading ? 'Fetching…' : 'Search'}</span>
-				</button>
-			</div>
-			<div
-				className='local-name-search-filters'
-				style={{ display: 'flex', gap: '15px', padding: '10px 0', fontSize: '13px', alignItems: 'center' }}>
-				<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-					<input
-						type='checkbox'
-						defaultChecked
-					/>{' '}
-					Firm
-				</label>
-				<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-					<input
-						type='checkbox'
-						defaultChecked
-					/>{' '}
-					Person
-				</label>
-				<label style={{ display: 'flex', alignItems: 'center', gap: '4px', marginLeft: '10px' }}>
-					Zip Code:{' '}
+
+				<div className='row' style={{ flex: 1, minWidth: '300px', margin: 0 }}>
 					<input
 						type='text'
-						placeholder='Zip'
-						style={{ width: '60px', padding: '2px 4px', fontSize: '12px' }}
+						className='local-name-search-input'
+						style={{ flex: 1, minWidth: 0, height: '32px' }}
+						placeholder='Search Redis-saved records by name…'
+						value={query}
+						onChange={(e) => onQueryChange(e.target.value)}
+						onKeyDown={handleKeyDown}
+						spellCheck={false}
 					/>
-				</label>
-				<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-					Radius:
-					<select style={{ padding: '2px 4px', fontSize: '12px' }}>
-						<option value='10'>10 mi</option>
-						<option value='25'>25 mi</option>
-						<option value='50'>50 mi</option>
-						<option value='100'>100 mi</option>
-					</select>
-				</label>
-				<div className='local-name-search-status-row'>
-					<a
-						href='/api/redis-health'
-						target='_blank'
-						rel='noopener noreferrer'
-						className={redisBadgeClass}
-						title={`${redisBadgeTitle} • Open health details`}
-						aria-label='Open Redis health details'>
-						{redisBadgeText}
-					</a>
+					<button
+						className={`button-secondary local-name-search-button${loading ? ' is-loading' : ''}`}
+						onClick={() => onSearch()}
+						disabled={loading || !query.trim()}
+						aria-busy={loading}
+						style={{ height: '32px', minWidth: '90px', padding: '0 12px' }}>
+						<span className='local-name-search-button-label'>{loading ? 'Fetching…' : 'Search'}</span>
+					</button>
+				</div>
+
+				<div
+					className='local-name-search-filters'
+					style={{ display: 'flex', gap: '15px', fontSize: '13px', alignItems: 'center' }}>
+					<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+						<input type='checkbox' defaultChecked /> Firm
+					</label>
+					<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+						<input type='checkbox' defaultChecked /> Person
+					</label>
+					<label style={{ display: 'flex', alignItems: 'center', gap: '4px', marginLeft: '5px' }}>
+						Zip:{' '}
+						<input
+							type='text'
+							placeholder='Zip'
+							style={{ width: '50px', padding: '2px 4px', fontSize: '12px' }}
+						/>
+					</label>
+					<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+						Radius:
+						<select style={{ padding: '2px 4px', fontSize: '12px' }}>
+							<option value='10'>10 mi</option>
+							<option value='25'>25 mi</option>
+							<option value='50'>50 mi</option>
+							<option value='100'>100 mi</option>
+						</select>
+					</label>
+					<div className='local-name-search-status-row' style={{ marginLeft: 'auto' }}>
+						<a
+							href='/api/redis-health'
+							target='_blank'
+							rel='noopener noreferrer'
+							className={redisBadgeClass}
+							title={`${redisBadgeTitle} • Open health details`}
+							aria-label='Open Redis health details'>
+							{redisBadgeText}
+						</a>
+					</div>
 				</div>
 			</div>
 
@@ -171,82 +163,75 @@ export function LocalNameSearch({
 			{searched && !loading && !error && results.length === 0 && <div className='status-empty'>No results found for &ldquo;{query.trim()}&rdquo;.</div>}
 
 			{searched && results.length > 0 && (
-				<div className='local-name-search-results'>
-					<table className='local-name-search-table'>
-						<thead>
-							<tr>
-								<th>Name</th>
-								<th>Details</th>
-							</tr>
-						</thead>
-						<tbody>
-							{results.map((match, i) => {
-								// Collect extra matched snippets (location/street/other identifiers) that
-								// aren't already shown via name/aliases/currentAddress, so the search panel
-								// surfaces exactly what matched the query.
-								const shownValues = [match.name, match.key, ...(match.aliases || []), match.currentAddress].filter(Boolean).map((v) => String(v).toLowerCase());
-								const extraMatches = (match.matchedValues || []).filter((value) => value && !shownValues.some((shown) => shown.includes(value.toLowerCase())));
+				<div className='local-name-search-results' style={{ display: 'flex', flexDirection: 'column', gap: '4px', padding: '10px', background: 'transparent', border: 'none' }}>
+					{results.map((match, i) => {
+						const shownValues = [match.name, match.key, ...(match.aliases || []), match.currentAddress].filter(Boolean).map((v) => String(v).toLowerCase());
+						const extraMatches = (match.matchedValues || []).filter((value) => value && !shownValues.some((shown) => shown.includes(value.toLowerCase())));
 
-								return (
-									<tr
-										className='local-name-search-row'
-										key={i}
-										onClick={() => onSelectResult?.(match.crd, match.type, match.source, match.key)}
-										role='button'>
-										<td>
-											<div
-												className='local-name-primary'
-												dangerouslySetInnerHTML={{ __html: highlightTerms(match.name || match.key || '', terms) }}
-											/>
-											{match.aliases && match.aliases.length > 0 && (
-												<div className='local-name-matches'>
-													{match.aliases.map((alias, idx) => (
-														<span
-															key={`${alias}-${idx}`}
-															className='local-name-match-line'
-															dangerouslySetInnerHTML={{ __html: highlightTerms(alias, terms) }}
-														/>
-													))}
+						return (
+							<div
+								className='local-name-search-row-flat'
+								key={i}
+								onClick={() => onSelectResult?.(match.crd, match.type, match.source, match.key)}
+								role='button'
+								style={{ 
+									display: 'flex', 
+									alignItems: 'center', 
+									gap: '12px', 
+									padding: '8px 12px', 
+									background: 'var(--midnight)', 
+									border: '1px solid var(--border)', 
+									borderRadius: '6px', 
+									cursor: 'pointer',
+									transition: 'background-color 0.15s ease'
+								}}
+								onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(124, 58, 237, 0.12)')}
+								onMouseLeave={(e) => (e.currentTarget.style.background = 'var(--midnight)')}
+							>
+									<div style={{ flex: 1.5, display: 'flex', flexDirection: 'column', gap: '2px', overflow: 'hidden' }}>
+										<div
+											className='local-name-primary'
+											style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+											dangerouslySetInnerHTML={{ __html: highlightTerms(match.name || match.key || '', terms) }}
+										/>
+										{(match.aliases && match.aliases.length > 0) && (() => {
+											const matchedAlias = match.aliases.find(a => terms.some(t => a.toLowerCase().includes(t.toLowerCase()))) || match.aliases[0];
+											const hiddenCount = match.aliases.length - 1;
+											return (
+												<div style={{ fontSize: '11px', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={match.aliases.join(', ')}>
+													aka <span dangerouslySetInnerHTML={{ __html: highlightTerms(matchedAlias, terms) }} />
+													{hiddenCount > 0 ? ` (+${hiddenCount})` : ''}
 												</div>
-											)}
-										</td>
-										<td>
-											<div>
-												{match.type} &bull;{' '}
-												<button
-													type='button'
-													className='local-name-crd-link'
-													onClick={(e) => {
-														e.stopPropagation();
-														onSelectResult?.(match.crd, match.type, match.source, match.key);
-													}}>
-													CRD {match.crd}
-												</button>
+											);
+										})()}
+									</div>
+									
+									<div style={{ flex: 2, display: 'flex', flexDirection: 'column', gap: '2px', overflow: 'hidden', borderLeft: '1px solid var(--border)', paddingLeft: '12px' }}>
+										{match.type === 'individual' && match.currentFirm ? (
+											<div style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+												<span style={{ color: 'var(--cyan)' }}>Firm:</span> <span dangerouslySetInnerHTML={{ __html: highlightTerms(match.currentFirm, terms) }} /> {match.currentFirmCrd ? `(CRD: ${match.currentFirmCrd})` : ''}
 											</div>
-											{match.source && <span className={`source-badge ${match.source}`}>{match.source.toUpperCase()}</span>}
-											{match.currentAddress && (
-												<div
-													className='local-name-aliases'
-													dangerouslySetInnerHTML={{ __html: highlightTerms(match.currentAddress, terms) }}
-												/>
-											)}
-											{extraMatches.length > 0 && (
-												<div className='local-name-extra-matches'>
-													{extraMatches.map((value, idx) => (
-														<span
-															key={`${value}-${idx}`}
-															className='local-name-match-line local-name-match-extra'
-															dangerouslySetInnerHTML={{ __html: highlightTerms(value, terms) }}
-														/>
-													))}
-												</div>
-											)}
-										</td>
-									</tr>
-								);
-							})}
-						</tbody>
-					</table>
+										) : <div style={{ fontSize: '12px', color: 'transparent' }}>-</div>}
+										{match.currentAddress ? (
+											<div 
+												style={{ fontSize: '11px', color: 'var(--text-muted)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}
+												dangerouslySetInnerHTML={{ __html: highlightTerms(match.currentAddress, terms) }}
+											/>
+										) : <div style={{ fontSize: '11px', color: 'transparent' }}>-</div>}
+									</div>
+
+									<div style={{ color: 'var(--text-secondary)', fontSize: '12px', whiteSpace: 'nowrap', width: '90px' }}>
+										CRD: <span style={{ color: 'var(--cyan)', fontWeight: 600 }}>{match.crd}</span>
+									</div>
+								
+								<div style={{ color: 'var(--text-muted)', fontSize: '12px', width: '70px', textAlign: 'right', textTransform: 'capitalize' }}>
+									{match.type}
+								</div>
+
+								{match.source && <span className={`source-badge ${match.source}`} style={{ margin: 0 }}>{match.source.toUpperCase()}</span>}
+							</div>
+						);
+					})}
 				</div>
 			)}
 		</div>

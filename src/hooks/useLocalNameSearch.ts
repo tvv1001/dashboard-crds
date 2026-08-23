@@ -108,6 +108,8 @@ export function useLocalNameSearch() {
 			.map((r) => {
 				const parts: string[] = [r.name || r.key || ''];
 				if (r.crd) parts.push(`CRD: ${r.crd}`);
+				if (r.type === 'individual' && r.currentFirm) parts.push(`Firm: ${r.currentFirm} (CRD: ${r.currentFirmCrd})`);
+				if (r.currentAddress) parts.push(`Address: ${r.currentAddress}`);
 				if (r.source) parts.push(`Source: ${r.source}`);
 				return parts.join(' | ');
 			})

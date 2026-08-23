@@ -1386,7 +1386,20 @@ export default function NodeGraphPage() {
 		}
 
 		return { nodes: nodes.map(stampInactive), links: links.filter((l) => seenIds.has(l.source) && seenIds.has(l.target)) };
-	}, [activeSnapshot, finraContent, secContent, entityTitle, searchResultNodes, expansionNodes, expansionLinks, firmCacheNodes, firmCacheLinks, entityType, parsedKeyInfo, hubLocation]);
+	}, [
+		activeSnapshot,
+		finraContent,
+		secContent,
+		entityTitle,
+		searchResultNodes,
+		expansionNodes,
+		expansionLinks,
+		firmCacheNodes,
+		firmCacheLinks,
+		entityType,
+		parsedKeyInfo,
+		hubLocation,
+	]);
 
 	// Undirected degree for each node — drives visual radius so hubs read larger.
 	const connectionCountById = useMemo(() => {
@@ -1665,24 +1678,21 @@ export default function NodeGraphPage() {
 		[clientPointToGraph, graphData.links],
 	);
 
-	const handleNodePointerUp = useCallback(
-		(event: React.PointerEvent<SVGGElement>) => {
-			const drag = dragStateRef.current;
-			if (!drag) return;
-			const node = dragNodesRef.current.find((n) => n.id === drag.id);
-			// Remember the dropped position for the rest of the session.
-			if (node && typeof node.x === 'number' && typeof node.y === 'number') {
-				node.fx = node.x;
-				node.fy = node.y;
-				positionsRef.current[drag.id] = { x: node.x, y: node.y };
-				setGraphPositions((prev) => ({ ...prev, [drag.id]: { x: node.x, y: node.y } }));
-			}
-			dragStateRef.current = null;
-			setDraggingNodeId(null);
-			simulationRef.current?.alphaTarget(0);
-		},
-		[],
-	);
+	const handleNodePointerUp = useCallback((event: React.PointerEvent<SVGGElement>) => {
+		const drag = dragStateRef.current;
+		if (!drag) return;
+		const node = dragNodesRef.current.find((n) => n.id === drag.id);
+		// Remember the dropped position for the rest of the session.
+		if (node && typeof node.x === 'number' && typeof node.y === 'number') {
+			node.fx = node.x;
+			node.fy = node.y;
+			positionsRef.current[drag.id] = { x: node.x, y: node.y };
+			setGraphPositions((prev) => ({ ...prev, [drag.id]: { x: node.x, y: node.y } }));
+		}
+		dragStateRef.current = null;
+		setDraggingNodeId(null);
+		simulationRef.current?.alphaTarget(0);
+	}, []);
 
 	// Graph dimensions
 	const width = 10000;
@@ -1875,9 +1885,7 @@ export default function NodeGraphPage() {
 			return base;
 		});
 		const simNodeIds = new Set(d3Nodes.map((n) => n.id));
-		const d3Links = graphData.links
-			.filter((l) => simNodeIds.has(l.source) && simNodeIds.has(l.target))
-			.map((l) => ({ source: l.source, target: l.target, label: l.label }));
+		const d3Links = graphData.links.filter((l) => simNodeIds.has(l.source) && simNodeIds.has(l.target)).map((l) => ({ source: l.source, target: l.target, label: l.label }));
 
 		const nodeById = new Map(d3Nodes.map((n) => [n.id, n]));
 
@@ -2438,6 +2446,11 @@ export default function NodeGraphPage() {
 					drawerOpen={drawerOpen}
 					setDrawerOpen={setDrawerOpen}
 					errorMessage={searchError}
+					searchQuery={searchInput}
+					onSearchQueryChange={setSearchInput}
+					onSearchSubmit={handleSearch}
+					searchDisabled={false}
+					searchLoading={searchLoading}
 					searchBanner={searchBanner}
 					setSearchBanner={setSearchBanner as any}
 				/>
@@ -2680,11 +2693,6 @@ export default function NodeGraphPage() {
 				<FgDrawer
 					drawerOpen={drawerOpen}
 					setDrawerOpen={setDrawerOpen}
-					searchQuery={searchInput}
-					onSearchQueryChange={setSearchInput}
-					onSearchSubmit={handleSearch}
-					searchDisabled={false}
-					searchLoading={searchLoading}
 					showTitleAndRoles={!!(activeSnapshot || panelSnapshot)}
 					panelTitle={panelTitle}
 					panelRoleRows={panelRoleRows}
@@ -2820,6 +2828,7 @@ export default function NodeGraphPage() {
 					transition: opacity 150ms ease;
 					touch-action: none;
 				}
+
 				.graph-node-group.dragging {
 					cursor: grabbing;
 				}
@@ -2973,7 +2982,7 @@ export default function NodeGraphPage() {
 					user-select: none;
 				}
 				.graph-label.size-auto {
-					font-size: 11px;
+					font-size: 66px;
 				}
 				.graph-label.size-small {
 					font-size: 9px;

@@ -41,7 +41,7 @@ interface Props {
 	redisHeaderStatus: {
 		connected: boolean;
 		configured: boolean;
-		mode: 'upstash-rest' | 'redis-url' | 'none';
+		mode: 'upstash-rest' | 'redis-url' | 'local-redis' | 'none';
 		latencyMs: number | null;
 	};
 	nameSearched: boolean;

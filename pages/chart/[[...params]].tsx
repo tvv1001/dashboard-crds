@@ -4477,11 +4477,6 @@ export default function GlobalGraphPage() {
 				<FgDrawer
 					drawerOpen={drawerOpen}
 					setDrawerOpen={setDrawerOpen}
-					searchQuery={query}
-					onSearchQueryChange={setQuery}
-					onSearchSubmit={handleSearchSubmit}
-					searchDisabled={status !== 'ready' && status !== 'loading'}
-					searchLoading={searchLoading}
 					showTitleAndRoles={!!(focus || panelSnapshot)}
 					panelTitle={panelTitle}
 					panelRoleRows={panelRoleRows}
