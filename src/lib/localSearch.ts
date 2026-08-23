@@ -404,7 +404,7 @@ async function loadIndex(bucket: LocalSearchBucket, baseUrl?: string, seedRoots:
 						let generatedAt: string | undefined;
 						let bucketName: string | undefined;
 
-						const results = await Promise.all(filePaths.map((fp) => readIndexPayload(fp)));
+						const results = await Promise.all(filePaths.map((fp: string) => readIndexPayload(fp)));
 						for (const parsed of results) {
 							if (parsed?.generatedAt) generatedAt = generatedAt || parsed.generatedAt;
 							bucketName = bucketName || parsed?.bucket;
@@ -1204,8 +1204,10 @@ export async function addRecordToSearchIndex(source: LocalSearchSource, type: Lo
 		// Also write to local filesystem if we are running locally and files exist
 		try {
 			const relativeFilePath = SEARCH_INDEX_RELATIVE_FILES[bucket];
-			const absolutePath = path.resolve(process.cwd(), relativeFilePath);
-			if (fsSync.existsSync(absolutePath)) {
+			const getCwd = () => (typeof window === 'undefined' && typeof process !== 'undefined' ? (process.env.PWD || '') : '');
+			const absolutePath = path.resolve(/*turbopackIgnore: true*/ getCwd(), relativeFilePath);
+			const fsMod = typeof window === 'undefined' ? eval("require('fs')") : null;
+			if (fsMod && fsMod.existsSync(absolutePath)) {
 				const { readFile } = await import('node:fs/promises');
 				const raw = await readFile(absolutePath, 'utf8');
 				const parsed = JSON.parse(raw);
@@ -1222,7 +1224,7 @@ export async function addRecordToSearchIndex(source: LocalSearchSource, type: Lo
 
 					// Also update gzip sidecar if it exists
 					const gzPath = `${absolutePath}.gz`;
-					if (fsSync.existsSync(gzPath)) {
+					if (fsMod && fsMod.existsSync(gzPath)) {
 						const util = await import('node:util');
 						const gzBuffer = await util.promisify(zlib.gzip)(Buffer.from(JSON.stringify(parsed, null, 2), 'utf8'), { level: 9 });
 						await writeFile(gzPath, gzBuffer);

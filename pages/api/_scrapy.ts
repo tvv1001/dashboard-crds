@@ -6,11 +6,13 @@
  * page reached "by clicking into" a search result is fetched via this
  * Scrapy-based Python script instead of a second browser instance.
  */
-import { spawn } from 'child_process';
 import path from 'path';
 
+// Hide from Vercel NFT static analyzer
+const spawn = (typeof window === 'undefined' ? eval("require('child_process')") : {}).spawn;
+
 const PYTHON_BIN = process.env.PYTHON3_PATH || 'python3';
-const SCRAPY_SCRIPT = path.join(/*turbopackIgnore: true*/ process.cwd(), 'scripts', 'scrapy_crawler.py');
+const SCRAPY_SCRIPT = path.join(process.cwd(), 'scripts', 'scrapy_crawler.py');
 
 export interface ScrapyPage {
 	url: string;
@@ -44,15 +46,15 @@ export async function runScrapyCrawler(url: string, opts: ScrapyCrawlOptions = {
 	if (allowOffsite) args.push('--allow-offsite');
 
 	return new Promise((resolve) => {
-		const proc = spawn(/*turbopackIgnore: true*/ PYTHON_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+		const proc = spawn(PYTHON_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 		let stdout = '';
 		let stderr = '';
 		const timer = setTimeout(() => {
 			proc.kill('SIGKILL');
 		}, timeoutMs);
 
-		proc.stdout.on('data', (d) => (stdout += d.toString()));
-		proc.stderr.on('data', (d) => (stderr += d.toString()));
+		proc.stdout.on('data', (d: any) => (stdout += d.toString()));
+		proc.stderr.on('data', (d: any) => (stderr += d.toString()));
 		proc.on('close', () => {
 			clearTimeout(timer);
 			if (!stdout.trim()) {
@@ -65,7 +67,7 @@ export async function runScrapyCrawler(url: string, opts: ScrapyCrawlOptions = {
 				resolve({ ok: false, startUrl: url, pageCount: 0, pages: [], stats: {}, error: `Failed to parse scrapy_crawler.py output: ${e?.message || e}` });
 			}
 		});
-		proc.on('error', (e) => {
+		proc.on('error', (e: any) => {
 			clearTimeout(timer);
 			resolve({ ok: false, startUrl: url, pageCount: 0, pages: [], stats: {}, error: e?.message || String(e) });
 		});
