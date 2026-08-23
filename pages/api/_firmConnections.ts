@@ -99,12 +99,39 @@ export async function getFirmConnections(firmId: string): Promise<FirmConnection
 	const empty: FirmConnectionsPayload = { currentConnections: [], previousConnections: [], source: 'empty' };
 	if (!normalized || !/^\d{1,10}$/.test(normalized)) return empty;
 
-	for (const key of REDIS_CACHE_KEYS(normalized)) {
-		const cached = await getCacheValue(key);
-		const parsed = parseFirmConnectionsPayload(cached);
-		if (parsed && (parsed.currentConnections.length || parsed.previousConnections.length)) {
-			return parsed;
+	try {
+		const finraConn = await getCacheValue(`finra:firm:${normalized}_brokers:connected`);
+		const secConn = await getCacheValue(`sec:firm:${normalized}_brokers:connected`);
+		const finraPrev = await getCacheValue(`finra:firm:${normalized}_brokers:previous`);
+		const secPrev = await getCacheValue(`sec:firm:${normalized}_brokers:previous`);
+
+		const connectedSet = new Set<string>();
+		const previousSet = new Set<string>();
+
+		if (finraConn) toArray(parseMaybeJson(finraConn)).forEach(id => connectedSet.add(String(id)));
+		if (secConn) toArray(parseMaybeJson(secConn)).forEach(id => connectedSet.add(String(id)));
+		if (finraPrev) toArray(parseMaybeJson(finraPrev)).forEach(id => previousSet.add(String(id)));
+		if (secPrev) toArray(parseMaybeJson(secPrev)).forEach(id => previousSet.add(String(id)));
+
+		const currentConnections = Array.from(connectedSet).map(id => ({
+			individualId: id,
+			name: `CRD ${id}`,
+			relationship: 'Current registration',
+			isCurrent: true
+		}));
+
+		const previousConnections = Array.from(previousSet).map(id => ({
+			individualId: id,
+			name: `CRD ${id}`,
+			relationship: 'Previous registration',
+			isCurrent: false
+		}));
+
+		if (currentConnections.length || previousConnections.length) {
+			return { currentConnections, previousConnections, source: 'redis' };
 		}
+	} catch (e) {
+		// skip on error
 	}
 
 	return empty;

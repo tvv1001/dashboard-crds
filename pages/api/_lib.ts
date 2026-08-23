@@ -2,7 +2,7 @@ import zlib from 'zlib';
 import { promises as fs } from 'fs';
 import path from 'path';
 import { createClient } from 'redis';
-import { getReadOnlyRedisClientInstance } from '../../src/lib/redisClient';
+import { getReadOnlyRedisClientInstance, getRedisClientInstance } from '../../src/lib/redisClient';
 import { toProperCaseName } from '../../src/lib/format';
 
 const isDev = process.env.NODE_ENV === 'development';
@@ -32,18 +32,18 @@ const redisClient = redisUrl ? createClient({ url: redisUrl, password: redisPass
 // typed as `any` so existing call-sites that optionally use a secondary
 // client continue to compile when a mirror is not configured.
 const upstashRedisClient: any = getReadOnlyRedisClientInstance();
-const upstashRedisClient2: any = null;
+
 // Allow enabling writes via env when you want this app to perform writes again.
 const ALLOW_REDIS_WRITES = Boolean(process.env.ALLOW_REDIS_WRITES && String(process.env.ALLOW_REDIS_WRITES) !== '0');
 // writable Upstash clients (only created when writes are allowed)
 let writableUpstashClient: any = null;
-let writableUpstashClient2: any = null;
+
 if (ALLOW_REDIS_WRITES) {
 	try {
 		// Lazy require to avoid bundling conflicts in serverless
 		const { Redis: UpstashWritable } = require('@upstash/redis');
 		if (upstashRedisRestUrl && upstashRedisRestToken) writableUpstashClient = new UpstashWritable({ url: upstashRedisRestUrl, token: upstashRedisRestToken });
-		if (upstashRedisRestUrl2 && upstashRedisRestToken2) writableUpstashClient2 = new UpstashWritable({ url: upstashRedisRestUrl2, token: upstashRedisRestToken2 });
+		
 	} catch (e) {
 		// ignore
 	}
@@ -96,7 +96,7 @@ export function formatErrorMessage(error: unknown) {
 }
 
 export function getRedisConnectionMode(): RedisConnectionMode {
-	if (upstashRedisClient2 || upstashRedisClient) return 'upstash-rest';
+	if (upstashRedisClient) return 'upstash-rest';
 	if (redisClient) return 'redis-url';
 	return 'none';
 }
@@ -117,9 +117,9 @@ export async function checkRedisHealth(): Promise<RedisHealthStatus> {
 	// Read-only health check: attempt a harmless read (DBSIZE or GET) instead
 	try {
 		// Prefer DB size/read operations which are read-only
-		if (upstashRedisClient || upstashRedisClient2) {
+		if (upstashRedisClient) {
 			let okRead = false;
-			for (const client of [upstashRedisClient, upstashRedisClient2]) {
+			for (const client of [upstashRedisClient]) {
 				if (!client) continue;
 				try {
 					// dbsize is read-only and inexpensive for our purposes
@@ -199,32 +199,6 @@ function decompressPayload(value: string): string {
 }
 
 export async function getCacheValue(key: string) {
-	if (upstashRedisClient && upstashRedisClient2) {
-		const p1 = upstashRedisClient.get(key).then((v: unknown) => {
-			if (v == null) throw new Error('not found');
-			return typeof v === 'string' ? v : JSON.stringify(v);
-		});
-		const p2 = upstashRedisClient2.get(key).then((v: unknown) => {
-			if (v == null) throw new Error('not found');
-			return typeof v === 'string' ? v : JSON.stringify(v);
-		});
-
-		try {
-			const rawValue = await new Promise((resolve, reject) => {
-				let rejectedCount = 0;
-				const handleReject = () => {
-					rejectedCount++;
-					if (rejectedCount === 2) reject(new Error('both failed'));
-				};
-				p1.then(resolve).catch(handleReject);
-				p2.then(resolve).catch(handleReject);
-			});
-			return decompressPayload(rawValue as string);
-		} catch (e) {
-			return null;
-		}
-	}
-
 	let rawValue: any = null;
 	if (upstashRedisClient) {
 		try {
@@ -233,9 +207,9 @@ export async function getCacheValue(key: string) {
 				rawValue = typeof value === 'string' ? value : JSON.stringify(value);
 			}
 		} catch (e) {
-			console.warn('Primary redis read failed', formatErrorMessage(e));
+			console.warn('Redis read failed', formatErrorMessage(e));
 		}
-	} else if (!upstashRedisClient2) {
+	} else {
 		const client = await getRedisClient();
 		if (client) {
 			try {
@@ -243,17 +217,6 @@ export async function getCacheValue(key: string) {
 			} catch (e) {
 				console.warn('Native redis read failed', formatErrorMessage(e));
 			}
-		}
-	}
-
-	if (rawValue == null && upstashRedisClient2) {
-		try {
-			const value = await upstashRedisClient2.get(key);
-			if (value != null) {
-				rawValue = typeof value === 'string' ? value : JSON.stringify(value);
-			}
-		} catch (e) {
-			console.warn('Secondary redis read failed', formatErrorMessage(e));
 		}
 	}
 
@@ -284,12 +247,12 @@ export async function setCacheValue(key: string, value: string, ttlSeconds?: num
 		}
 	}
 
-	if (writableUpstashClient2) {
+	if (writableUpstashClient) {
 		try {
 			if (ttlSeconds && ttlSeconds > 0) {
-				await writableUpstashClient2.set(key, finalValue, { ex: Math.floor(ttlSeconds) });
+				await writableUpstashClient.set(key, finalValue, { ex: Math.floor(ttlSeconds) });
 			} else {
-				await writableUpstashClient2.set(key, finalValue);
+				await writableUpstashClient.set(key, finalValue);
 			}
 			handled = true;
 		} catch (e) {
@@ -349,7 +312,7 @@ export async function deleteGraphCacheKey(key: string) {
 
 async function deleteCacheKey(key: string) {
 	if (!ALLOW_REDIS_WRITES) return;
-	for (const client of [writableUpstashClient, writableUpstashClient2]) {
+	for (const client of [writableUpstashClient, writableUpstashClient]) {
 		if (!client) continue;
 		try {
 			await client.del(key);
@@ -374,9 +337,9 @@ export async function trackFirmConnections(firmIds: string[]) {
 			handled = true;
 		} catch (e) {}
 	}
-	if (writableUpstashClient2) {
+	if (writableUpstashClient) {
 		try {
-			await writableUpstashClient2.sadd(key, ...(firmIds as [string, ...string[]]));
+			await writableUpstashClient.sadd(key, ...(firmIds as [string, ...string[]]));
 			handled = true;
 		} catch (e) {}
 	}
@@ -391,8 +354,8 @@ async function scanKeysByPatterns(patterns: string[]) {
 	const normalizedPatterns = Array.from(new Set(patterns.filter(Boolean)));
 	const keys = new Set<string>();
 
-	if (upstashRedisClient || upstashRedisClient2) {
-		for (const client of [upstashRedisClient, upstashRedisClient2]) {
+	if (upstashRedisClient) {
+		for (const client of [upstashRedisClient]) {
 			if (!client) continue;
 			try {
 				for (const pattern of normalizedPatterns) {
@@ -415,9 +378,14 @@ async function scanKeysByPatterns(patterns: string[]) {
 	const client = await getRedisClient();
 	if (!client) return [];
 	for (const pattern of normalizedPatterns) {
-		for await (const key of client.scanIterator({ MATCH: pattern, COUNT: 1000 })) {
-			keys.add(String(key));
-		}
+		let cursor = 0;
+		do {
+			const res = await client.scan(String(cursor), { MATCH: pattern, COUNT: 1000 });
+			cursor = Number(res.cursor || 0);
+			for (const key of res.keys || []) {
+				keys.add(String(key));
+			}
+		} while (cursor !== 0);
 	}
 
 	return Array.from(keys);
@@ -499,7 +467,7 @@ export async function getRedisDbSize() {
 	}
 
 	// Fallback to previous behavior: cached value via read-only client or dbsize
-	if (redisClient || upstashRedisClient || upstashRedisClient2) {
+	if (redisClient || upstashRedisClient) {
 		try {
 			const cached = await getCacheValue(CACHE_KEY);
 			if (cached != null) return Number(cached);
@@ -507,7 +475,7 @@ export async function getRedisDbSize() {
 
 		let total = 0;
 		let usingUpstash = false;
-		for (const client of [upstashRedisClient, upstashRedisClient2]) {
+		for (const client of [upstashRedisClient]) {
 			if (!client) continue;
 			usingUpstash = true;
 			try {
@@ -709,7 +677,7 @@ export async function fetchWithCache(
 		}
 
 		const data = await resp.json();
-		if (redisClient || upstashRedisClient || upstashRedisClient2) {
+		if (redisClient || upstashRedisClient) {
 			try {
 				await setCacheValue(cacheKey, JSON.stringify(data), cacheTtlSeconds);
 			} catch (e) {
@@ -744,13 +712,13 @@ async function ensureLocalDerivedDir() {
 
 async function writeRawValueToRedis(rawKey: string, serializedPayload: string) {
 	if (!ALLOW_REDIS_WRITES) return;
-	if (!(writableUpstashClient || writableUpstashClient2 || redisClient)) return;
+	if (!(writableUpstashClient || writableUpstashClient || redisClient)) return;
 	const compressed = zlib.brotliCompressSync(Buffer.from(serializedPayload, 'utf-8')).toString('base64');
 	await setCacheValue(rawKey, compressed);
 }
 
 async function readRawValueFromRedis(rawKey: string) {
-	if (!(upstashRedisClient || upstashRedisClient2 || redisClient)) return null;
+	if (!(upstashRedisClient || redisClient)) return null;
 	// Local Redis first (dev), then the shared cache. Do not require the
 	// saved-key index or on-disk raw files.
 	const val = (await getLocalRedisValue(rawKey)) ?? (await getCacheValue(rawKey));
@@ -774,7 +742,7 @@ async function readRawValueFromRedis(rawKey: string) {
 }
 
 export async function listRawKeysFromRedis() {
-	if (!(upstashRedisClient || upstashRedisClient2 || redisClient)) return [];
+	if (!(upstashRedisClient || redisClient)) return [];
 	const keys = await scanKeysByPatterns(['finra:individual:*', 'finra:firm:*', 'sec:individual:*', 'sec:firm:*']);
 	return keys.map((key) => filenameToRawKey(String(key || ''))).filter((key) => /^(finra|sec):(individual|firm):\d+$/i.test(key));
 }
@@ -1804,7 +1772,7 @@ export async function readSeenKeys() {
 		return sanitized;
 	}
 
-	if (redisClient || upstashRedisClient || upstashRedisClient2) {
+	if (redisClient || upstashRedisClient) {
 		try {
 			const v = await getCacheValue('finra-sec:seenKeys');
 			if (v) return await sanitizeSeenKeys(JSON.parse(v));
@@ -1818,7 +1786,7 @@ export async function readSeenKeys() {
 
 export async function writeSeenKeys(obj: any) {
 	const payload = JSON.stringify(await readSeenKeysMerged(obj || {}));
-	if (redisClient || upstashRedisClient || upstashRedisClient2) {
+	if (redisClient || upstashRedisClient) {
 		try {
 			await setCacheValue('finra-sec:seenKeys', payload);
 			return;

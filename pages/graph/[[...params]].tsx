@@ -1123,63 +1123,19 @@ export default function NodeGraphPage() {
 					setSearchLoading(false);
 					return;
 				}
-				// A single unambiguous match — load it directly as the hub
-				// entity, same as before.
-				if (matches.length === 1) {
-					const only = matches[0];
+				// If we have any matches, load the highest-ranking one directly as the hub
+				// entity. Dropping dozens of unconnected nodes into the physics sim
+				// is confusing and makes it look like the search didn't work.
+				if (matches.length > 0) {
+					const best = matches[0];
 					const type =
-						only.type === 'firm' ? 'firm'
-						: only.type === 'individual' ? 'individual'
+						best.type === 'firm' ? 'firm'
+						: best.type === 'individual' ? 'individual'
 						: '';
-					const key = only.key || (type && only.crd ? `${type}:${only.crd}` : String(only.crd));
+					const key = best.key || (type && best.crd ? `${type}:${best.crd}` : String(best.crd));
 					loadKey(key);
 					return;
 				}
-				// Multiple matches — build a lightweight node for every hit
-				// directly from the search-index metadata (no per-match detail
-				// fetch), so the graph shows ALL matches at once. Each node
-				// only gets fully hydrated when clicked (via its `loadKey`).
-				const capped = matches.slice(0, 100);
-				const newNodes: GraphNode[] = capped
-					.map((match: any): GraphNode | null => {
-						const type =
-							match.type === 'firm' ? 'firm'
-							: match.type === 'individual' ? 'individual'
-							: '';
-						const crd = idValue(match.crd);
-						if (!type || !crd) return null;
-						const id = `search-${type}-${crd}`;
-						const label =
-							resolveEntityDisplayName({
-								type: type as GraphEntityType,
-								crd,
-								candidates: [stringValue(match.name), stringValue(match.displayName)],
-							}) || crd;
-						return {
-							id,
-							label,
-							kind: 'relation',
-							entityType: type as GraphEntityType,
-							subLabel:
-								type === 'individual' && match.currentFirm ?
-									`${match.currentFirm}${match.currentCity || match.currentState ? ` - ${[match.currentCity, match.currentState].filter(Boolean).join(', ')}` : ''}`
-								:	'Search match',
-							loadKey: match.key || `${type}:${crd}`,
-						};
-					})
-					.filter((n: GraphNode | null): n is GraphNode => Boolean(n));
-				setSearchResultNodes((prev) => {
-					const seen = new Set(prev.map((n) => n.id));
-					const merged = prev.slice();
-					for (const node of newNodes) {
-						if (seen.has(node.id)) continue;
-						seen.add(node.id);
-						merged.push(node);
-					}
-					return merged;
-				});
-				setSearchBanner({ query, count: newNodes.length });
-				setSearchLoading(false);
 			})
 			.catch((err: unknown) => {
 				setSearchError(err instanceof Error ? err.message : 'Search failed');

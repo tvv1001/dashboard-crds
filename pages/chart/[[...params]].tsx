@@ -599,14 +599,14 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 	// inflating hub-to-hub distance (hubs use orbit-based collision below).
 	const collidePad =
 		starEgo ?
-			egoIsPerson ? 72
-			:	84
-		: nCount > 1000 ? 48
-		: nCount > 600 ? 56
-		: nCount > 300 ? 64
-		: nCount > 120 ? 72
-		: nCount > 60 ? 84
-		: 96;
+			egoIsPerson ? 88
+			:	100
+		: nCount > 1000 ? 64
+		: nCount > 600 ? 76
+		: nCount > 300 ? 84
+		: nCount > 120 ? 96
+		: nCount > 60 ? 112
+		: 124;
 	// Weak centering so multi-hub maps don't collapse back together.
 	const centerStrength =
 		starEgo ? 0.014
@@ -1127,7 +1127,7 @@ const COLLISION_GRAPH_RADIUS = 14;
 
 /** On-screen px: match finra-data-chart-next-02 reference (large hubs, tiny leaves) */
 const FIRM_NODE_SIZE = 12;
-const INDIVIDUAL_NODE_SIZE = 10;
+const INDIVIDUAL_NODE_SIZE = 12; // Increased from 10 to match firms perfectly for physics layout
 
 function dynamicNodeSize(degree: number, type: string): number {
 	if (type === 'firm') return FIRM_NODE_SIZE;
@@ -1150,15 +1150,14 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	const hubSize = hubIsFirm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
 	// Children of a firm are mostly people (smaller); children of a person are firms (larger).
 	const childSize = hubIsFirm ? INDIVIDUAL_NODE_SIZE : FIRM_NODE_SIZE;
-	// Extra padding on person→firm rings (firms are large hexes) and dense firm stars.
+	// Use symmetric arc padding so both person nodes and firm nodes spread out 
+	// equally on their orbits without clumping.
 	const arcPad =
-		childSize *
-		(hubIsFirm ?
-			childCount > 80 ?
-				3.6
-			:	3.1
-		: childCount > 24 ? 3.8
-		: 3.2);
+		childSize * (
+			childCount > 80 ? 4.8
+			: childCount > 24 ? 4.4
+			: 4.0
+		);
 	const minClear = hubSize + childSize + Math.max(72, childSize * 1.45);
 
 	let ringCount = opts.ringCount ?? 1;
@@ -1179,7 +1178,7 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	const perRing = Math.max(1, Math.ceil(childCount / ringCount));
 	// Radius from arc length: 2πr / n >= arcPad  =>  r >= n * arcPad / 2π
 	const fromArc = (perRing * arcPad) / (Math.PI * 2);
-	const base = Math.max(minClear, fromArc, hubIsFirm ? 280 : 360);
+	const base = Math.max(minClear, fromArc, 360);
 	const ring = Math.max(0, opts.ringIndex ?? 0);
 	const ringStep = Math.max(childSize * 3.1 + 56, 130 + Math.min(110, Math.sqrt(childCount) * 12));
 
@@ -4044,13 +4043,29 @@ export default function GlobalGraphPage() {
 			const matches = await searchRedisNames(q);
 
 			if (!matches.length) {
+				// Fallback to searching the currently loaded global layout.
+				// This is critical for pure CRD numbers that might not be in the Redis 
+				// search index yet, but are physically present in the graph layout.
+				const localHits = findHits(q, 1);
+				if (localHits.length > 0) {
+					const first = localHits[0];
+					const ok = focusNode(first.id, { animate: true, addIfMissing: false });
+					if (ok) {
+						setSearchBanner({ query: q, count: 1 });
+						setSearchLoading(false);
+						return;
+					}
+				}
+
 				setErrorMessage(`No matches found for "${q}"`);
 				setSearchLoading(false);
 				return;
 			}
 
-			// Single hit → focus as hub (dashboard opens one record).
-			if (matches.length === 1) {
+			// If we have any matches, load the highest-ranking one directly as the hub.
+			// (Dropping dozens of unconnected nodes into the physics sim is chaotic and
+			// calling rebuildForceGraph inside a loop hangs the browser).
+			if (matches.length > 0) {
 				const hit = matches[0];
 				const crd = upsertSearchHit(hit);
 				if (!crd) {
@@ -4066,26 +4081,6 @@ export default function GlobalGraphPage() {
 				}
 				setSearchLoading(false);
 				return;
-			}
-
-			// Multi-match → add every hit like dashboard lists all Redis results
-			// (cap so the canvas stays usable).
-			const capped = matches.slice(0, 100);
-			let focused: string | null = null;
-			let addedCount = 0;
-			for (const hit of capped) {
-				const crd = upsertSearchHit(hit);
-				if (!crd) continue;
-				const wasVisible = visibleIdsRef.current.has(crd);
-				const ok = addNodeToCanvas(crd, { withNeighbors: false });
-				if (ok && !wasVisible) addedCount++;
-				if (!focused) focused = crd;
-			}
-			if (focused) {
-				focusNode(focused, { animate: true, addIfMissing: false });
-				setSearchBanner({ query: q, count: Math.max(addedCount, capped.length) });
-			} else {
-				setErrorMessage(`No graphable matches for "${q}"`);
 			}
 		} catch (err) {
 			setErrorMessage(`Search error: ${err instanceof Error ? err.message : String(err)}`);
@@ -4490,7 +4485,7 @@ export default function GlobalGraphPage() {
 					showTitleAndRoles={!!(focus || panelSnapshot)}
 					panelTitle={panelTitle}
 					panelRoleRows={panelRoleRows}
-					panelError={panelSnapshot?.error}
+					panelError={panelSnapshot?.error || errorMessage}
 					panelActiveKey={panelActiveKey}
 					panelDetailJson={panelDetailJson}
 					panelLoading={panelLoading}

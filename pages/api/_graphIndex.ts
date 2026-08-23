@@ -157,6 +157,7 @@ function evaluateContentActivity(content: Record<string, unknown> | null | undef
 }
 
 const entityInactiveCache = new Map<string, Promise<boolean>>();
+const MAX_INACTIVE_CACHE_SIZE = 5000;
 
 async function isEntityInactive(type: GraphEntityType, crd: string): Promise<boolean> {
 	const cacheKey = `${type}:${crd}`;
@@ -178,6 +179,10 @@ async function isEntityInactive(type: GraphEntityType, crd: string): Promise<boo
 				return false;
 			}
 		})();
+		if (entityInactiveCache.size >= MAX_INACTIVE_CACHE_SIZE) {
+			const firstKey = entityInactiveCache.keys().next().value;
+			if (firstKey) entityInactiveCache.delete(firstKey);
+		}
 		entityInactiveCache.set(cacheKey, promise);
 	}
 	return promise;

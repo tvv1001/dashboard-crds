@@ -86,14 +86,19 @@ void main(void) {
     float t = 0.0;
     if (dist > 0.0) t = dist / border;
 
-    // Solid body + bright blue rim (outline) + soft outer glow — same structure as
-    // the firm hexagon program, just recolored bright blue for people nodes.
+    // Solid body + sharp contrast line + bright blue rim + soft outer glow
     vec3 fill = v_color.rgb;
+    
+    // Sharp high-contrast line right at the edge
+    float sharpLine = smoothstep(0.88, 0.92, inside) * (1.0 - smoothstep(0.96, 0.98, inside));
+    
     float rim = smoothstep(0.78, 0.90, inside) * (1.0 - smoothstep(0.985, 1.02, inside));
     float glow = smoothstep(0.90, 1.08, inside) * (1.0 - t);
 
-    vec3 rgb = mix(fill, BRIGHT_BLUE, clamp(rim * 1.15, 0.0, 1.0));
-    rgb = mix(rgb, BRIGHT_BLUE_GLOW, glow * 0.4);
+    // Mix the bright white/cyan contrast edge, then the blue glow
+    vec3 rgb = mix(fill, vec3(0.85, 0.95, 1.0), clamp(sharpLine * 1.8, 0.0, 1.0));
+    rgb = mix(rgb, BRIGHT_BLUE, clamp((rim - sharpLine) * 1.15, 0.0, 1.0));
+    rgb = mix(rgb, BRIGHT_BLUE_GLOW, glow * 0.5);
 
     gl_FragColor = mix(vec4(rgb, min(1.0, v_color.a)), transparent, t);
   }

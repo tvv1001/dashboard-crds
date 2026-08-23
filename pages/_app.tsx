@@ -237,7 +237,7 @@ export default function MyApp({ Component, pageProps }: AppProps) {
 			<div className={`app-page ${isDashboardRoute ? 'dashboard-page' : ''} ${pageRouteClass}`.trim()}>
 				<Component {...pageProps} />
 			</div>
-			{!analyticsDisabled ?
+			{!analyticsDisabled && process.env.NODE_ENV === 'production' ?
 				<>
 					<Analytics beforeSend={beforeSendAnalytics} />
 					<SpeedInsights beforeSend={beforeSendSpeedInsights} />

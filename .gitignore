@@ -32,3 +32,4 @@ data/side-crd.json
 data/side-crd-full.json
 tsconfig.tsbuildinfo
 .notes
+data/search-index.json

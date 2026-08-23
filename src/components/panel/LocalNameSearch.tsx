@@ -80,15 +80,25 @@ export function LocalNameSearch({
 					<div className='local-name-search-compare'>Redis CRDs: {formattedRedisUnique}</div>
 				</div>
 			</div>
-			<input
-				type='text'
-				className='local-name-search-input'
-				placeholder='Search Redis-saved records by name…'
-				value={query}
-				onChange={(e) => onQueryChange(e.target.value)}
-				onKeyDown={handleKeyDown}
-				spellCheck={false}
-			/>
+			<div style={{ display: 'flex', gap: '8px' }}>
+				<input
+					type='text'
+					className='local-name-search-input'
+					style={{ flex: 1, minWidth: 0 }}
+					placeholder='Search Redis-saved records by name…'
+					value={query}
+					onChange={(e) => onQueryChange(e.target.value)}
+					onKeyDown={handleKeyDown}
+					spellCheck={false}
+				/>
+				<button
+					className={`button-secondary local-name-search-button${loading ? ' is-loading' : ''}`}
+					onClick={() => onSearch()}
+					disabled={loading || !query.trim()}
+					aria-busy={loading}>
+					<span className='local-name-search-button-label'>{loading ? 'Fetching…' : 'Search'}</span>
+				</button>
+			</div>
 			<div className='local-name-search-filters' style={{ display: 'flex', gap: '15px', padding: '10px 0', fontSize: '13px', alignItems: 'center' }}>
 				<label style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
 					<input type='checkbox' defaultChecked /> Firm
@@ -120,23 +130,16 @@ export function LocalNameSearch({
 					{redisBadgeText}
 				</a>
 			</div>
-			<div className='row'>
-				<button
-					className={`button-secondary local-name-search-button${loading ? ' is-loading' : ''}`}
-					onClick={() => onSearch()}
-					disabled={loading || !query.trim()}
-					aria-busy={loading}>
-					<span className='local-name-search-button-label'>{loading ? 'Fetching…' : 'Search Redis'}</span>
-				</button>
-				{results.length > 0 && (
+			{results.length > 0 && (
+				<div className='row'>
 					<button
 						className={`copy-all-btn ${copyState === 'copied' ? 'is-copied' : ''}`}
 						onClick={handleCopyResults}
 						title='Copy results to clipboard'>
 						{copyState === 'copied' ? 'Copied ✓' : 'Copy results'}
 					</button>
-				)}
-			</div>
+				</div>
+			)}
 
 			{error && (
 				<div className='status-error'>
