@@ -464,8 +464,6 @@ function connectionRowFromEntry(entry: any): any {
 	};
 }
 
-
-
 // Keys that are internal UI/booking flags rather than human-readable disclosure
 // narrative content, so they're excluded from the rendered detail card.
 const DISCLOSURE_DETAIL_SKIP_KEYS = new Set(['DisplayAAOLinkIfExists', 'part2ExemptFlag']);
@@ -848,8 +846,7 @@ function AccountantSurpriseExamsSection({ exams }: { exams: any[] }) {
 	return (
 		<section className='record-detail-section record-detail-section--sec'>
 			<h4 className='record-detail-section-title'>
-				Accountant Surprise Exams ({exams.length})
-				<span className='record-detail-inline-tag record-detail-inline-tag--sec'>SEC</span>
+				Accountant Surprise Exams ({exams.length})<span className='record-detail-inline-tag record-detail-inline-tag--sec'>SEC</span>
 			</h4>
 			<div className='disclosure-detail-list'>
 				{exams.map((exam, index) => (
@@ -860,15 +857,15 @@ function AccountantSurpriseExamsSection({ exams }: { exams: any[] }) {
 							<span className='disclosure-detail-card-title'>{exam.accountantFirmName || 'Unknown Accountant Firm'}</span>
 						</div>
 						<div className='disclosure-detail-card-meta'>
-							{exam.filingDate ? (
+							{exam.filingDate ?
 								<span>Filing Date: {exam.filingDate}</span>
-							) : null}
-							{exam.fileStatus ? (
+							:	null}
+							{exam.fileStatus ?
 								<span>File Status: {exam.fileStatus}</span>
-							) : null}
-							{exam.encryptedFilingID ? (
+							:	null}
+							{exam.encryptedFilingID ?
 								<span>Encrypted ID: {exam.encryptedFilingID}</span>
-							) : null}
+							:	null}
 						</div>
 					</div>
 				))}
@@ -882,8 +879,7 @@ function NoticeFilingsSection({ filings }: { filings: any[] }) {
 	return (
 		<section className='record-detail-section record-detail-section--sec'>
 			<h4 className='record-detail-section-title'>
-				Notice Filings ({filings.length})
-				<span className='record-detail-inline-tag record-detail-inline-tag--sec'>SEC</span>
+				Notice Filings ({filings.length})<span className='record-detail-inline-tag record-detail-inline-tag--sec'>SEC</span>
 			</h4>
 			<div className='disclosure-detail-list'>
 				{filings.map((filing, index) => (
@@ -894,12 +890,12 @@ function NoticeFilingsSection({ filings }: { filings: any[] }) {
 							<span className='disclosure-detail-card-title'>{filing.jurisdiction || 'Unknown Jurisdiction'}</span>
 						</div>
 						<div className='disclosure-detail-card-meta'>
-							{filing.status ? (
+							{filing.status ?
 								<span>Status: {filing.status}</span>
-							) : null}
-							{filing.effectiveDate ? (
+							:	null}
+							{filing.effectiveDate ?
 								<span>Effective: {filing.effectiveDate}</span>
-							) : null}
+							:	null}
 						</div>
 					</div>
 				))}
@@ -979,6 +975,7 @@ function DetailList({
 					const secNo = pickFirstNonEmpty(item.bdSecNumber, item.bdSECNumber, item.iaSECNumber, item.secNumber);
 					const subtitle =
 						item.__subtitleOverride || pickFirstNonEmpty(item.position, item.currentRegistration, item.status, item.control, item.effectiveDate, item.disclosureCount);
+					const currentEmployer = pickFirstNonEmpty(item.currentEmployer, item.currentFirmName);
 					const rowType = inferRowType(item, fallbackType);
 					const canSelect = Boolean(crd && onSelectKey);
 					// Prefer finra: keys — matches dashboard/chart activate paths and BrokerCheck CRDs.
@@ -1012,7 +1009,8 @@ function DetailList({
 											if (!onSelectKey) return;
 											onSelectKey(selectionKey);
 										}}>
-										{rowType === 'firm' ? 'Firm CRD#' : 'Individual CRD#'}{crd}
+										{rowType === 'firm' ? 'Firm CRD#' : 'Individual CRD#'}
+										{crd}
 									</button>
 								:	null}
 								{secNo ?
@@ -1024,6 +1022,9 @@ function DetailList({
 							</div>
 							{subtitle ?
 								<div className='record-detail-item-subtitle'>{String(subtitle)}</div>
+							:	null}
+							{currentEmployer ?
+								<div className='record-detail-item-subtitle record-detail-item-subtitle--employer'>Now at {formatDisplayName(currentEmployer)}</div>
 							:	null}
 						</div>
 					);
@@ -1121,24 +1122,38 @@ function OrphanRecordView({
 	onSelectKey,
 }: {
 	crd: string;
-	orphan: { name: string; position?: string; parentType: 'firm' | 'individual'; parentCrd: string; firmName?: string; officeAddress?: unknown; mailingAddress?: unknown; phone?: string; city?: string; state?: string; };
+	orphan: {
+		name: string;
+		position?: string;
+		parentType: 'firm' | 'individual';
+		parentCrd: string;
+		firmName?: string;
+		officeAddress?: unknown;
+		mailingAddress?: unknown;
+		phone?: string;
+		city?: string;
+		state?: string;
+	};
 	onSelectKey: (key: string) => void;
 }) {
 	const officeAddress = formatAddress(orphan.officeAddress) || (orphan.city && orphan.state ? `${orphan.city}, ${orphan.state}` : '');
 	const mailingAddress = formatAddress(orphan.mailingAddress);
 	const phone = String(orphan.phone || '').trim();
-	const employmentItems = orphan.parentType === 'firm' ? [
-		{
-			firmName: orphan.firmName || `Firm CRD#${orphan.parentCrd}`,
-			crdNumber: orphan.parentCrd,
-			position: orphan.position,
-		},
-	] : [
-		{
-			individualName: orphan.name || `Individual CRD#${orphan.parentCrd}`,
-			crdNumber: orphan.parentCrd,
-		}
-	];
+	const employmentItems =
+		orphan.parentType === 'firm' ?
+			[
+				{
+					firmName: orphan.firmName || `Firm CRD#${orphan.parentCrd}`,
+					crdNumber: orphan.parentCrd,
+					position: orphan.position,
+				},
+			]
+		:	[
+				{
+					individualName: orphan.name || `Individual CRD#${orphan.parentCrd}`,
+					crdNumber: orphan.parentCrd,
+				},
+			];
 	return (
 		<div className='record-detail-wrapper'>
 			<div className='record-detail-view'>
@@ -1168,17 +1183,25 @@ function OrphanRecordView({
 					<div className='banner-context-links profile-links-section'>
 						<a
 							className='profile-link finra-link'
-							href={orphan.parentType === 'individual' ? `https://brokercheck.finra.org/individual/summary/${orphan.parentCrd}` : `https://brokercheck.finra.org/firm/summary/${orphan.parentCrd}`}
+							href={
+								orphan.parentType === 'individual' ?
+									`https://brokercheck.finra.org/individual/summary/${orphan.parentCrd}`
+								:	`https://brokercheck.finra.org/firm/summary/${orphan.parentCrd}`
+							}
 							target='_blank'
 							rel='noopener noreferrer'>
-							{orphan.parentType === 'individual' ? 'Parent individual FINRA profile ↗' : 'Parent firm FINRA profile ↗'}
+							FINRA profile ↗
 						</a>
 						<a
 							className='profile-link sec-link'
-							href={orphan.parentType === 'individual' ? `https://adviserinfo.sec.gov/individual/summary/${orphan.parentCrd}` : `https://adviserinfo.sec.gov/firm/summary/${orphan.parentCrd}`}
+							href={
+								orphan.parentType === 'individual' ?
+									`https://adviserinfo.sec.gov/individual/summary/${orphan.parentCrd}`
+								:	`https://adviserinfo.sec.gov/firm/summary/${orphan.parentCrd}`
+							}
 							target='_blank'
 							rel='noopener noreferrer'>
-							{orphan.parentType === 'individual' ? 'Parent individual SEC profile ↗' : 'Parent firm SEC profile ↗'}
+							SEC profile ↗
 						</a>
 					</div>
 				</section>
@@ -1253,7 +1276,7 @@ function RecordInfoView({
 	const parsedKey = parseCrdKey(activeKey);
 	const rawPayload = maybeParseJson(detailJson);
 	const combinedBundle = rawPayload && typeof rawPayload === 'object' && !Array.isArray(rawPayload) ? (rawPayload as Record<string, any>) : null;
-	
+
 	const brokersConnected = (combinedBundle?.brokersConnected as string[]) || [];
 	const brokersPrevious = (combinedBundle?.brokersPrevious as string[]) || [];
 
@@ -1270,21 +1293,27 @@ function RecordInfoView({
 	useEffect(() => {
 		const seeded = seedFromBrokers(brokersConnected, brokersPrevious);
 		if (seeded.current.length || seeded.previous.length) {
-			setEmployeeConnections((prev) =>
-				prev.current.length || prev.previous.length ? prev : { loading: prev.loading, ...seeded },
-			);
+			setEmployeeConnections((prev) => (prev.current.length || prev.previous.length ? prev : { loading: prev.loading, ...seeded }));
 		}
 	}, [brokersConnected.join(','), brokersPrevious.join(',')]);
 
 	useEffect(() => {
-		const isFirmRecord = parsedKey?.type === 'firm' || Boolean(combinedBundle?.basicInformation?.firmName || combinedBundle?.basicInformation?.iaFirmName || combinedBundle?.basicInformation?.firmId);
+		const isFirmRecord =
+			parsedKey?.type === 'firm' || Boolean(combinedBundle?.basicInformation?.firmName || combinedBundle?.basicInformation?.iaFirmName || combinedBundle?.basicInformation?.firmId);
 		if (!isFirmRecord || !parsedKey?.crd) return;
 
 		let active = true;
 		const controller = new AbortController();
-		const timeout = setTimeout(() => controller.abort(), 20000);
+		const timeout = setTimeout(() => controller.abort(), 60000);
 		// Keep any seeded broker lists visible while the named enrichment loads.
 		setEmployeeConnections((prev) => ({ ...prev, loading: true }));
+
+		const mapConnectionCard = (c: any) => ({
+			...c,
+			crd: c.individualId || c.crd,
+			currentEmployer: c.currentEmployer || c.currentFirmName || undefined,
+			__subtitleOverride: [c.address, c.yearsWorked != null && String(c.yearsWorked).trim() !== '' ? `${c.yearsWorked} yrs` : null].filter(Boolean).join(' • ') || c.relationship,
+		});
 
 		fetch(`/api/finra/firm/${parsedKey.crd}/connections`, { signal: controller.signal })
 			.then((r) => r.json())
@@ -1293,16 +1322,8 @@ function RecordInfoView({
 				if (data.currentConnections || data.previousConnections) {
 					setEmployeeConnections({
 						loading: false,
-						current: (data.currentConnections || []).map((c: any) => ({
-							...c,
-							crd: c.individualId || c.crd,
-							__subtitleOverride: [c.address, c.yearsWorked ? `${c.yearsWorked} yrs` : null].filter(Boolean).join(' • ') || c.relationship,
-						})),
-						previous: (data.previousConnections || []).map((c: any) => ({
-							...c,
-							crd: c.individualId || c.crd,
-							__subtitleOverride: [c.address, c.yearsWorked ? `${c.yearsWorked} yrs` : null].filter(Boolean).join(' • ') || c.relationship,
-						})),
+						current: (data.currentConnections || []).map(mapConnectionCard),
+						previous: (data.previousConnections || []).map(mapConnectionCard),
 					});
 				} else {
 					setEmployeeConnections((prev) => ({ ...prev, loading: false }));
@@ -1323,13 +1344,13 @@ function RecordInfoView({
 	// Only treat as orphan when there is no live FINRA/SEC source payload.
 	// Some records appear both as firm owner refs and as full BrokerCheck people;
 	// a stale/cached orphan flag must not hide the real Redis detail.
+	const isFinraReal = combinedBundle?.sources?.finra?.found && !combinedBundle?.sources?.finra?.payload?.orphan;
+	const isSecReal = combinedBundle?.sources?.sec?.found && !combinedBundle?.sources?.sec?.payload?.orphan;
 	const hasLiveSourcePayload = Boolean(
-		combinedBundle?.sources?.finra?.found ||
-		combinedBundle?.sources?.sec?.found ||
-		combinedBundle?.sources?.finra?.payload ||
-		combinedBundle?.sources?.sec?.payload ||
-		(typeof combinedBundle?.sources?.finra?.rawPayload === 'string' && combinedBundle.sources.finra.rawPayload.trim()) ||
-		(typeof combinedBundle?.sources?.sec?.rawPayload === 'string' && combinedBundle.sources.sec.rawPayload.trim()),
+		isFinraReal ||
+		isSecReal ||
+		(typeof combinedBundle?.sources?.finra?.rawPayload === 'string' && combinedBundle.sources.finra.rawPayload.trim() && !combinedBundle.sources.finra.rawPayload.includes('"orphan":')) ||
+		(typeof combinedBundle?.sources?.sec?.rawPayload === 'string' && combinedBundle.sources.sec.rawPayload.trim() && !combinedBundle.sources.sec.rawPayload.includes('"orphan":'))
 	);
 	if (combinedBundle?.orphan && typeof combinedBundle.orphan === 'object' && !hasLiveSourcePayload) {
 		const crd = typeof combinedBundle.crd === 'string' ? combinedBundle.crd : parsedKey?.crd || 'N/A';
@@ -1529,7 +1550,9 @@ function RecordInfoView({
 					<section className='record-detail-hero'>
 						<div className='record-detail-subline'>
 							{mergedSecNumber[0]?.value ?
-								<span>CRD#: {crd}/SEC#: {mergedSecNumber[0].value}</span>
+								<span>
+									CRD#: {crd}/SEC#: {mergedSecNumber[0].value}
+								</span>
 							:	<span>CRD#: {crd}</span>}
 						</div>
 						{!isFirmRecord ?
@@ -1706,32 +1729,6 @@ function RecordInfoView({
 						onSelectKey={onSelectKey}
 						fallbackType={linkedFallbackType}
 					/>
-					{isFirmRecord && employeeConnections ? (
-						<>
-							{employeeConnections.loading && !(employeeConnections.current.length || employeeConnections.previous.length) ? (
-								<div className='record-detail-empty' style={{ marginTop: '1rem', color: '#888', fontStyle: 'italic' }}>
-									Loading connections...
-								</div>
-							) : null}
-							{employeeConnections.current.length > 0 || employeeConnections.previous.length > 0 ? (
-								<>
-									<DetailList
-										title={`Current connections (${employeeConnections.current.length})`}
-										items={employeeConnections.current}
-										onSelectKey={onSelectKey}
-										fallbackType='individual'
-									/>
-									<DetailList
-										title={`Previous connections (${employeeConnections.previous.length})`}
-										items={employeeConnections.previous}
-										onSelectKey={onSelectKey}
-										fallbackType='individual'
-										muted
-									/>
-								</>
-							) : null}
-						</>
-					) : null}
 					<DisclosureDetailCards
 						title={`Disclosure details (${combinedDisclosures.length})`}
 						items={combinedDisclosures}
@@ -1787,6 +1784,34 @@ function RecordInfoView({
 								title={`Registered SROs (${registeredSroTags.length})`}
 								tags={registeredSroTags}
 							/>
+						</>
+					:	null}
+					{isFirmRecord && employeeConnections ?
+						<>
+							{employeeConnections.loading && !(employeeConnections.current.length || employeeConnections.previous.length) ?
+								<div
+									className='record-detail-empty'
+									style={{ marginTop: '1rem', color: '#888', fontStyle: 'italic' }}>
+									Loading connections...
+								</div>
+							:	null}
+							{employeeConnections.current.length > 0 || employeeConnections.previous.length > 0 ?
+								<>
+									<DetailList
+										title={`Current connections (${employeeConnections.current.length})`}
+										items={employeeConnections.current}
+										onSelectKey={onSelectKey}
+										fallbackType='individual'
+									/>
+									<DetailList
+										title={`Previous connections (${employeeConnections.previous.length})`}
+										items={employeeConnections.previous}
+										onSelectKey={onSelectKey}
+										fallbackType='individual'
+										muted
+									/>
+								</>
+							:	null}
 						</>
 					:	null}
 				</div>
@@ -1895,7 +1920,9 @@ function RecordInfoView({
 				</div>
 				<div className='record-detail-subline'>
 					{secNumber ?
-						<span>CRD#: {crd}/SEC#: {secNumber}</span>
+						<span>
+							CRD#: {crd}/SEC#: {secNumber}
+						</span>
 					:	<span>CRD#: {crd}</span>}
 				</div>
 				{!isFirmRecord ?
@@ -2134,34 +2161,8 @@ function RecordInfoView({
 				onSelectKey={onSelectKey}
 				fallbackType={linkedFallbackType}
 			/>
-			{isFirmRecord && employeeConnections ? (
-				<>
-					{employeeConnections.loading && !(employeeConnections.current.length || employeeConnections.previous.length) ? (
-						<div className='record-detail-empty' style={{ marginTop: '1rem', color: '#888', fontStyle: 'italic' }}>
-							Loading connections...
-						</div>
-					) : null}
-					{employeeConnections.current.length > 0 || employeeConnections.previous.length > 0 ? (
-						<>
-							<DetailList
-								title={`Current connections (${employeeConnections.current.length})`}
-								items={employeeConnections.current}
-								onSelectKey={onSelectKey}
-								fallbackType='individual'
-							/>
-							<DetailList
-								title={`Previous connections (${employeeConnections.previous.length})`}
-								items={employeeConnections.previous}
-								onSelectKey={onSelectKey}
-								fallbackType='individual'
-								muted
-							/>
-						</>
-					) : null}
-				</>
-			) : null}
 			{/* Generic connection buckets only when employment arrays weren't present (non-firm / orphan shapes). */}
-			{!isFirmRecord && !currentEmploymentRows.length && !previousEmploymentRows.length ? (
+			{!isFirmRecord && !currentEmploymentRows.length && !previousEmploymentRows.length ?
 				<>
 					<DetailList
 						title={`Current connections (${fallbackConnectionBuckets.current.length})`}
@@ -2177,7 +2178,7 @@ function RecordInfoView({
 						muted
 					/>
 				</>
-			) : null}
+			:	null}
 			{!isFirmRecord && registeredStateTagsSingle.length ?
 				<TagListSection
 					title={`Registered States (${registeredStateTagsSingle.length})`}
@@ -2188,6 +2189,34 @@ function RecordInfoView({
 				title='Additional details'
 				body={body}
 			/>
+			{isFirmRecord && employeeConnections ?
+				<>
+					{employeeConnections.loading && !(employeeConnections.current.length || employeeConnections.previous.length) ?
+						<div
+							className='record-detail-empty'
+							style={{ marginTop: '1rem', color: '#888', fontStyle: 'italic' }}>
+							Loading connections...
+						</div>
+					:	null}
+					{employeeConnections.current.length > 0 || employeeConnections.previous.length > 0 ?
+						<>
+							<DetailList
+								title={`Current connections (${employeeConnections.current.length})`}
+								items={employeeConnections.current}
+								onSelectKey={onSelectKey}
+								fallbackType='individual'
+							/>
+							<DetailList
+								title={`Previous connections (${employeeConnections.previous.length})`}
+								items={employeeConnections.previous}
+								onSelectKey={onSelectKey}
+								fallbackType='individual'
+								muted
+							/>
+						</>
+					:	null}
+				</>
+			:	null}
 		</div>
 	);
 }
@@ -2209,7 +2238,7 @@ export function StatusBox({
 }: Props) {
 	const [jsonCopied, setJsonCopied] = useState(false);
 	const [activeTab, setActiveTab] = useState<DetailTab>('info');
-	
+
 	useEffect(() => {
 		const saved = localStorage.getItem('statusBoxActiveTab');
 		if (saved !== null) {

@@ -13,10 +13,13 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 
 	try {
 		const { currentConnections, previousConnections, source } = await getFirmConnections(id);
-		res.setHeader('Cache-Control', 'public, s-maxage=300, stale-while-revalidate=86400');
+		const found = currentConnections.length > 0 || previousConnections.length > 0;
+		// Do not CDN-cache empty/partial enrichment responses — names fill in over time
+		// from Redis + live BrokerCheck lookups into a local person-meta cache.
+		res.setHeader('Cache-Control', found ? 'private, max-age=30' : 'no-store');
 		return res.status(200).json({
 			firmId: id,
-			found: currentConnections.length > 0 || previousConnections.length > 0,
+			found,
 			currentConnections,
 			previousConnections,
 			source,

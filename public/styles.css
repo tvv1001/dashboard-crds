@@ -2199,6 +2199,12 @@ button:disabled {
 	overflow-wrap: anywhere;
 }
 
+.record-detail-item-subtitle--employer {
+	font-size: 0.75rem;
+	color: #94a3b8;
+	font-style: italic;
+}
+
 /* Disclosure narrative detail (allegations, damages, settlements, broker
    comments) pulled from FINRA/SEC — orange to visually flag as disclosure
    content distinct from the neutral blue record-detail-item cards. */

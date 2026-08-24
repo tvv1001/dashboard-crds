@@ -138,6 +138,19 @@ async function getEntityLabel(type: GraphEntityType, crd: string): Promise<strin
 	} catch {
 		// fall through
 	}
+	
+	try {
+		const { resolveNameFromLocalIndex } = require('../../src/lib/localSearch');
+		for (const source of ['finra', 'sec'] as const) {
+			const sidecarName = await resolveNameFromLocalIndex(source, type, crd);
+			if (sidecarName && !isGenericGraphLabel(sidecarName, type, crd)) {
+				return toProperCaseName(sidecarName);
+			}
+		}
+	} catch {
+		// ignore
+	}
+	
 	// Last resort: bare CRD — never "Individual/Firm <crd>".
 	return crd;
 }

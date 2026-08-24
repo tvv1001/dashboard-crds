@@ -189,15 +189,37 @@ function compressPayload(value: string): string {
 	return value;
 }
 
+/**
+ * Decode Redis string values.
+ *
+ * Shared CRD payloads are stored as brotli(base64) without a prefix (see
+ * writeRawValueToRedis / the sibling writer). Generic cache keys may also use
+ * the `br:` + brotli(base64) form from compressPayload.
+ */
 function decompressPayload(value: string): string {
-	if (typeof value === 'string' && value.startsWith('br:')) {
+	if (typeof value !== 'string') return value as any;
+	const trimmed = value.trim();
+	if (!trimmed) return value;
+	if (trimmed.startsWith('{') || trimmed.startsWith('[')) return trimmed;
+
+	if (trimmed.startsWith('br:')) {
 		try {
-			return zlib.brotliDecompressSync(Buffer.from(value.slice(3), 'base64')).toString('utf-8');
+			return zlib.brotliDecompressSync(Buffer.from(trimmed.slice(3), 'base64')).toString('utf-8');
 		} catch {
 			return value;
 		}
 	}
-	return value;
+
+	// Raw brotli-base64 (canonical saved finra:/sec: payload encoding).
+	try {
+		return zlib.brotliDecompressSync(Buffer.from(trimmed, 'base64')).toString('utf-8');
+	} catch {
+		try {
+			return zlib.gunzipSync(Buffer.from(trimmed, 'base64')).toString('utf-8');
+		} catch {
+			return value;
+		}
+	}
 }
 
 export async function getCacheValue(key: string) {
@@ -714,33 +736,38 @@ async function ensureLocalDerivedDir() {
 
 async function writeRawValueToRedis(rawKey: string, serializedPayload: string) {
 	if (!ALLOW_REDIS_WRITES) return;
-	if (!(writableUpstashClient || writableUpstashClient || redisClient)) return;
+	// Canonical shared encoding for finra:/sec: payloads: brotli → base64 (no `br:` prefix).
+	// Do not route through setCacheValue/compressPayload, which would wrap again as `br:…`.
 	const compressed = zlib.brotliCompressSync(Buffer.from(serializedPayload, 'utf-8')).toString('base64');
-	await setCacheValue(rawKey, compressed);
+
+	let handled = false;
+	if (writableUpstashClient) {
+		try {
+			await writableUpstashClient.set(rawKey, compressed);
+			handled = true;
+		} catch (e) {
+			console.warn('Primary redis raw write failed', formatErrorMessage(e));
+		}
+	}
+	if (handled) return;
+
+	const client = await getRedisClient();
+	if (!client) return;
+	await client.set(rawKey, compressed);
 }
 
 async function readRawValueFromRedis(rawKey: string) {
 	if (!(upstashRedisClient || redisClient)) return null;
 	// Local Redis first (dev), then the shared cache. Do not require the
 	// saved-key index or on-disk raw files.
+	// getLocalRedisValue / getCacheValue already run decompressPayload (br: and
+	// raw brotli-base64), so a successful read is plain JSON text.
 	const val = (await getLocalRedisValue(rawKey)) ?? (await getCacheValue(rawKey));
 	if (!val) return null;
-
 	const trimmed = val.trim();
-	if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-		return trimmed;
-	}
-
-	try {
-		return zlib.brotliDecompressSync(Buffer.from(trimmed, 'base64')).toString('utf-8');
-	} catch {
-		try {
-			return zlib.gunzipSync(Buffer.from(trimmed, 'base64')).toString('utf-8');
-		} catch (err) {
-			console.warn(`Failed to decompress raw key ${rawKey}`, err);
-			return null;
-		}
-	}
+	if (trimmed.startsWith('{') || trimmed.startsWith('[')) return trimmed;
+	console.warn(`Failed to decompress raw key ${rawKey}: value is not JSON after decode`);
+	return null;
 }
 
 export async function listRawKeysFromRedis() {
@@ -1529,6 +1556,11 @@ export async function loadCombinedSavedPayloadBundle(key: string): Promise<Combi
 			sec: await readSourceRecord('sec'),
 		},
 	};
+
+	const orphanRef = (bundle.sources.finra.payload as any)?.orphan || (bundle.sources.sec.payload as any)?.orphan;
+	if (orphanRef) {
+		(bundle as any).orphan = orphanRef;
+	}
 
 	if (type === 'firm') {
 		try {

@@ -96,7 +96,12 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 		    const hit = doc.hit || doc || {};
 		    const isFirm = doc.type === 'firm' || hit.type === 'firm';
 		    const crd = hit.crd || hit.ind_crd || hit.firm_id || hit.firmId || doc.crd || doc.id?.split(':').pop() || '';
-		    const rawName = doc.primaryNameCandidates?.[0] || hit.label || doc.label || hit.name || hit.firm_name || hit.firmName || `${hit.ind_firstname || ''} ${hit.ind_lastname || ''}`.trim() || crd;
+		    
+			const firmName = hit.firm_name || hit.firmName || hit.organizationName;
+			const indName = [hit.ind_firstname, hit.ind_middlename, hit.ind_lastname].filter(Boolean).join(' ') || `${hit.ind_firstname || ''} ${hit.ind_lastname || ''}`.trim();
+			const actualName = isFirm ? firmName : indName;
+			
+		    const rawName = actualName || hit.name || hit.fullName || hit.displayName || doc.primaryNameCandidates?.[0] || hit.label || doc.label || crd;
 		    const name = toTitleCase(rawName);
 		    
 		    const rawAliases = Array.isArray(doc.nameCandidates) ? doc.nameCandidates : (hit.otherNames || []);

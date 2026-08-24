@@ -453,28 +453,34 @@ async function loadIndex(bucket: LocalSearchBucket, baseUrl?: string, seedRoots:
 				}
 
 				if (index) {
-					// Load dynamic extensions from Redis and append them
-					const extensions = await fetchExtensionsFromRedis(bucket);
-					if (extensions.length > 0) {
-						// Avoid duplicates: keep track of IDs in the static index
-						const existingIds = new Set<string>();
-						for (const doc of index.docs) {
-							existingIds.add(doc.id);
-						}
-
-						for (const extDoc of extensions) {
-							if (!existingIds.has(extDoc.id)) {
-								index.docs.push(prepareDoc(extDoc));
-								existingIds.add(extDoc.id);
-							} else {
-								// Upgrade/overwrite the existing doc in place with the latest dynamic data
-								const pos = index.docs.findIndex((d) => d.id === extDoc.id);
-								if (pos !== -1) {
-									index.docs[pos] = prepareDoc(extDoc);
-								}
+					// Merge the Redis search-index sidecar (and extensions) even when a
+					// local gzip exists — the on-disk file can be a subset.
+					const existingIds = new Set<string>(index.docs.map((doc) => doc.id));
+					const mergeDocs = (docs: LocalSearchDoc[]) => {
+						for (const doc of docs) {
+							const prepared = prepareDoc(doc);
+							if (!existingIds.has(prepared.id)) {
+								index!.docs.push(prepared);
+								existingIds.add(prepared.id);
+								continue;
 							}
+							const pos = index!.docs.findIndex((d) => d.id === prepared.id);
+							if (pos !== -1) index!.docs[pos] = prepared;
 						}
+					};
+
+					try {
+						const redisData = await fetchFromRedis(bucket);
+						if (Array.isArray(redisData?.docs) && redisData.docs.length) {
+							mergeDocs(redisData.docs);
+						}
+					} catch (err: any) {
+						console.warn(`[localSearch] Redis search-index merge failed for ${bucket}:`, err?.message || err);
 					}
+
+					const extensions = await fetchExtensionsFromRedis(bucket);
+					if (extensions.length > 0) mergeDocs(extensions);
+
 					return index;
 				}
 
@@ -1302,26 +1308,85 @@ export function cleanSearchQuery(query: string): string {
 	return queries[0] || query.trim();
 }
 
-export async function resolveNameFromLocalIndex(source: LocalSearchSource, type: LocalSearchEntity, crd: string): Promise<string | null> {
-	const bucket = `${source}:${type}` as LocalSearchBucket;
-	const index = await loadIndex(bucket);
-	if (!index || !Array.isArray(index.docs)) return null;
-	const match = index.docs.find((d: any) => {
-		const hit = d.hit || {};
-		return String(hit.ind_source_id) === String(crd) || 
-			String(hit.ind_crd) === String(crd) || 
-			String(hit.firm_id) === String(crd) || 
-			String(hit.firmId) === String(crd) || 
-			String(hit.firm_source_id) === String(crd) || 
-			String(d.id) === String(crd);
-	});
-	if (match && match.hit) {
-		const hit = match.hit;
-		if (type === 'individual') {
-			const names = [hit.ind_firstname, hit.ind_middlename, hit.ind_lastname].filter(Boolean);
-			if (names.length) return names.join(' ');
-		}
-		return hit.firm_name || hit.firmName || hit.organizationName || hit.organization_name || hit.companyName || hit.legalName || hit.name || match.nameSearchText || null;
+const localIndexCrdNameMaps = new Map<LocalSearchBucket, Promise<Map<string, string>>>();
+
+function extractCrdFromSearchDoc(doc: any, type: LocalSearchEntity): string {
+	const hit = doc?.hit || {};
+	const candidates =
+		type === 'individual' ?
+			[hit.crd, hit.ind_crd, hit.ind_source_id, hit.individualId, hit.personCrd, doc?.id]
+		:	[hit.crd, hit.firm_id, hit.firmId, hit.firm_source_id, hit.firmCrd, doc?.id];
+	for (const candidate of candidates) {
+		const text = String(candidate ?? '').trim();
+		if (!text) continue;
+		if (/^\d{1,10}$/.test(text)) return text;
+		const match = text.match(/(?:individual|firm):(\d{1,10})$/i);
+		if (match) return match[1];
 	}
-	return null;
+	return '';
+}
+
+function extractLabelFromSearchDoc(doc: any, type: LocalSearchEntity): string {
+	const hit = doc?.hit || {};
+	if (type === 'individual') {
+		const parts = [hit.ind_firstname, hit.ind_middlename, hit.ind_lastname].filter(Boolean);
+		if (parts.length) return parts.join(' ');
+		
+		const fallbackParts = [hit.firstName, hit.middleName, hit.lastName].filter(Boolean);
+		if (fallbackParts.length) return fallbackParts.join(' ');
+	}
+	
+	const firmName = hit.firm_name || hit.firmName || hit.organizationName || hit.organization_name || hit.companyName || hit.legalName || hit.fullName;
+	if (firmName) return String(firmName).trim();
+
+	return String(
+		hit.name ||
+			hit.displayName ||
+			hit.label ||
+			doc?.label ||
+			doc?.nameSearchText ||
+			'',
+	).trim();
+}
+
+/** CRD → display name map from the local search-index sidecar (public/search-indexes/*.gz). */
+export async function getLocalIndexCrdNameMap(source: LocalSearchSource, type: LocalSearchEntity): Promise<Map<string, string>> {
+	const bucket = `${source}:${type}` as LocalSearchBucket;
+	if (!localIndexCrdNameMaps.has(bucket)) {
+		localIndexCrdNameMaps.set(
+			bucket,
+			(async () => {
+				const index = await loadIndex(bucket);
+				const map = new Map<string, string>();
+				if (!index || !Array.isArray(index.docs)) return map;
+				for (const doc of index.docs) {
+					const crd = extractCrdFromSearchDoc(doc, type);
+					const label = extractLabelFromSearchDoc(doc, type);
+					if (crd && label) map.set(crd, label);
+				}
+				return map;
+			})(),
+		);
+	}
+	return localIndexCrdNameMaps.get(bucket)!;
+}
+
+export async function resolveNameFromLocalIndex(source: LocalSearchSource, type: LocalSearchEntity, crd: string): Promise<string | null> {
+	const normalized = String(crd || '').trim();
+	if (!/^\d{1,10}$/.test(normalized)) return null;
+	const map = await getLocalIndexCrdNameMap(source, type);
+	return map.get(normalized) || null;
+}
+
+/** Resolve many individual CRDs from the local search-index sidecars (FINRA then SEC). */
+export async function resolveIndividualNamesFromLocalIndex(crds: string[]): Promise<Map<string, string>> {
+	const out = new Map<string, string>();
+	const wanted = Array.from(new Set(crds.map((c) => String(c || '').trim()).filter((c) => /^\d{1,10}$/.test(c))));
+	if (!wanted.length) return out;
+	const [finraMap, secMap] = await Promise.all([getLocalIndexCrdNameMap('finra', 'individual'), getLocalIndexCrdNameMap('sec', 'individual')]);
+	for (const crd of wanted) {
+		const name = finraMap.get(crd) || secMap.get(crd);
+		if (name) out.set(crd, name);
+	}
+	return out;
 }
