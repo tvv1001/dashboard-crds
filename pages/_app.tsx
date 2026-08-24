@@ -236,6 +236,7 @@ export default function MyApp({ Component, pageProps }: AppProps) {
 						);
 					})}
 				</div>
+				<div id="top-nav-hamburger-portal" />
 			</nav>
 			<div className={`app-page ${isDashboardRoute ? 'dashboard-page' : ''} ${pageRouteClass}`.trim()}>
 				<Component {...pageProps} />

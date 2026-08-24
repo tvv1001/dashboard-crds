@@ -308,7 +308,7 @@ function normalizeEdgeType(raw: string | undefined): EdgeTypeKey {
 }
 
 /** d3-force bake is already wide; client scale opens dense firm clusters more. */
-const LAYOUT_SPREAD = 22;
+const LAYOUT_SPREAD = 32;
 
 /**
  * Hard cap on nodes kept live on the WebGL canvas at once. Without this, every
@@ -842,7 +842,10 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 	const hardResolveOverlaps = () => {
 		// O(n²) per iteration — cap iterations more aggressively for very large graphs
 		// so this failsafe pass can't stall the tab on dense firm expansions (2000+ nodes).
-		const maxIter = pts.length > 1200 ? 8 : pts.length > 600 ? 14 : 22;
+		const maxIter =
+			pts.length > 1200 ? 8
+			: pts.length > 600 ? 14
+			: 22;
 		for (let iter = 0; iter < maxIter; iter++) {
 			let moved = false;
 			for (let i = 0; i < pts.length; i++) {
@@ -1098,28 +1101,33 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 
 	// Hard failsafe: competing custom forces can keep alpha above alphaMin.
 	// Stop after a short settle, run one hard de-overlap, then freeze.
-	window.setTimeout(() => {
-		if (globalLayoutAnimId !== sim) return;
-		hardResolveOverlaps();
-		for (const p of pts) {
-			p.vx = 0;
-			p.vy = 0;
-			p.fx = p.x;
-			p.fy = p.y;
-			if (graph.hasNode(p.id)) {
-				graph.setNodeAttribute(p.id, 'x', p.x);
-				graph.setNodeAttribute(p.id, 'y', p.y);
+	window.setTimeout(
+		() => {
+			if (globalLayoutAnimId !== sim) return;
+			hardResolveOverlaps();
+			for (const p of pts) {
+				p.vx = 0;
+				p.vy = 0;
+				p.fx = p.x;
+				p.fy = p.y;
+				if (graph.hasNode(p.id)) {
+					graph.setNodeAttribute(p.id, 'x', p.x);
+					graph.setNodeAttribute(p.id, 'y', p.y);
+				}
 			}
-		}
-		sim.alpha(0);
-		sim.stop();
-		globalLayoutAnimId = null;
-		try {
-			sigma.refresh();
-		} catch {
-			// ignore
-		}
-	}, dense ? 4200 : starEgo ? 3200 : 2800);
+			sim.alpha(0);
+			sim.stop();
+			globalLayoutAnimId = null;
+			try {
+				sigma.refresh();
+			} catch {
+				// ignore
+			}
+		},
+		dense ? 4200
+		: starEgo ? 3200
+		: 2800,
+	);
 }
 
 /**
