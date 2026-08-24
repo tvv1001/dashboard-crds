@@ -308,7 +308,17 @@ function normalizeEdgeType(raw: string | undefined): EdgeTypeKey {
 }
 
 /** d3-force bake is already wide; client scale opens dense firm clusters more. */
-const LAYOUT_SPREAD = 7;
+const LAYOUT_SPREAD = 22;
+
+/**
+ * Hard cap on nodes kept live on the WebGL canvas at once. Without this, every
+ * deep-link / focus navigation across a session (firm A -> individual B -> firm C -> ...)
+ * only ever *adds* nodes/edges (see focusNode/addNodeToCanvas), so graphology + Sigma's
+ * WebGL buffers (position/color/size arrays, GPU buffers) grow without bound — the
+ * classic "SPA WebGL memory leak" symptom. We LRU-evict the least-recently-touched,
+ * non-pinned/non-selected nodes back down under this cap after each focus change.
+ */
+const MAX_CANVAS_NODES = 15000;
 
 /**
  * Local testing: bare `/chart` preloads curated CRD seeds (see chartPreloadSeeds)
@@ -430,7 +440,7 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 
 	const nCount = graph.order;
 	const dense = nCount > 300;
-	const mid = nCount > 120 && !dense;
+	const mid = nCount > 620 && !dense;
 
 	const pts: any[] = [];
 	const nodeById = new Map<string, any>();
@@ -593,20 +603,20 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 		: nCount > 1000 ? 820
 		: nCount > 300 ? 720
 		: nCount > 150 ? 640
-		: nCount > 80 ? 580
-		: 540;
+		: nCount > 80 ? 620
+		: 580;
 	// Leaf body padding in graph units — enough to stop disk stacks without
 	// inflating hub-to-hub distance (hubs use orbit-based collision below).
 	const collidePad =
 		starEgo ?
 			egoIsPerson ? 88
 			:	100
-		: nCount > 1000 ? 64
-		: nCount > 600 ? 76
-		: nCount > 300 ? 84
-		: nCount > 120 ? 96
-		: nCount > 60 ? 112
-		: 124;
+		: nCount > 1000 ? 76
+		: nCount > 600 ? 88
+		: nCount > 300 ? 96
+		: nCount > 120 ? 108
+		: nCount > 60 ? 120
+		: 136;
 	// Weak centering so multi-hub maps don't collapse back together.
 	const centerStrength =
 		starEgo ? 0.014
@@ -830,13 +840,16 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 
 	/** Final hard de-overlap after forces settle — resolves residual leaf stacks. */
 	const hardResolveOverlaps = () => {
-		for (let iter = 0; iter < 18; iter++) {
+		// O(n²) per iteration — cap iterations more aggressively for very large graphs
+		// so this failsafe pass can't stall the tab on dense firm expansions (2000+ nodes).
+		const maxIter = pts.length > 1200 ? 8 : pts.length > 600 ? 14 : 22;
+		for (let iter = 0; iter < maxIter; iter++) {
 			let moved = false;
 			for (let i = 0; i < pts.length; i++) {
 				const a = pts[i];
 				const aKids = childrenByHub.get(a.id)?.length || 0;
 				const aIsHub = aKids >= 2 || a.degree >= 4 || a.pinned || (starEgo && a.id === egoHubId);
-				const aR = aIsHub ? hubOuterOrbit(a.id, a.degree, a.firm) * 0.78 + ORBIT_HUB_GAP * 0.2 : (a.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE) + collidePad * 0.65;
+				const aR = aIsHub ? hubOuterOrbit(a.id, a.degree, a.firm) * 1.78 + ORBIT_HUB_GAP * 0.2 : (a.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE) + collidePad * 2.65;
 				for (let j = i + 1; j < pts.length; j++) {
 					const b = pts[j];
 					const bKids = childrenByHub.get(b.id)?.length || 0;
@@ -849,7 +862,7 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 						const need = hubOuterOrbit(a.id, a.degree, a.firm) + hubOuterOrbit(b.id, b.degree, b.firm) + ORBIT_HUB_GAP;
 						if (dist >= need) continue;
 						if (dist < 1e-6) {
-							const ang = ((hashString(`${a.id}|${b.id}|hard`) % 1000) / 999) * Math.PI * 2;
+							const ang = ((hashString(`${a.id}|${b.id}|hard`) % 1000) / 999) * Math.PI * 12;
 							dx = Math.cos(ang);
 							dy = Math.sin(ang);
 							dist = 1;
@@ -883,19 +896,19 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 						moved = true;
 						continue;
 					}
-					const bR = bIsHub ? hubOuterOrbit(b.id, b.degree, b.firm) * 0.78 + ORBIT_HUB_GAP * 0.2 : (b.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE) + collidePad * 0.65;
+					const bR = bIsHub ? hubOuterOrbit(b.id, b.degree, b.firm) * 0.8 + ORBIT_HUB_GAP * 0.2 : (b.firm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE) + collidePad * 2.65;
 					let dx = (b.x ?? 0) - (a.x ?? 0);
 					let dy = (b.y ?? 0) - (a.y ?? 0);
 					let dist = Math.hypot(dx, dy);
 					const need = aR + bR;
 					if (dist >= need) continue;
 					if (dist < 1e-6) {
-						const ang = ((hashString(`${a.id}|${b.id}|leafhard`) % 1000) / 999) * Math.PI * 2;
+						const ang = ((hashString(`${a.id}|${b.id}|leafhard`) % 1000) / 999) * Math.PI * 4;
 						dx = Math.cos(ang);
 						dy = Math.sin(ang);
 						dist = 1;
 					}
-					const push = (need - dist) * 0.55;
+					const push = (need - dist) * 3.55;
 					const ux = (dx / dist) * push;
 					const uy = (dy / dist) * push;
 					// Prefer moving leaves over hubs / pinned.
@@ -1106,7 +1119,7 @@ function runFluidLayout(graph: Graph, sigma: Sigma, opts?: { egoHubId?: string |
 		} catch {
 			// ignore
 		}
-	}, 2600);
+	}, dense ? 4200 : starEgo ? 3200 : 2800);
 }
 
 /**
@@ -1150,26 +1163,28 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	const hubSize = hubIsFirm ? FIRM_NODE_SIZE : INDIVIDUAL_NODE_SIZE;
 	// Children of a firm are mostly people (smaller); children of a person are firms (larger).
 	const childSize = hubIsFirm ? INDIVIDUAL_NODE_SIZE : FIRM_NODE_SIZE;
-	// Use symmetric arc padding so both person nodes and firm nodes spread out 
+	// Use symmetric arc padding so both person nodes and firm nodes spread out
 	// equally on their orbits without clumping.
 	const arcPad =
-		childSize * (
-			childCount > 80 ? 4.8
-			: childCount > 24 ? 4.4
-			: 4.0
-		);
-	const minClear = hubSize + childSize + Math.max(72, childSize * 1.45);
+		childSize *
+		(childCount > 160 ? 8.5
+		: childCount > 80 ? 7.2
+		: childCount > 24 ? 6.0
+		: 4.8);
+	const minClear = hubSize + childSize + Math.max(100, childSize * 2.2);
 
 	let ringCount = opts.ringCount ?? 1;
 	if (opts.preferSingleRing && childCount <= 22) {
 		ringCount = 1;
 	} else if (opts.ringCount == null) {
 		// Prefer more rings earlier so dense hubs don't pack leaves into one clump.
-		if (childCount > 160) ringCount = 8;
-		else if (childCount > 100) ringCount = 7;
-		else if (childCount > 60) ringCount = 6;
-		else if (childCount > 36) ringCount = 5;
-		else if (childCount > 22) ringCount = 4;
+		if (childCount > 320) ringCount = 12;
+		else if (childCount > 220) ringCount = 10;
+		else if (childCount > 160) ringCount = 9;
+		else if (childCount > 100) ringCount = 8;
+		else if (childCount > 60) ringCount = 7;
+		else if (childCount > 36) ringCount = 6;
+		else if (childCount > 22) ringCount = 5;
 		else if (childCount > 12) ringCount = 3;
 		else if (childCount > 7) ringCount = 2;
 		else ringCount = 1;
@@ -1180,7 +1195,7 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	const fromArc = (perRing * arcPad) / (Math.PI * 2);
 	const base = Math.max(minClear, fromArc, 360);
 	const ring = Math.max(0, opts.ringIndex ?? 0);
-	const ringStep = Math.max(childSize * 3.1 + 56, 130 + Math.min(110, Math.sqrt(childCount) * 12));
+	const ringStep = Math.max(childSize * 5.2 + 90, 170 + Math.min(220, Math.sqrt(childCount) * 18));
 
 	// Revert to original dense layout from finra-data-chart-next-02
 	return { radius: base + ring * ringStep, ringCount };
@@ -1210,7 +1225,7 @@ function packNewHubAwayFromOthers(hubX: number, hubY: number, myOuter: number, o
 	let px = hubX;
 	let py = hubY;
 	// Strong iterative separation: push fully clear of every other orbit.
-	for (let iter = 0; iter < 28; iter++) {
+	for (let iter = 0; iter < 128; iter++) {
 		let moved = false;
 		for (const o of others) {
 			let dx = px - o.x;
@@ -1419,6 +1434,10 @@ export default function GlobalGraphPage() {
 	const nodeIndexRef = useRef<Map<string, LayoutNode>>(new Map());
 	const edgesByNodeRef = useRef<Map<string, LayoutEdge[]>>(new Map());
 	const visibleIdsRef = useRef<Set<string>>(new Set());
+	/** Monotonic "last touched" counter per node — used to LRU-evict old graph nodes
+	 *  so the WebGL buffers don't grow unbounded as the user pages through firms/individuals. */
+	const nodeTouchRef = useRef<Map<string, number>>(new Map());
+	const touchCounterRef = useRef(0);
 	/**
 	 * Ego focus mode (parity with /graph individual view):
 	 * - person-firms: only person↔firm employment spokes (no employer clique / firm_link mesh)
@@ -1443,6 +1462,7 @@ export default function GlobalGraphPage() {
 	>(() => false);
 	const clearFocusRef = useRef<() => void>(() => undefined);
 	const applyHighlightRef = useRef<() => void>(() => undefined);
+	const pruneStaleNodesRef = useRef<() => void>(() => undefined);
 
 	const syncGlobalRoute = useCallback(
 		(type: 'individual' | 'firm' | null, crd: string | null) => {
@@ -1867,7 +1887,7 @@ export default function GlobalGraphPage() {
 				animating = true;
 				// Snappy pan (was a 14s linear glide — read as "nodes still drifting" and
 				// only visibly stopped when a zoom action canceled it). Freeze quickly instead.
-				cam.animate(next, { duration: 900, easing: 'quadraticOut' }, () => {
+				cam.animate(next, { duration: 520, easing: 'linear' }, () => {
 					animating = false;
 					suppressing = false;
 				});
@@ -1964,6 +1984,7 @@ export default function GlobalGraphPage() {
 	const ensureNodeOnGraph = useCallback((n: LayoutNode, pos?: { x: number; y: number }): boolean => {
 		const graph = graphRef.current;
 		if (!graph) return false;
+		nodeTouchRef.current.set(n.id, ++touchCounterRef.current);
 
 		const inactive = Boolean(n.inactive);
 		const finalColor = nodeDisplayColor(n.type, inactive);
@@ -2164,7 +2185,7 @@ export default function GlobalGraphPage() {
 			let edgesAdded = 0;
 			let missingFromCatalog = 0;
 			const golden = 2.399963229728653;
-			const ringStep = 28;
+			const ringStep = 60;
 
 			CHART_PRELOAD_SEEDS.forEach((seed, i) => {
 				const crd = String(seed.crd);
@@ -2609,6 +2630,51 @@ export default function GlobalGraphPage() {
 		[applyHighlight, edgeAllowedInEgo, ensureEdgeOnGraph, ensureNodeOnGraph, resolveNeighborMode],
 	);
 
+	/**
+	 * LRU-evict least-recently-touched, non-critical nodes once the canvas grows past
+	 * MAX_CANVAS_NODES. Keeps the currently focused/pinned/selected/hover nodes and their
+	 * immediate neighbors; everything else is dropped oldest-first. Prevents the graph +
+	 * Sigma WebGL buffers from growing without bound as the user navigates between many
+	 * firms/individuals in a single session.
+	 */
+	const pruneStaleNodes = useCallback(() => {
+		const graph = graphRef.current;
+		if (!graph || graph.order <= MAX_CANVAS_NODES) return;
+
+		const keep = new Set<string>();
+		if (focusedIdRef.current) keep.add(focusedIdRef.current);
+		if (pinnedIdRef.current) keep.add(pinnedIdRef.current);
+		for (const id of selectedIdsRef.current) keep.add(id);
+		if (hoverIdRef.current) keep.add(hoverIdRef.current);
+		// Keep direct neighbors of anything kept so the current focus star stays intact.
+		for (const id of [...keep]) {
+			if (!graph.hasNode(id)) continue;
+			graph.forEachNeighbor(id, (nb) => keep.add(nb));
+		}
+
+		const candidates = graph
+			.nodes()
+			.filter((id) => !keep.has(id))
+			.sort((a, b) => (nodeTouchRef.current.get(a) || 0) - (nodeTouchRef.current.get(b) || 0));
+
+		const overBy = graph.order - MAX_CANVAS_NODES;
+		const toDrop = candidates.slice(0, Math.max(0, overBy));
+		for (const id of toDrop) {
+			try {
+				graph.dropNode(id);
+			} catch {
+				// ignore
+			}
+			visibleIdsRef.current.delete(id);
+			visitedIdsRef.current.delete(id);
+			selectedIdsRef.current.delete(id);
+			nodeTouchRef.current.delete(id);
+		}
+		if (toDrop.length > 0) {
+			setVisibleCount(visibleIdsRef.current.size);
+		}
+	}, []);
+
 	const clearCanvas = useCallback(() => {
 		if (globalLayoutAnimId !== null) {
 			globalLayoutAnimId.stop();
@@ -2617,6 +2683,8 @@ export default function GlobalGraphPage() {
 		const graph = graphRef.current;
 		const sigma = sigmaRef.current;
 		if (!graph || !sigma) return;
+		nodeTouchRef.current.clear();
+		touchCounterRef.current = 0;
 		if (cameraPinUnlockRef.current) {
 			try {
 				cameraPinUnlockRef.current();
@@ -2650,7 +2718,7 @@ export default function GlobalGraphPage() {
 		syncGlobalRoute(null, null);
 		try {
 			sigma.refresh();
-			sigma.getCamera().animatedReset({ duration: 4000, easing: 'linear' });
+			sigma.getCamera().animatedReset({ duration: 1200, easing: 'linear' });
 		} catch {
 			// ignore
 		}
@@ -2799,6 +2867,8 @@ export default function GlobalGraphPage() {
 				void router.push(`/graph/${t}/${nodeId}`);
 			}
 
+			pruneStaleNodesRef.current();
+
 			if (opts?.fetchExpand === false) return true;
 
 			// Fetch connections and merge onto the existing canvas (never replace the graph).
@@ -2905,6 +2975,7 @@ export default function GlobalGraphPage() {
 							// ignore
 						}
 					}
+					pruneStaleNodesRef.current();
 				})
 				.catch(() => {});
 
@@ -3071,6 +3142,9 @@ export default function GlobalGraphPage() {
 	useEffect(() => {
 		applyHighlightRef.current = applyHighlight;
 	}, [applyHighlight]);
+	useEffect(() => {
+		pruneStaleNodesRef.current = pruneStaleNodes;
+	}, [pruneStaleNodes]);
 
 	useEffect(() => {
 		let cancelled = false;
@@ -4044,7 +4118,7 @@ export default function GlobalGraphPage() {
 
 			if (!matches.length) {
 				// Fallback to searching the currently loaded global layout.
-				// This is critical for pure CRD numbers that might not be in the Redis 
+				// This is critical for pure CRD numbers that might not be in the Redis
 				// search index yet, but are physically present in the graph layout.
 				const localHits = findHits(q, 1);
 				if (localHits.length > 0) {
@@ -4584,10 +4658,10 @@ export default function GlobalGraphPage() {
 					flex: 1;
 					position: relative;
 					overflow: hidden;
-					background: radial-gradient(circle at center, #0a1122 0%, #020408 100%);
+					background: #050b14;
 				}
 				.theme-light .graph-main-canvas {
-					background: radial-gradient(circle at center, #ffffff 0%, #e5e7eb 100%);
+					background: #f3f4f6;
 				}
 				.gg-webgl-host {
 					position: absolute;
@@ -4665,7 +4739,7 @@ export default function GlobalGraphPage() {
 					background: #0d131f;
 					border: 1px solid rgba(255, 255, 255, 0.08);
 					border-radius: 10px;
-					box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+					box-shadow: none;
 					z-index: 12;
 					position: absolute;
 					left: 16px;
@@ -4679,7 +4753,7 @@ export default function GlobalGraphPage() {
 				.theme-light .fg-toolbar-dock {
 					background: #ffffff;
 					border-color: rgba(0, 0, 0, 0.08);
-					box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08);
+					box-shadow: none;
 				}
 				.fg-toolbar-dock.minimized {
 					background: transparent;
