@@ -54,21 +54,28 @@ When caching upstream payloads, use the existing repo convention:
 
 ## Quickstart (Local Development)
 
-The easiest way to get started after cloning this repository is to use the provided `docker-compose.yml` to spin up a local Redis instance and run the app.
+Local Redis is the shared server at `/home/lenny/Dev/db/redis` (`127.0.0.1:6379`, **db0**). Do not run a Docker Redis on port 6379.
 
-1. Start the local Redis container:
+1. Start the shared Redis server (idempotent — skips if already up):
    ```bash
-   docker-compose up -d
+   pnpm redis:start
+   # or: bash /home/lenny/Dev/db/redis/start-redis.sh
    ```
-2. Create your `.env.local` or `.env` file and point it to the local Redis instance:
+2. Create your `.env.local` or `.env` file and point it at local Redis:
    ```env
-   REDIS_URL=redis://localhost:6379
+   USE_LOCAL_REDIS=1
+   REDIS_URL=redis://127.0.0.1:6379
    ```
-3. Install dependencies and start the app:
+3. Install dependencies and start the app (`dev` also starts Redis):
    ```bash
    pnpm install
    pnpm dev
    ```
+
+Optional Redis UI (same DB Redis Commander uses on :8081):
+```bash
+pnpm redis:commander
+```
 
 When running with Redis/Upstash caching enabled, you can use either configuration:
 

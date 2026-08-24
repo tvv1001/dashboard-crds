@@ -103,10 +103,10 @@ The application integrates Google Gemini AI (`@google/generative-ai`) for entity
 ## Key Development Commands
 
 ```bash
-# Spin up local Redis cache using Docker
-docker-compose up -d
+# Start shared local Redis (/home/lenny/Dev/db/redis on 127.0.0.1:6379, db0)
+pnpm redis:start
 
-# Start Express API (port 3000) and Next.js dev server (port 3001) concurrently
+# Start Next.js dev server (port 3001); also starts Redis if needed
 pnpm dev
 
 # Run Gemini CLI analysis on a saved key

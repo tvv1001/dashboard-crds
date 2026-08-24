@@ -1256,12 +1256,69 @@ function RecordInfoView({
 	
 	const brokersConnected = (combinedBundle?.brokersConnected as string[]) || [];
 	const brokersPrevious = (combinedBundle?.brokersPrevious as string[]) || [];
-	
-	const employeeConnections = {
+
+	const seedFromBrokers = (connected: string[], previous: string[]) => ({
+		current: connected.map((crd) => ({ crd, name: `CRD ${crd}` })),
+		previous: previous.map((crd) => ({ crd, name: `CRD ${crd}` })),
+	});
+
+	const [employeeConnections, setEmployeeConnections] = useState<{ loading: boolean; current: any[]; previous: any[] }>({
 		loading: false,
-		current: brokersConnected.map(crd => ({ crd, name: `CRD ${crd}` })),
-		previous: brokersPrevious.map(crd => ({ crd, name: `CRD ${crd}` }))
-	};
+		...seedFromBrokers(brokersConnected, brokersPrevious),
+	});
+
+	useEffect(() => {
+		const seeded = seedFromBrokers(brokersConnected, brokersPrevious);
+		if (seeded.current.length || seeded.previous.length) {
+			setEmployeeConnections((prev) =>
+				prev.current.length || prev.previous.length ? prev : { loading: prev.loading, ...seeded },
+			);
+		}
+	}, [brokersConnected.join(','), brokersPrevious.join(',')]);
+
+	useEffect(() => {
+		const isFirmRecord = parsedKey?.type === 'firm' || Boolean(combinedBundle?.basicInformation?.firmName || combinedBundle?.basicInformation?.iaFirmName || combinedBundle?.basicInformation?.firmId);
+		if (!isFirmRecord || !parsedKey?.crd) return;
+
+		let active = true;
+		const controller = new AbortController();
+		const timeout = setTimeout(() => controller.abort(), 20000);
+		// Keep any seeded broker lists visible while the named enrichment loads.
+		setEmployeeConnections((prev) => ({ ...prev, loading: true }));
+
+		fetch(`/api/finra/firm/${parsedKey.crd}/connections`, { signal: controller.signal })
+			.then((r) => r.json())
+			.then((data) => {
+				if (!active) return;
+				if (data.currentConnections || data.previousConnections) {
+					setEmployeeConnections({
+						loading: false,
+						current: (data.currentConnections || []).map((c: any) => ({
+							...c,
+							crd: c.individualId || c.crd,
+							__subtitleOverride: [c.address, c.yearsWorked ? `${c.yearsWorked} yrs` : null].filter(Boolean).join(' • ') || c.relationship,
+						})),
+						previous: (data.previousConnections || []).map((c: any) => ({
+							...c,
+							crd: c.individualId || c.crd,
+							__subtitleOverride: [c.address, c.yearsWorked ? `${c.yearsWorked} yrs` : null].filter(Boolean).join(' • ') || c.relationship,
+						})),
+					});
+				} else {
+					setEmployeeConnections((prev) => ({ ...prev, loading: false }));
+				}
+			})
+			.catch(() => {
+				if (active) setEmployeeConnections((prev) => ({ ...prev, loading: false }));
+			})
+			.finally(() => clearTimeout(timeout));
+
+		return () => {
+			active = false;
+			clearTimeout(timeout);
+			controller.abort();
+		};
+	}, [parsedKey?.crd, parsedKey?.type, combinedBundle?.basicInformation]);
 
 	// Only treat as orphan when there is no live FINRA/SEC source payload.
 	// Some records appear both as firm owner refs and as full BrokerCheck people;
@@ -1649,6 +1706,32 @@ function RecordInfoView({
 						onSelectKey={onSelectKey}
 						fallbackType={linkedFallbackType}
 					/>
+					{isFirmRecord && employeeConnections ? (
+						<>
+							{employeeConnections.loading && !(employeeConnections.current.length || employeeConnections.previous.length) ? (
+								<div className='record-detail-empty' style={{ marginTop: '1rem', color: '#888', fontStyle: 'italic' }}>
+									Loading connections...
+								</div>
+							) : null}
+							{employeeConnections.current.length > 0 || employeeConnections.previous.length > 0 ? (
+								<>
+									<DetailList
+										title={`Current connections (${employeeConnections.current.length})`}
+										items={employeeConnections.current}
+										onSelectKey={onSelectKey}
+										fallbackType='individual'
+									/>
+									<DetailList
+										title={`Previous connections (${employeeConnections.previous.length})`}
+										items={employeeConnections.previous}
+										onSelectKey={onSelectKey}
+										fallbackType='individual'
+										muted
+									/>
+								</>
+							) : null}
+						</>
+					) : null}
 					<DisclosureDetailCards
 						title={`Disclosure details (${combinedDisclosures.length})`}
 						items={combinedDisclosures}
@@ -1706,29 +1789,6 @@ function RecordInfoView({
 							/>
 						</>
 					:	null}
-					{isFirmRecord && employeeConnections ? (
-						employeeConnections.loading ? (
-							<div className='record-detail-empty' style={{ marginTop: '1rem', color: '#888', fontStyle: 'italic' }}>
-								Loading connections...
-							</div>
-						) : (employeeConnections.current.length > 0 || employeeConnections.previous.length > 0) ? (
-							<>
-								<DetailList
-									title={`Current connections (${employeeConnections.current.length})`}
-									items={employeeConnections.current}
-									onSelectKey={onSelectKey}
-									fallbackType='individual'
-								/>
-								<DetailList
-									title={`Previous connections (${employeeConnections.previous.length})`}
-									items={employeeConnections.previous}
-									onSelectKey={onSelectKey}
-									fallbackType='individual'
-									muted
-								/>
-							</>
-						) : null
-					) : null}
 				</div>
 			</div>
 		);
@@ -2074,8 +2134,34 @@ function RecordInfoView({
 				onSelectKey={onSelectKey}
 				fallbackType={linkedFallbackType}
 			/>
-			{/* Generic connection buckets only when employment arrays weren't present (firm/orphan shapes). */}
-			{(isFirmRecord || (!currentEmploymentRows.length && !previousEmploymentRows.length)) && (
+			{isFirmRecord && employeeConnections ? (
+				<>
+					{employeeConnections.loading && !(employeeConnections.current.length || employeeConnections.previous.length) ? (
+						<div className='record-detail-empty' style={{ marginTop: '1rem', color: '#888', fontStyle: 'italic' }}>
+							Loading connections...
+						</div>
+					) : null}
+					{employeeConnections.current.length > 0 || employeeConnections.previous.length > 0 ? (
+						<>
+							<DetailList
+								title={`Current connections (${employeeConnections.current.length})`}
+								items={employeeConnections.current}
+								onSelectKey={onSelectKey}
+								fallbackType='individual'
+							/>
+							<DetailList
+								title={`Previous connections (${employeeConnections.previous.length})`}
+								items={employeeConnections.previous}
+								onSelectKey={onSelectKey}
+								fallbackType='individual'
+								muted
+							/>
+						</>
+					) : null}
+				</>
+			) : null}
+			{/* Generic connection buckets only when employment arrays weren't present (non-firm / orphan shapes). */}
+			{!isFirmRecord && !currentEmploymentRows.length && !previousEmploymentRows.length ? (
 				<>
 					<DetailList
 						title={`Current connections (${fallbackConnectionBuckets.current.length})`}
@@ -2091,7 +2177,7 @@ function RecordInfoView({
 						muted
 					/>
 				</>
-			)}
+			) : null}
 			{!isFirmRecord && registeredStateTagsSingle.length ?
 				<TagListSection
 					title={`Registered States (${registeredStateTagsSingle.length})`}
@@ -2102,29 +2188,6 @@ function RecordInfoView({
 				title='Additional details'
 				body={body}
 			/>
-			{isFirmRecord && employeeConnections ? (
-				employeeConnections.loading ? (
-					<div className='record-detail-empty' style={{ marginTop: '1rem', color: '#888', fontStyle: 'italic' }}>
-						Loading connections...
-					</div>
-				) : (employeeConnections.current.length > 0 || employeeConnections.previous.length > 0) ? (
-					<>
-						<DetailList
-							title={`Current connections (${employeeConnections.current.length})`}
-							items={employeeConnections.current}
-							onSelectKey={onSelectKey}
-							fallbackType='individual'
-						/>
-						<DetailList
-							title={`Previous connections (${employeeConnections.previous.length})`}
-							items={employeeConnections.previous}
-							onSelectKey={onSelectKey}
-							fallbackType='individual'
-							muted
-						/>
-					</>
-				) : null
-			) : null}
 		</div>
 	);
 }

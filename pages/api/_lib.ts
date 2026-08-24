@@ -1532,24 +1532,36 @@ export async function loadCombinedSavedPayloadBundle(key: string): Promise<Combi
 
 	if (type === 'firm') {
 		try {
-			const client = await getRedisClient();
-			if (client) {
-				const finraConn = await client.get(`finra:firm:${crd}_brokers:connected`);
-				const secConn = await client.get(`sec:firm:${crd}_brokers:connected`);
-				const finraPrev = await client.get(`finra:firm:${crd}_brokers:previous`);
-				const secPrev = await client.get(`sec:firm:${crd}_brokers:previous`);
-				
-				const connectedSet = new Set<string>();
-				const prevSet = new Set<string>();
-				
-				if (finraConn) JSON.parse(finraConn).forEach((id: string) => connectedSet.add(String(id)));
-				if (secConn) JSON.parse(secConn).forEach((id: string) => connectedSet.add(String(id)));
-				if (finraPrev) JSON.parse(finraPrev).forEach((id: string) => prevSet.add(String(id)));
-				if (secPrev) JSON.parse(secPrev).forEach((id: string) => prevSet.add(String(id)));
-				
-				bundle.brokersConnected = Array.from(connectedSet);
-				bundle.brokersPrevious = Array.from(prevSet);
-			}
+			const [finraConn, secConn, finraPrev, secPrev] = await Promise.all([
+				getCacheValue(`finra:firm:${crd}_brokers:connected`),
+				getCacheValue(`sec:firm:${crd}_brokers:connected`),
+				getCacheValue(`finra:firm:${crd}_brokers:previous`),
+				getCacheValue(`sec:firm:${crd}_brokers:previous`),
+			]);
+
+			const connectedSet = new Set<string>();
+			const prevSet = new Set<string>();
+			const collect = (raw: string | null, into: Set<string>) => {
+				if (!raw) return;
+				try {
+					const parsed = JSON.parse(raw);
+					if (!Array.isArray(parsed)) return;
+					for (const id of parsed) {
+						const text = String(id ?? '').trim();
+						if (/^\d{1,10}$/.test(text)) into.add(text);
+					}
+				} catch {
+					// ignore malformed broker lists
+				}
+			};
+			collect(finraConn, connectedSet);
+			collect(secConn, connectedSet);
+			collect(finraPrev, prevSet);
+			collect(secPrev, prevSet);
+			for (const id of connectedSet) prevSet.delete(id);
+
+			bundle.brokersConnected = Array.from(connectedSet);
+			bundle.brokersPrevious = Array.from(prevSet);
 		} catch (e) {
 			// skip on error
 		}

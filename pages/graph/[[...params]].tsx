@@ -61,6 +61,8 @@ type GraphNode = {
 	state?: string;
 	/** Inactive/terminated on FINRA+SEC (or sole source) — gray node styling. */
 	inactive?: boolean;
+	/** Pre-computed orphan context so frontend doesn't need API search fallback. */
+	orphanContext?: { parentType: string; parentCrd: string; name: string };
 };
 
 /** True when record is inactive/terminated and not active on any source. */
@@ -507,6 +509,7 @@ function getNameFromItem(item: Record<string, unknown>): string | undefined {
 		normalizeName(item.name) ||
 		normalizeName(item.displayName) ||
 		normalizeName(item.fullName) ||
+			normalizeName(item.personName) ||
 		normalizeName(item.individualName) ||
 		normalizeName(item.firstName) ||
 		normalizeName(item.lastName)
@@ -857,8 +860,13 @@ export default function NodeGraphPage() {
 	// deep-links like /graph/individual/<orphanCrd> don't show a false "not found"
 	// error under search.
 	const fetchAndApplyKey = useCallback(
-		(key: string, requestKey: string, options?: { force?: boolean; asHub?: boolean }) => {
-			return fetch(`/api/key?name=${encodeURIComponent(key)}${options?.force ? `&t=${Date.now()}` : ''}`)
+		(key: string, requestKey: string, options?: { force?: boolean; asHub?: boolean; orphanContext?: { parentType: string; parentCrd: string; name: string } }) => {
+			let url = `/api/key?name=${encodeURIComponent(key)}`;
+			if (options?.force) url += `&t=${Date.now()}`;
+			if (options?.orphanContext) {
+				url += `&orphanParentType=${encodeURIComponent(options.orphanContext.parentType)}&orphanParentCrd=${encodeURIComponent(options.orphanContext.parentCrd)}&orphanName=${encodeURIComponent(options.orphanContext.name)}`;
+			}
+			return fetch(url)
 				.then(async (r) => {
 					const data = await r.json();
 					if (!r.ok) throw new Error(String(data?.error || `HTTP ${r.status}`));
@@ -1031,7 +1039,7 @@ export default function NodeGraphPage() {
 				let lastError = '';
 				for (const key of keysToTry) {
 					try {
-						const result = await fetchAndApplyKey(key, key, { asHub: false });
+						const result = await fetchAndApplyKey(key, key, { asHub: false, orphanContext: node.orphanContext });
 						if (panelRequestRef.current !== requestId) return;
 						if (result.found && result.detailValue) {
 							setPanelSnapshot({
@@ -1260,6 +1268,7 @@ export default function NodeGraphPage() {
 							entityType: 'individual',
 							subLabel: isCurrent ? 'Current connection' : 'Previous connection',
 							loadKey: `finra:individual:${personCrd}`,
+							orphanContext: { parentType: 'firm', parentCrd: crd, name },
 						});
 					}
 					links.push({
@@ -2596,29 +2605,24 @@ export default function NodeGraphPage() {
 												r={Math.max(4, radius * 0.28)}
 											/>
 										)}
-										{showLabel && (
-											<text
-												x={0}
-												y={
-													isTargetLargeBottom ?
-														radius +
-														(labelMode === 'large' ? 12
-														: labelMode === 'small' ? 6
-														: 8) *
-															3
-													:	-(
-															radius +
-															(labelMode === 'large' ? 12
-															: labelMode === 'small' ? 6
-															: 8)
-														)
-												}
-												className={`graph-label${labelSizeClass}${isActive ? ' active' : ''}${labelMode !== 'auto' ? ' pinned' : ''}${isInactive ? ' inactive' : ''}`}
-												onClick={(event) => handleLabelClick(event, node.id)}
-												onDoubleClick={(event) => handleLabelDoubleClick(event, node.id)}>
-												{node.label}
-											</text>
-										)}
+										{showLabel && (() => {
+											let displayLabel = node.label || '';
+											// Avoid showing the CRD inside the label text if it was appended
+											displayLabel = displayLabel.replace(/(?:\s*(?:-|CRD)?\s*\d{3,10}|\s*\(\d{3,10}\))$/i, '').trim();
+											if (displayLabel.toLowerCase().startsWith('crd ')) displayLabel = displayLabel.slice(4).trim();
+											if (!displayLabel) displayLabel = node.label; // Fallback if it was ONLY a CRD
+
+											return (
+												<text
+													x={0}
+													y={radius + (labelMode === 'large' ? 14 : labelMode === 'small' ? 8 : 10) * 1.5}
+													className={`graph-label${labelSizeClass}${isActive ? ' active' : ''}${labelMode !== 'auto' ? ' pinned' : ''}${isInactive ? ' inactive' : ''}`}
+													onClick={(event) => handleLabelClick(event, node.id)}
+													onDoubleClick={(event) => handleLabelDoubleClick(event, node.id)}>
+													{displayLabel}
+												</text>
+											);
+										})()}
 									</g>
 								);
 							})}

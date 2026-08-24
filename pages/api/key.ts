@@ -176,6 +176,21 @@ export default async function handler(req: NextApiRequest, res: NextApiResponse)
 			// Orphan only as last resort: no Redis/live/national payload at all,
 			// and the CRD only exists as a scraped owner reference on a firm.
 			if (parsed.type === 'individual') {
+				if (req.query.orphanParentCrd && req.query.orphanParentType) {
+					const orphanBundle = buildOrphanBundle(parsed.type, parsed.crd, key, {
+						parentType: String(req.query.orphanParentType) as any,
+						parentCrd: String(req.query.orphanParentCrd),
+						name: String(req.query.orphanName || parsed.crd),
+					} as EmploymentReference);
+					return res.json({
+						rawPayload: JSON.stringify(orphanBundle, null, 2),
+						requestedKey: key,
+						resolvedKey: key,
+						fallbackUsed: true,
+						bundle: orphanBundle,
+					});
+				}
+
 				const ownerReference = await findOwnerReference(parsed.crd).catch(() => null);
 				if (ownerReference) {
 					const orphanBundle = buildOrphanBundle(parsed.type, parsed.crd, key, ownerReference);

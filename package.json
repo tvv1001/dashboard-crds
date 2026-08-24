@@ -4,7 +4,9 @@
 	"main": "src/server.mjs",
 	"scripts": {
 		"start": "node src/server.mjs",
-		"dev": "bash /home/lenny/Dev/db/redis/start-redis.sh && pnpm run kill-ports && next dev -p 3001",
+		"redis:start": "bash /home/lenny/Dev/db/redis/start-redis.sh",
+		"redis:commander": "npx --yes redis-commander --redis-host 127.0.0.1 --redis-port 6379 --redis-db 0 --port 8081",
+		"dev": "pnpm run redis:start && pnpm run kill-ports && next dev -p 3001",
 		"kill-ports": "fuser -k 3000/tcp 3001/tcp 2>/dev/null || true; sleep 0.2",
 		"build": "next build",
 		"start:web": "next start",
