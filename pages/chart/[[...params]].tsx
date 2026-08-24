@@ -308,7 +308,7 @@ function normalizeEdgeType(raw: string | undefined): EdgeTypeKey {
 }
 
 /** d3-force bake is already wide; client scale opens dense firm clusters more. */
-const LAYOUT_SPREAD = 32;
+const LAYOUT_SPREAD = 44;
 
 /**
  * Hard cap on nodes kept live on the WebGL canvas at once. Without this, every
@@ -1175,11 +1175,11 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	// equally on their orbits without clumping.
 	const arcPad =
 		childSize *
-		(childCount > 160 ? 8.5
-		: childCount > 80 ? 7.2
-		: childCount > 24 ? 6.0
-		: 4.8);
-	const minClear = hubSize + childSize + Math.max(100, childSize * 2.2);
+		(childCount > 160 ? 14.0
+		: childCount > 80 ? 11.8
+		: childCount > 24 ? 9.8
+		: 7.8);
+	const minClear = hubSize + childSize + Math.max(180, childSize * 3.8);
 
 	let ringCount = opts.ringCount ?? 1;
 	if (opts.preferSingleRing && childCount <= 22) {
@@ -1203,7 +1203,7 @@ function orbitRadiusForHub(opts: { hubType: string; childCount: number; ringInde
 	const fromArc = (perRing * arcPad) / (Math.PI * 2);
 	const base = Math.max(minClear, fromArc, 360);
 	const ring = Math.max(0, opts.ringIndex ?? 0);
-	const ringStep = Math.max(childSize * 5.2 + 90, 170 + Math.min(220, Math.sqrt(childCount) * 18));
+	const ringStep = Math.max(childSize * 8.8 + 170, 290 + Math.min(420, Math.sqrt(childCount) * 34));
 
 	// Revert to original dense layout from finra-data-chart-next-02
 	return { radius: base + ring * ringStep, ringCount };
@@ -1520,12 +1520,28 @@ export default function GlobalGraphPage() {
 		}
 		labelHitBoxesRef.current = [];
 		if (sigmaRef.current) {
+			// Grab the WebGL canvases before kill() tears them out of the DOM so we
+			// can force-release their GPU contexts. sigma.kill() frees its own JS
+			// state but never calls loseContext(), so the GPU-side buffers/textures
+			// only get reclaimed whenever the browser's GC gets around to it. On a
+			// heavy map like this, a handful of quick refreshes/navigations can
+			// pile up faster than that GC runs, which is what makes the tab feel
+			// sluggish/frozen after repeatedly opening a node then reloading.
+			const canvases = containerRef.current ? Array.from(containerRef.current.querySelectorAll('canvas')) : [];
 			try {
 				sigmaRef.current.kill();
 			} catch {
 				// ignore
 			}
 			sigmaRef.current = null;
+			for (const canvas of canvases) {
+				try {
+					const gl = (canvas.getContext('webgl2') || canvas.getContext('webgl')) as WebGLRenderingContext | null;
+					gl?.getExtension('WEBGL_lose_context')?.loseContext();
+				} catch {
+					// ignore
+				}
+			}
 		}
 		graphRef.current = null;
 		// Keep focusedIdRef/pinnedIdRef so type-filter remounts can restore pin + camera.
@@ -4351,7 +4367,10 @@ export default function GlobalGraphPage() {
 		setSearchBanner(null);
 		setQuery('');
 		setErrorMessage(null);
-	}, [clearCanvas, clearSharedCache]);
+		// Clear the deep-link URL too, otherwise a refresh re-loads the node that
+		// was open before the reset (the route itself drives the initial load).
+		syncGlobalRoute(null, null);
+	}, [clearCanvas, clearSharedCache, syncGlobalRoute]);
 
 	const handleSearchSubmit = useCallback(
 		async (e?: { preventDefault?: () => void }) => {
@@ -4430,6 +4449,11 @@ export default function GlobalGraphPage() {
 					drawerOpen={drawerOpen}
 					setDrawerOpen={setDrawerOpen}
 					errorMessage={(errorMessage || status === 'error') && status !== 'loading' ? errorMessage || 'Failed to load global layout' : null}
+					searchQuery={query}
+					onSearchQueryChange={setQuery}
+					onSearchSubmit={handleSearchSubmit}
+					searchDisabled={false}
+					searchLoading={searchLoading}
 					searchBanner={searchBanner}
 					setSearchBanner={setSearchBanner as any}
 				/>
